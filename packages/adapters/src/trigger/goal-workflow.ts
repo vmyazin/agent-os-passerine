@@ -290,6 +290,13 @@ function replayProgress(
       if (record.status !== 'pending')
         throw new Error('goal child checkpoint status is invalid');
       const payload = childProgressPayloadSchema.parse(record.payload);
+      if (
+        record.id !== childProgressId(runId, record.step) ||
+        payload.childRunId !== deterministicGoalChildRunId(runId, record.step)
+      )
+        throw new Error(
+          'goal child checkpoint deterministic child binding mismatch',
+        );
       if (children.has(record.step))
         throw new Error('duplicate goal child checkpoint');
       children.set(record.step, payload.childRunId);
@@ -298,6 +305,8 @@ function replayProgress(
     const definitionId = criterionByRecordId.get(record.criterionId);
     if (definitionId === undefined)
       throw new Error('goal progress references an unknown criterion');
+    if (record.id !== criterionProgressId(runId, record.step, definitionId))
+      throw new Error('goal criterion progress ID binding mismatch');
     const payload = criterionProgressPayloadSchema.parse(record.payload);
     if (payload.result.criterionId !== definitionId)
       throw new Error('goal progress criterion binding mismatch');
@@ -365,6 +374,7 @@ function genericTerminalResult(run: WorkflowRun): GoalWorkflowResult {
 
 async function workflowResult(
   dependencies: DurableGoalWorkflowDependencies,
+  parent: Pick<WorkflowRun, 'id' | 'projectId'>,
   state: GoalWorkflowState,
   completedSteps: number,
   children: ReadonlyMap<number, string>,
@@ -376,6 +386,14 @@ async function workflowResult(
         const child = await dependencies.repository.getRun(
           persistenceId('run', runId),
         );
+        if (
+          runId !== deterministicGoalChildRunId(parent.id, step) ||
+          (child !== undefined &&
+            (child.id !== runId ||
+              child.projectId !== parent.projectId ||
+              child.pipeline !== 'feature'))
+        )
+          throw new Error('goal child run binding mismatch');
         const output =
           child?.output !== null &&
           typeof child?.output === 'object' &&
@@ -428,11 +446,21 @@ async function workflowResult(
 
 async function cancelActiveChild(
   dependencies: DurableGoalWorkflowDependencies,
+  parent: Pick<WorkflowRun, 'id' | 'projectId'>,
+  step: number,
   childRunId: string,
 ): Promise<void> {
   const child = await dependencies.repository.getRun(
     persistenceId('run', childRunId),
   );
+  if (
+    childRunId !== deterministicGoalChildRunId(parent.id, step) ||
+    (child !== undefined &&
+      (child.id !== childRunId ||
+        child.projectId !== parent.projectId ||
+        child.pipeline !== 'feature'))
+  )
+    throw new Error('goal child run binding mismatch');
   if (
     child === undefined ||
     ['succeeded', 'failed', 'cancelled'].includes(child.status)
@@ -446,26 +474,39 @@ async function cancelActiveChild(
   );
 }
 
+async function cancelRecordedChildren(
+  dependencies: DurableGoalWorkflowDependencies,
+  parent: Pick<WorkflowRun, 'id' | 'projectId'>,
+  children: ReadonlyMap<number, string>,
+): Promise<void> {
+  await Promise.all(
+    [...children.entries()].map(([step, childRunId]) =>
+      cancelActiveChild(dependencies, parent, step, childRunId),
+    ),
+  );
+}
+
 async function finishParent(
   dependencies: DurableGoalWorkflowDependencies,
-  runId: ReturnType<typeof persistenceId<'run'>>,
+  parent: Pick<WorkflowRun, 'id' | 'projectId'>,
   state: GoalWorkflowState,
   completedSteps: number,
   children: ReadonlyMap<number, string>,
 ): Promise<GoalWorkflowResult> {
   const result = await workflowResult(
     dependencies,
+    parent,
     state,
     completedSteps,
     children,
   );
-  const current = await dependencies.repository.getRun(runId);
+  const current = await dependencies.repository.getRun(parent.id);
   if (current === undefined)
     throw new Error('authoritative goal run is missing');
   if (['succeeded', 'failed', 'cancelled'].includes(current.status))
     return genericTerminalResult(current);
   const transitioned = await dependencies.repository.transitionRun(
-    runId,
+    parent.id,
     ['running'],
     {
       status: result.status,
@@ -478,7 +519,7 @@ async function finishParent(
     current.stateVersion,
   );
   if (transitioned !== undefined) return result;
-  const concurrent = await dependencies.repository.getRun(runId);
+  const concurrent = await dependencies.repository.getRun(parent.id);
   if (concurrent === undefined)
     throw new Error('authoritative goal run is missing');
   if (['succeeded', 'failed', 'cancelled'].includes(concurrent.status))
@@ -540,7 +581,7 @@ export function createDurableGoalWorkflow(
       let parent = await dependencies.repository.getRun(runId);
       if (parent === undefined || parent.pipeline !== 'goal')
         throw new Error('authoritative goal run does not exist');
-      if (['succeeded', 'failed', 'cancelled'].includes(parent.status))
+      if (['succeeded', 'failed'].includes(parent.status))
         return genericTerminalResult(parent);
       const stored = goalRunInputSchema.parse(parent.input);
       const snapshots = await dependencies.repository.listConfigSnapshots(
@@ -584,18 +625,21 @@ export function createDurableGoalWorkflow(
             throw new Error('authoritative goal run is missing');
           })();
       }
-      if (parent.status === 'cancelled')
+      if (parent.status === 'cancelled') {
+        await cancelRecordedChildren(dependencies, parent, children);
         return workflowResult(
           dependencies,
+          parent,
           { ...state, status: 'cancelled' },
           completedSteps,
           children,
         );
+      }
       if (parent.status !== 'running') return genericTerminalResult(parent);
       if (state.status !== 'running')
         return finishParent(
           dependencies,
-          runId,
+          parent,
           state,
           completedSteps,
           children,
@@ -603,13 +647,16 @@ export function createDurableGoalWorkflow(
 
       while (state.status === 'running') {
         const authoritative = await dependencies.repository.getRun(runId);
-        if (authoritative?.status === 'cancelled')
+        if (authoritative?.status === 'cancelled') {
+          await cancelRecordedChildren(dependencies, parent, children);
           return workflowResult(
             dependencies,
+            parent,
             { ...state, status: 'cancelled' },
             completedSteps,
             children,
           );
+        }
         if (authoritative?.status !== 'running')
           throw new Error('goal parent is not runnable');
         const step = state.currentStep;
@@ -651,9 +698,10 @@ export function createDurableGoalWorkflow(
           throw new Error('goal step returned a mismatched child run');
         const afterChild = await dependencies.repository.getRun(runId);
         if (afterChild?.status === 'cancelled') {
-          await cancelActiveChild(dependencies, childRunId);
+          await cancelRecordedChildren(dependencies, parent, children);
           return workflowResult(
             dependencies,
+            parent,
             { ...state, status: 'cancelled' },
             completedSteps,
             children,
@@ -705,7 +753,13 @@ export function createDurableGoalWorkflow(
         });
         completedSteps = step;
       }
-      return finishParent(dependencies, runId, state, completedSteps, children);
+      return finishParent(
+        dependencies,
+        parent,
+        state,
+        completedSteps,
+        children,
+      );
     },
   });
 }

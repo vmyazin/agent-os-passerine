@@ -20,6 +20,7 @@ import type {
   GoalStepResult,
   GoalStepRunner,
 } from './types.js';
+import { GoalWorkflowTaskTransientError } from './types.js';
 
 const parentInputSchema = z
   .object({
@@ -170,16 +171,29 @@ async function ensureChildSnapshot(
     { limit: 2 },
   );
   if (snapshots.length === 0) {
-    await options.repository.createConfigSnapshot({
-      ...request.snapshot,
-      id: persistenceId(
-        'configSnapshot',
-        `goal-child:${request.parentRunId}:${String(request.step)}:snapshot`,
-      ),
-      runId: persistenceId('run', request.childRunId),
-      createdAt: options.clock(),
-    });
-    return;
+    try {
+      await options.repository.createConfigSnapshot({
+        ...request.snapshot,
+        id: persistenceId(
+          'configSnapshot',
+          `goal-child:${request.parentRunId}:${String(request.step)}:snapshot`,
+        ),
+        runId: persistenceId('run', request.childRunId),
+        createdAt: options.clock(),
+      });
+      return;
+    } catch {
+      const concurrent = await options.repository.listConfigSnapshots(
+        persistenceId('run', request.childRunId),
+        { limit: 2 },
+      );
+      if (
+        concurrent.length === 1 &&
+        snapshotMatches(concurrent[0]!, request.snapshot, request.childRunId)
+      )
+        return;
+      throw new Error('goal child config snapshot creation conflicted');
+    }
   }
   if (
     snapshots.length !== 1 ||
@@ -349,15 +363,52 @@ export function createFeatureGoalStepRunner(
         childRun,
         runFingerprint(childRun),
       );
+      if (
+        child.id !== request.childRunId ||
+        child.projectId !== request.projectId ||
+        child.pipeline !== 'feature'
+      )
+        throw new Error('goal child run binding mismatch');
       await ensureChildSnapshot(options, request);
       if (terminalStatuses.has(child.status))
         return terminalStepResult(options, request, child);
-      await copySourceBundle(options, request);
-
-      await options.featureTask.run(
-        { version: 'feature-task-payload-v1', runId: request.childRunId },
-        options.execution,
-      );
+      const claimed =
+        child.status === 'pending'
+          ? await options.repository.transitionRun(
+              child.id,
+              ['pending'],
+              { status: 'running', updatedAt: options.clock() },
+              child.stateVersion,
+            )
+          : undefined;
+      if (claimed === undefined) {
+        const concurrent = await options.repository.getRun(child.id);
+        if (concurrent !== undefined && terminalStatuses.has(concurrent.status))
+          return terminalStepResult(options, request, concurrent);
+        throw new GoalWorkflowTaskTransientError(
+          'goal feature child execution is already in progress',
+        );
+      }
+      try {
+        await copySourceBundle(options, request);
+        await options.featureTask.run(
+          { version: 'feature-task-payload-v1', runId: request.childRunId },
+          options.execution,
+        );
+      } catch (error) {
+        const active = await options.repository.getRun(child.id);
+        if (
+          active !== undefined &&
+          ['running', 'waiting'].includes(active.status)
+        )
+          await options.repository.transitionRun(
+            active.id,
+            ['running', 'waiting'],
+            { status: 'pending', updatedAt: options.clock() },
+            active.stateVersion,
+          );
+        throw error;
+      }
       const completed = await options.repository.getRun(
         persistenceId('run', request.childRunId),
       );

@@ -386,4 +386,81 @@ describe('durable goal workflow', () => {
       seeded.repository.listGoalProgress(seeded.runId),
     ).resolves.toHaveLength(1);
   });
+
+  it('cancels a checkpointed active child when a cancelled parent is replayed', async () => {
+    const seeded = await seedGoal();
+    const childRunId = deterministicGoalChildRunId(seeded.runId, 1);
+    const parent = await seeded.repository.getRun(seeded.runId);
+    if (parent?.configRevisionId === undefined)
+      throw new Error('goal test parent config revision missing');
+    await seeded.repository.createRun({
+      id: childRunId,
+      projectId: seeded.projectId,
+      configRevisionId: parent.configRevisionId,
+      pipeline: 'feature',
+      status: 'running',
+      input: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    await seeded.repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${seeded.runId}:step:1:child`),
+      runId: seeded.runId,
+      step: 1,
+      status: 'pending',
+      detail: 'Feature child checkpointed',
+      payload: { version: 'goal-child-attempt-v1', childRunId },
+      recordedAt: now,
+    });
+    await seeded.repository.transitionRun(
+      seeded.runId,
+      ['pending'],
+      { status: 'cancelled', updatedAt: now },
+      parent?.stateVersion,
+    );
+    const runner: GoalStepRunner = { run: vi.fn() };
+
+    await expect(
+      createDurableGoalWorkflow({
+        repository: seeded.repository,
+        stepRunner: runner,
+        verifierRegistry: createVerifierRegistry(),
+        clock: () => now,
+      }).run({ runId: seeded.runId }),
+    ).resolves.toMatchObject({
+      status: 'cancelled',
+      children: [{ step: 1, runId: childRunId, status: 'cancelled' }],
+    });
+    await expect(seeded.repository.getRun(childRunId)).resolves.toMatchObject({
+      status: 'cancelled',
+    });
+    expect(runner.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects a replayed child checkpoint outside its deterministic binding', async () => {
+    const seeded = await seedGoal();
+    const runner: GoalStepRunner = { run: vi.fn() };
+    await seeded.repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${seeded.runId}:step:1:child`),
+      runId: seeded.runId,
+      step: 1,
+      status: 'pending',
+      detail: 'Feature child checkpointed',
+      payload: {
+        version: 'goal-child-attempt-v1',
+        childRunId: persistenceId('run', 'unrelated-run'),
+      },
+      recordedAt: now,
+    });
+
+    await expect(
+      createDurableGoalWorkflow({
+        repository: seeded.repository,
+        stepRunner: runner,
+        verifierRegistry: createVerifierRegistry(),
+        clock: () => now,
+      }).run({ runId: seeded.runId }),
+    ).rejects.toThrow('deterministic child binding');
+    expect(runner.run).not.toHaveBeenCalled();
+  });
 });

@@ -38,6 +38,14 @@ export class FeatureWorkflowTaskTransientError extends Error {
   }
 }
 
+/** Explicitly opts a goal-task delivery into Trigger's bounded retry. */
+export class GoalWorkflowTaskTransientError extends Error {
+  constructor(message = 'transient goal workflow task failure') {
+    super(message);
+    this.name = 'GoalWorkflowTaskTransientError';
+  }
+}
+
 export type FeatureRole =
   'specification' | 'planning' | 'implementation' | 'review' | 'verification';
 

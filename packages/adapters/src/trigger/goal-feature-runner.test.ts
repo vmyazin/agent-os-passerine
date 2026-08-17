@@ -12,6 +12,7 @@ import { createInMemoryArtifactStorage } from '../artifacts/in-memory.js';
 import { InMemoryDomainRepository } from '../persistence/in-memory.js';
 import { createFeatureGoalStepRunner } from './goal-feature-runner.js';
 import { deterministicGoalChildRunId } from './goal-workflow.js';
+import { GoalWorkflowTaskTransientError } from './types.js';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const criterion: CommandCriterion = {
@@ -249,5 +250,69 @@ describe('feature goal step runner', () => {
       }),
     ).rejects.toThrow('criterion binding');
     expect(featureTask.run).not.toHaveBeenCalled();
+  });
+
+  it('allows only one concurrent delivery to execute a feature child', async () => {
+    const seeded = await fixture();
+    let releaseFeatureTask!: () => void;
+    let markFeatureTaskStarted!: () => void;
+    const featureTaskStarted = new Promise<void>((resolve) => {
+      markFeatureTaskStarted = resolve;
+    });
+    const featureTaskRelease = new Promise<void>((resolve) => {
+      releaseFeatureTask = resolve;
+    });
+    let invocation = 0;
+    const featureTask = {
+      run: vi.fn(async (payload: { readonly runId: string }) => {
+        invocation += 1;
+        markFeatureTaskStarted();
+        await featureTaskRelease;
+        if (invocation === 1) {
+          const childId = persistenceId('run', payload.runId);
+          await seeded.artifacts.put({
+            scope: {
+              projectId: seeded.projectId,
+              runId: childId,
+              stepId: 'verification',
+            },
+            artifactId: 'trusted-test-report',
+            version: 1,
+            bytes: new TextEncoder().encode('{"signed":true}'),
+            mediaType: 'application/json',
+            retentionClass: 'working',
+          });
+          await seeded.repository.updateRun(childId, {
+            status: 'succeeded',
+            output: { status: 'succeeded' },
+            updatedAt: now,
+          });
+        }
+        return { status: 'succeeded' as const };
+      }),
+    };
+    const runner = createFeatureGoalStepRunner({
+      repository: seeded.repository,
+      artifacts: seeded.artifacts,
+      featureTask,
+      clock: () => now,
+    });
+    const request = {
+      parentRunId: seeded.parentRunId,
+      projectId: seeded.projectId,
+      childRunId: deterministicGoalChildRunId(seeded.parentRunId, 1),
+      step: 1,
+      criteria: [criterion],
+      snapshot: seeded.snapshot,
+      priorFailures: [],
+    };
+
+    const first = runner.run(request);
+    await featureTaskStarted;
+    const second = runner.run(request);
+    await expect(second).rejects.toBeInstanceOf(GoalWorkflowTaskTransientError);
+    releaseFeatureTask();
+    await expect(first).resolves.toMatchObject({ status: 'succeeded' });
+    expect(featureTask.run).toHaveBeenCalledTimes(1);
   });
 });
