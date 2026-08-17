@@ -406,10 +406,12 @@ describe('durable Trigger outbox cancellation', () => {
       }),
     ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
 
-    await outbox.requestOrphanReconciliation({
-      idempotencyKey: 'orphan:run-1',
-      runId: 'run-1',
-    });
+    await expect(
+      outbox.requestOrphanReconciliation({
+        idempotencyKey: 'orphan:run-1',
+        runId: 'run-1',
+      }),
+    ).resolves.toBeUndefined();
 
     expect(runtime.cancel).toHaveBeenCalledOnce();
     expect(runtime.cleanup).toHaveBeenCalledOnce();
@@ -429,6 +431,88 @@ describe('durable Trigger outbox cancellation', () => {
         outputTokens: 7,
       }),
     ]);
+    await expect(
+      checkpoints.listExpiredReservations('run-1', now),
+    ).resolves.toEqual([]);
+  });
+
+  it('requires two durable absence observations before conservatively releasing an ambiguous start', async () => {
+    const repository = new InMemoryDomainRepository();
+    const at = isoTimestamp('2026-08-17T11:00:00.000Z');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Absent start',
+      createdAt: at,
+      updatedAt: at,
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'run-1'),
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'failed',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const runtime = {
+      reconcileStart: vi.fn(async () => undefined),
+      cleanup: vi.fn(async () => undefined),
+      cleanupAccess: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, outbox } = collaborators(runtime, repository);
+    const effect = await checkpoints.claimEffect(
+      {
+        key: 'runtime:run-1:implementation:1',
+        runId: 'run-1',
+        kind: 'runtime-session',
+        inputFingerprint: 'd'.repeat(64),
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        ownerId: 'crashed-trigger-attempt',
+        now: at,
+        leaseExpiresAt: '2026-08-17T11:21:00.000Z',
+      },
+    );
+    await checkpoints.markEffectStarted(
+      {
+        key: effect.key,
+        ownerId: 'crashed-trigger-attempt',
+        leaseVersion: effect.leaseVersion,
+      },
+      at,
+    );
+    await checkpoints.admitSession({
+      reservationKey: 'reservation:runtime:run-1:implementation:1',
+      projectId: 'project-1',
+      runId: 'run-1',
+      stepKey: 'implementation',
+      estimatedMicrodollars: 700_000,
+      workflowSpentMicrodollars: 0,
+      dailySpentMicrodollars: 0,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      admissionNumerator: 80,
+      admissionDenominator: 100,
+      now: at,
+      leaseExpiresAt: '2026-08-17T11:21:00.000Z',
+    });
+    const request = {
+      idempotencyKey: 'orphan:run-1',
+      runId: 'run-1',
+    } as const;
+
+    await expect(outbox.requestOrphanReconciliation(request)).rejects.toThrow(
+      'independent reconciliation',
+    );
+    await expect(
+      checkpoints.listExpiredReservations('run-1', now),
+    ).resolves.toHaveLength(1);
+    await expect(
+      outbox.requestOrphanReconciliation(request),
+    ).resolves.toBeUndefined();
+    expect(runtime.reconcileStart).toHaveBeenCalledTimes(2);
+    expect(runtime.cleanupAccess).toHaveBeenCalledOnce();
     await expect(
       checkpoints.listExpiredReservations('run-1', now),
     ).resolves.toEqual([]);

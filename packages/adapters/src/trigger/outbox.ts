@@ -621,6 +621,30 @@ export function createDurableTriggerOutbox(
             externalRef,
             request.runId,
           );
+        } else {
+          const absenceRequest = {
+            runId: request.runId,
+            idempotencyKey: `${reconcileRequest.idempotencyKey}:absence-observed`,
+          };
+          const absence = await ownedClaim(
+            options,
+            absenceRequest,
+            'runtime-session-start-absence',
+          );
+          if (absence.effect.status !== 'succeeded') {
+            await options.checkpoints.markEffectStarted(
+              absence.lease,
+              options.clock(),
+            );
+            await options.checkpoints.completeEffect(
+              absence.lease,
+              { firstObservedAt: now, runtimeEffectKey: runtimeEffect.key },
+              options.clock(),
+            );
+            throw new Error(
+              'ambiguous runtime start absence requires independent reconciliation',
+            );
+          }
         }
         let usage = {
           inputTokens: 0,
