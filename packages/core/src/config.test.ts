@@ -34,7 +34,7 @@ budgets:
   dailyMicrodollars: 10000000
   concurrency: 2
 goals:
-  maxSteps: 20
+  maxSteps: 3
   maxRetries: 2
   timeoutMs: 3600000
 runtime:
@@ -58,6 +58,30 @@ describe('Agent OS configuration', () => {
     });
 
     expect(parsed.success).toBe(false);
+  });
+
+  it.each([1, 2, 3])('accepts goals.maxSteps of %i', (maxSteps) => {
+    expect(
+      AgentOsConfigSchema.safeParse({
+        ...loadAgentOsConfig(validYaml),
+        goals: {
+          ...loadAgentOsConfig(validYaml).goals,
+          maxSteps,
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects goals.maxSteps greater than three', () => {
+    expect(
+      AgentOsConfigSchema.safeParse({
+        ...loadAgentOsConfig(validYaml),
+        goals: {
+          ...loadAgentOsConfig(validYaml).goals,
+          maxSteps: 4,
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it('produces the same canonical hash for reordered mappings', () => {

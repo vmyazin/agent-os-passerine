@@ -130,7 +130,7 @@ budgets:
   concurrency: 2
   admissionReservePercent: 80
 goals:
-  maxSteps: 20
+  maxSteps: 3
   maxRetries: 2
   timeoutMs: 3600000
 runtime:

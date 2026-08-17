@@ -134,7 +134,7 @@ export const BudgetConfigSchema = z
 
 export const GoalLimitsSchema = z
   .object({
-    maxSteps: PositiveInteger,
+    maxSteps: PositiveInteger.max(3),
     maxRetries: NonNegativeInteger,
     timeoutMs: PositiveInteger,
   })
