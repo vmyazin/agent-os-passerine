@@ -9,6 +9,7 @@ import {
   type DomainRepository,
   type JsonValue,
   type TimestampListCursor,
+  type WorkflowRun,
   type WorkflowRunId,
 } from '@agentos/core';
 import type { WorkflowDispatchOutbox } from './control-plane-service';
@@ -125,6 +126,47 @@ async function cancelGoalChildren(
     if (transitioned !== undefined) cancelled.push(child.id);
   }
   return cancelled;
+}
+
+async function isGoalOwnedFeatureChild(
+  repository: DomainRepository,
+  run: WorkflowRun,
+): Promise<boolean> {
+  if (run.pipeline !== 'feature') return false;
+  if (!isObject(run.input)) return false;
+  const key = run.input.idempotencyKey;
+  if (typeof key !== 'string') return false;
+  const match = /^goal:(.+):step:([1-3])$/.exec(key);
+  if (match === null) return false;
+  const parentRunId = persistenceId('run', match[1]!);
+  const step = Number(match[2]);
+  if (deterministicGoalChildRunId(parentRunId, step) !== run.id) return false;
+  const parent = await repository.getRun(parentRunId);
+  if (
+    parent === undefined ||
+    parent.pipeline !== 'goal' ||
+    parent.projectId !== run.projectId
+  )
+    return false;
+  const checkpointId = persistenceId(
+    'goalProgress',
+    `goal:${parentRunId}:step:${String(step)}:child`,
+  );
+  const progress = await repository.listGoalProgress(parentRunId, {
+    limit: 100,
+  });
+  const checkpoint = progress.find(
+    (candidate) => candidate.id === checkpointId,
+  );
+  if (
+    checkpoint === undefined ||
+    checkpoint.criterionId !== undefined ||
+    checkpoint.step !== step ||
+    checkpoint.status !== 'pending' ||
+    !isObject(checkpoint.payload)
+  )
+    return false;
+  return checkpoint.payload.childRunId === run.id;
 }
 
 export async function reconcileWorkflowOutbox(
@@ -275,6 +317,14 @@ export async function reconcileWorkflowOutbox(
         (run.pipeline === 'feature' || run.pipeline === 'goal') &&
         run.status === 'pending'
       ) {
+        if (
+          run.pipeline === 'feature' &&
+          (await isGoalOwnedFeatureChild(repository, run))
+        ) {
+          after = { at: listedRun.createdAt, id: listedRun.id };
+          await cursorStore?.save(after);
+          continue;
+        }
         let snapshots = await repository.listConfigSnapshots(run.id, {
           limit: 2,
         });

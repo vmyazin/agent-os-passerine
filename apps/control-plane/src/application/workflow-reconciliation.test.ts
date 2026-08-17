@@ -241,6 +241,100 @@ describe('workflow outbox reconciliation', () => {
     expect(cancelled).toEqual(new Set([goalRunId, childRunId]));
   });
 
+  it('does not dispatch a pending deterministic goal child as a standalone feature', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'goal-child-owner-project');
+    const parentRunId = persistenceId('run', 'goal-child-owner-parent');
+    const childRunId = persistenceId(
+      'run',
+      `goal-child-${createHash('sha256')
+        .update(`${parentRunId}\u00001`)
+        .digest('hex')}`,
+    );
+    const revisionId = persistenceId(
+      'configRevision',
+      'goal-child-owner-revision',
+    );
+    await repository.createProject({
+      id: projectId,
+      name: 'Goal child owner',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createConfigRevision({
+      id: revisionId,
+      projectId,
+      revision: 1,
+      config: goalConfig(),
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+      createdAt: now,
+    });
+    await repository.createRun({
+      id: parentRunId,
+      projectId,
+      configRevisionId: revisionId,
+      pipeline: 'goal',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: childRunId,
+      projectId,
+      configRevisionId: revisionId,
+      pipeline: 'feature',
+      status: 'pending',
+      input: {
+        idempotencyKey: `goal:${parentRunId}:step:1`,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createConfigSnapshot({
+      id: persistenceId('configSnapshot', 'goal-child-owner-snapshot'),
+      runId: childRunId,
+      configRevisionId: revisionId,
+      config: goalConfig(),
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+      createdAt: now,
+    });
+    await repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${parentRunId}:step:1:child`),
+      runId: parentRunId,
+      step: 1,
+      status: 'pending',
+      payload: {
+        version: 'goal-child-attempt-v1',
+        childRunId,
+      },
+      recordedAt: now,
+    });
+    const starts: string[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async ({ runId }) => {
+        starts.push(runId);
+      },
+      requestApprovalResume: async () => undefined,
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+
+    expect(starts).toEqual([]);
+    await expect(repository.getRun(childRunId)).resolves.toMatchObject({
+      status: 'pending',
+    });
+  });
+
   it('redelivers durable start, approval, and cancellation intents idempotently', async () => {
     const repository = new InMemoryDomainRepository();
     const projectId = persistenceId('project', 'project-1');
