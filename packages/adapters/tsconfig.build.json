@@ -4,6 +4,9 @@
     "declaration": true,
     "noEmit": false,
     "outDir": "dist",
+    "paths": {
+      "@agentos/core": ["../core/dist/index.d.ts"]
+    },
     "rootDir": "src",
     "sourceMap": true
   }

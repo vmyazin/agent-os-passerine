@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1786948651220,
+      "tag": "0000_domain_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786948912688,
+      "tag": "0001_link_step_sessions",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+ALTER TABLE "step_runs" ADD CONSTRAINT "step_runs_external_session_id_external_sessions_id_fk" FOREIGN KEY ("external_session_id") REFERENCES "public"."external_sessions"("id") ON DELETE set null ON UPDATE no action;

@@ -9,6 +9,9 @@
   },
   "scripts": {
     "build": "turbo run build",
+    "db:check": "drizzle-kit check",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
     "test": "turbo run test",
@@ -21,6 +24,7 @@
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
+    "drizzle-kit": "0.31.10",
     "eslint": "10.8.1",
     "prettier": "3.9.6",
     "turbo": "2.10.10",
