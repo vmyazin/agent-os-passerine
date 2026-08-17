@@ -58,6 +58,7 @@ export interface WorkflowDispatchOutbox {
   requestStart(request: {
     readonly idempotencyKey: string;
     readonly runId: string;
+    readonly pipeline: 'feature' | 'goal';
   }): Promise<void>;
   requestApprovalResume(request: {
     readonly idempotencyKey: string;
@@ -755,6 +756,7 @@ export class ControlPlaneService {
           await this.workflowDispatch?.requestStart({
             idempotencyKey: `workflow-start:${created.id}`,
             runId: created.id,
+            pipeline,
           });
         } catch {
           // The pending run is the durable outbox intent; reconciliation retries it.

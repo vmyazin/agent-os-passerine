@@ -17,6 +17,7 @@ import type {
 } from '@agentos/core';
 
 export const FEATURE_WORKFLOW_TASK_ID = 'agentos-feature-workflow-v1';
+export const GOAL_WORKFLOW_TASK_ID = 'agentos-goal-workflow-v1';
 export const FEATURE_WORKFLOW_VERSION = 'feature-workflow-v1';
 export const FEATURE_WORKFLOW_DEFAULTS = Object.freeze({
   concurrency: 1,

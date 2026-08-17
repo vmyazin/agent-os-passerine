@@ -2,6 +2,7 @@ import { runs, tasks, wait } from '@trigger.dev/sdk';
 
 import {
   FEATURE_WORKFLOW_TASK_ID,
+  GOAL_WORKFLOW_TASK_ID,
   type WorkflowApprovalWaiter,
 } from './types.js';
 
@@ -73,6 +74,7 @@ export function createTriggerSdkBoundary(): TriggerSdkBoundary {
 
 export interface TriggerWorkflowDispatcher {
   startFeature(runId: string): Promise<{ readonly externalRunRef: string }>;
+  startGoal(runId: string): Promise<{ readonly externalRunRef: string }>;
   cancel(externalRunRef: string): Promise<void>;
 }
 
@@ -86,6 +88,17 @@ export function createTriggerWorkflowDispatcher(
         { version: 'feature-task-payload-v1', runId },
         {
           idempotencyKey: `feature-workflow:${runId}:v1`,
+          idempotencyKeyTTL: '30d',
+        },
+      );
+      return { externalRunRef: result.id };
+    },
+    async startGoal(runId: string) {
+      const result = await sdk.triggerTask(
+        GOAL_WORKFLOW_TASK_ID,
+        { version: 'goal-task-payload-v1', runId },
+        {
+          idempotencyKey: `goal-workflow:${runId}:v1`,
           idempotencyKeyTTL: '30d',
         },
       );

@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
+
 import {
+  canonicalJsonValue,
   isoTimestamp,
   persistenceId,
   type DomainRepository,
@@ -55,6 +58,7 @@ function collaborators(
       checkpoints,
       trigger: {
         startFeature: vi.fn(),
+        startGoal: vi.fn(),
         cancel: cancelTrigger,
       },
       approval: {
@@ -111,6 +115,62 @@ function collaborators(
 }
 
 describe('durable Trigger outbox start', () => {
+  it('replays feature starts created before pipeline-bound fingerprints', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const startFeature = vi.fn();
+    const legacyRequest = {
+      idempotencyKey: 'workflow-start:legacy-feature',
+      runId: 'legacy-feature',
+    };
+    for (const [key, kind, externalRef] of [
+      ['source:legacy-feature', 'source-snapshot-ingest', 'source/legacy'],
+      [
+        legacyRequest.idempotencyKey,
+        'trigger-workflow-start',
+        'trigger-legacy',
+      ],
+    ] as const) {
+      const request =
+        kind === 'source-snapshot-ingest'
+          ? { ...legacyRequest, idempotencyKey: key }
+          : legacyRequest;
+      const ownerId = `outbox:${request.idempotencyKey}`;
+      const effect = await checkpoints.claimEffect(
+        {
+          key,
+          runId: request.runId,
+          kind,
+          inputFingerprint: createHash('sha256')
+            .update(canonicalJsonValue(request))
+            .digest('hex'),
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          ownerId,
+          now,
+          leaseExpiresAt: '2026-08-17T12:05:00.000Z',
+        },
+      );
+      const lease = { key, ownerId, leaseVersion: effect.leaseVersion };
+      await checkpoints.markEffectStarted(lease, now);
+      await checkpoints.attachExternalRef(lease, externalRef, now);
+      await checkpoints.completeEffect(lease, { externalRef }, now);
+    }
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: { ensure: vi.fn() },
+      clock: () => now,
+    });
+
+    await expect(
+      outbox.requestStart({ ...legacyRequest, pipeline: 'feature' }),
+    ).resolves.toBeUndefined();
+    expect(startFeature).not.toHaveBeenCalled();
+  });
+
   it('ingests the SHA-bound source before one idempotent Trigger start', async () => {
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const calls: string[] = [];
@@ -128,12 +188,16 @@ describe('durable Trigger outbox start', () => {
     });
     const outbox = createDurableTriggerOutbox({
       checkpoints,
-      trigger: { startFeature, cancel: vi.fn() },
+      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
       clock: () => now,
     });
-    const request = { idempotencyKey: 'workflow-start:run-1', runId: 'run-1' };
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
 
     await outbox.requestStart(request);
     await outbox.requestStart(request);
@@ -149,6 +213,44 @@ describe('durable Trigger outbox start', () => {
       status: 'succeeded',
       externalRef: 'trigger-run-1',
     });
+  });
+
+  it('dispatches a goal start only to the goal task and binds the pipeline fingerprint', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const startFeature = vi.fn();
+    const startGoal = vi.fn(async () => ({
+      externalRunRef: 'trigger-goal-1',
+    }));
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: {
+        startFeature,
+        startGoal,
+        cancel: vi.fn(),
+      },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: {
+        ensure: vi.fn(async () => ({
+          key: 'source/goal-bundle-v1',
+          digest: 'b'.repeat(64),
+          sizeBytes: 123,
+        })),
+      },
+      clock: () => now,
+    });
+    const request = {
+      idempotencyKey: 'workflow-start:goal-1',
+      runId: 'goal-1',
+      pipeline: 'goal' as const,
+    };
+
+    await outbox.requestStart(request);
+
+    expect(startGoal).toHaveBeenCalledWith('goal-1');
+    expect(startFeature).not.toHaveBeenCalled();
+    await expect(
+      outbox.requestStart({ ...request, pipeline: 'feature' }),
+    ).rejects.toThrow(/different|fingerprint|conflict/i);
   });
 
   it('reconciles crashes after both source write and remote Trigger creation', async () => {
@@ -173,12 +275,16 @@ describe('durable Trigger outbox start', () => {
     });
     const outbox = createDurableTriggerOutbox({
       checkpoints,
-      trigger: { startFeature, cancel: vi.fn() },
+      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
       clock: () => now,
     });
-    const request = { idempotencyKey: 'workflow-start:run-1', runId: 'run-1' };
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
 
     await expect(outbox.requestStart(request)).rejects.toThrow('source write');
     await expect(outbox.requestStart(request)).rejects.toThrow(

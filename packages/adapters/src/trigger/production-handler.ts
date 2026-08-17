@@ -8,9 +8,12 @@ import {
   createArtifactCapabilityIssuer,
   createHmacAttestationIssuer,
   createHmacAttestationVerifier,
+  createVerifierRegistry,
+  isoTimestamp,
   normalizePublicationPolicySnapshot,
   parseAgentOsConfig,
   persistenceId,
+  registerVerifier,
   type AgentOsConfig,
   type ArtifactCapabilityKey,
   type ArtifactMetadata,
@@ -26,6 +29,10 @@ import { createTrustedGitHubPublisherService } from '../github/service.js';
 import { createManagedAgentsRuntimeProvider } from '../managed-agents/provider.js';
 import { createNeonDomainRepositoryFromEnv } from '../persistence/neon-repository.js';
 import { createAesWorkflowHandleSealer } from './handle-sealer.js';
+import { createFeatureGoalStepRunner } from './goal-feature-runner.js';
+import { createGoalWorkflowTaskHandler } from './goal-task-handler.js';
+import { createTrustedGoalCommandVerifier } from './goal-verifier.js';
+import { createDurableGoalWorkflow } from './goal-workflow.js';
 import { createNeonWorkflowCheckpointStore } from './postgres-checkpoint-store.js';
 import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
@@ -88,6 +95,21 @@ const changeSetSchema = z
       )
       .min(1)
       .max(100),
+  })
+  .strict();
+
+const featureWorkflowResultSchema = z
+  .object({
+    status: z.enum([
+      'succeeded',
+      'rejected',
+      'expired',
+      'cancelled',
+      'budget_exhausted',
+      'failed',
+    ]),
+    draftPullRequestUrl: z.url().max(2_048).optional(),
+    reason: z.string().max(1_000).optional(),
   })
   .strict();
 
@@ -603,5 +625,65 @@ export async function createProductionFeatureWorkflowFromEnv(
         handleSealer,
       });
     },
+  });
+}
+
+export async function createProductionGoalWorkflowFromEnv(
+  environment: Environment,
+): Promise<import('./goal-task.js').GoalWorkflowTaskHandler> {
+  const repository = createNeonDomainRepositoryFromEnv(environment);
+  const artifacts = createR2ArtifactStore({
+    accountId: required(environment, 'CLOUDFLARE_R2_ACCOUNT_ID'),
+    bucket: required(environment, 'CLOUDFLARE_R2_ARTIFACT_BUCKET'),
+    accessKeyId: required(environment, 'CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
+    secretAccessKey: required(
+      environment,
+      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
+    ),
+    manifest: createDomainArtifactManifestStore(repository),
+  });
+  const featureTask = await createProductionFeatureWorkflowFromEnv(environment);
+  const keys = parsedJson<
+    Array<{ readonly keyId: string; readonly secret: string }>
+  >(environment, 'AGENTOS_TEST_REPORT_KEYS_JSON');
+  const verifierRegistry = registerVerifier(
+    createVerifierRegistry(),
+    'command',
+    createTrustedGoalCommandVerifier({
+      artifacts,
+      keys,
+      clock: () => new Date().toISOString(),
+    }),
+  );
+  return createGoalWorkflowTaskHandler({
+    repository,
+    workflowForExecution: (execution) =>
+      createDurableGoalWorkflow({
+        repository,
+        stepRunner: createFeatureGoalStepRunner({
+          repository,
+          artifacts,
+          featureTask: {
+            run: async (payload, childExecution) => {
+              const result = featureWorkflowResultSchema.parse(
+                await featureTask.run(payload, childExecution),
+              );
+              return {
+                status: result.status,
+                ...(result.draftPullRequestUrl === undefined
+                  ? {}
+                  : { draftPullRequestUrl: result.draftPullRequestUrl }),
+                ...(result.reason === undefined
+                  ? {}
+                  : { reason: result.reason }),
+              };
+            },
+          },
+          clock: () => isoTimestamp(new Date().toISOString()),
+          ...(execution === undefined ? {} : { execution }),
+        }),
+        verifierRegistry,
+        clock: () => isoTimestamp(new Date().toISOString()),
+      }),
   });
 }

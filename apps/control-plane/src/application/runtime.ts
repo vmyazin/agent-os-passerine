@@ -167,8 +167,11 @@ export function workflowDispatchFromEnv() {
     artifacts,
     resolveBinding: async (runId) => {
       const run = await repository.getRun(persistenceId('run', runId));
-      if (run === undefined || run.pipeline !== 'feature')
-        throw new Error('source snapshot feature run does not exist');
+      if (
+        run === undefined ||
+        (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+      )
+        throw new Error('source snapshot workflow run does not exist');
       const snapshots = await repository.listConfigSnapshots(run.id, {
         limit: 2,
       });

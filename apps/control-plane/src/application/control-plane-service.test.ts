@@ -517,6 +517,7 @@ runtime: { provider: local }
     expect(requestStart).toHaveBeenCalledWith({
       idempotencyKey: `workflow-start:${created.id}`,
       runId: created.id,
+      pipeline: 'goal',
     });
 
     await expect(service.createGoalRun('goal-key', input)).resolves.toEqual(

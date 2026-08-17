@@ -75,6 +75,7 @@ export interface DurableTriggerOutbox {
   requestStart(request: {
     readonly idempotencyKey: string;
     readonly runId: string;
+    readonly pipeline: 'feature' | 'goal';
   }): Promise<void>;
   requestApprovalResume(request: {
     readonly idempotencyKey: string;
@@ -105,11 +106,19 @@ function draft(
   WorkflowEffect,
   'status' | 'ownerId' | 'leaseVersion' | 'leaseExpiresAt'
 > {
+  const pipeline = (request as { readonly pipeline?: 'feature' | 'goal' })
+    .pipeline;
+  // Preserve the pre-goal feature fingerprint so deployed feature intents can
+  // replay across the schema upgrade. Goal intents remain explicitly bound.
+  const fingerprintInput =
+    pipeline === 'feature'
+      ? { runId: request.runId, idempotencyKey: request.idempotencyKey }
+      : request;
   return {
     key: request.idempotencyKey,
     runId: request.runId,
     kind,
-    inputFingerprint: fingerprint(request),
+    inputFingerprint: fingerprint(fingerprintInput),
     createdAt: now,
     updatedAt: now,
   };
@@ -274,7 +283,9 @@ export function createDurableTriggerOutbox(
       if (effect.status === 'succeeded') return;
       await options.checkpoints.markEffectStarted(claim.lease, options.clock());
       // Trigger task idempotency makes retry after an ambiguous response safe.
-      const result = await options.trigger.startFeature(request.runId);
+      const result = await (request.pipeline === 'goal'
+        ? options.trigger.startGoal(request.runId)
+        : options.trigger.startFeature(request.runId));
       await options.checkpoints.attachExternalRef(
         claim.lease,
         result.externalRunRef,

@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
+
 import { InMemoryDomainRepository } from '@agentos/adapters';
 import {
+  canonicalJsonValue,
   isoTimestamp,
+  loadAgentOsConfig,
   persistenceId,
+  type JsonValue,
   type TimestampListCursor,
   type WorkflowRunId,
 } from '@agentos/core';
@@ -12,7 +17,230 @@ import type { WorkflowDispatchOutbox } from './control-plane-service';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 
+function goalConfig(timeoutMs = 3_600_000): JsonValue {
+  const config = loadAgentOsConfig(`
+version: 1
+project: { name: Goal Reconciliation }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: ${String(timeoutMs)} }
+runtime: { provider: local }
+`);
+  return JSON.parse(canonicalJsonValue(config)) as JsonValue;
+}
+
 describe('workflow outbox reconciliation', () => {
+  it('repairs a pending goal snapshot and criterion set before goal dispatch', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'goal-repair-project');
+    const runId = persistenceId('run', 'goal-repair-run');
+    const revisionId = persistenceId('configRevision', 'goal-repair-revision');
+    const provenance = {
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+    };
+    await repository.createProject({
+      id: projectId,
+      name: 'Goal repair',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createConfigRevision({
+      id: revisionId,
+      projectId,
+      revision: 1,
+      config: goalConfig(),
+      ...provenance,
+      createdAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      configRevisionId: revisionId,
+      pipeline: 'goal',
+      status: 'pending',
+      input: {
+        idempotencyKey: 'goal-repair',
+        title: 'Repair me',
+        description: 'Restore durable goal inputs.',
+        provenance,
+        criteria: [
+          {
+            id: 'tests',
+            type: 'command',
+            description: 'Tests pass',
+            command: 'pnpm test',
+          },
+        ],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const starts: unknown[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async (request) => {
+        starts.push(request);
+      },
+      requestApprovalResume: async () => undefined,
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({ scannedRuns: 1, delivered: 3, failed: 0 });
+    await expect(repository.listConfigSnapshots(runId)).resolves.toHaveLength(
+      1,
+    );
+    await expect(repository.listGoalCriteria(runId)).resolves.toEqual([
+      expect.objectContaining({
+        ordinal: 0,
+        definition: expect.objectContaining({ id: 'tests' }),
+      }),
+    ]);
+    expect(starts).toEqual([
+      {
+        idempotencyKey: `workflow-start:${runId}`,
+        runId,
+        pipeline: 'goal',
+      },
+    ]);
+  });
+
+  it('uses the configured bounded goal timeout before the one-hour ceiling', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'goal-timeout-project');
+    const runId = persistenceId('run', 'goal-timeout-run');
+    const revisionId = persistenceId('configRevision', 'goal-timeout-revision');
+    const createdAt = isoTimestamp('2026-08-17T11:59:58.000Z');
+    await repository.createProject({
+      id: projectId,
+      name: 'Goal timeout',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    await repository.createConfigRevision({
+      id: revisionId,
+      projectId,
+      revision: 1,
+      config: goalConfig(1_000),
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+      createdAt,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      configRevisionId: revisionId,
+      pipeline: 'goal',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    await repository.createConfigSnapshot({
+      id: persistenceId('configSnapshot', 'goal-timeout-snapshot'),
+      runId,
+      configRevisionId: revisionId,
+      config: goalConfig(1_000),
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+      createdAt,
+    });
+    const delivered: string[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async ({ runId: deliveredRunId }) => {
+        delivered.push(`cancel:${deliveredRunId}`);
+      },
+      requestCleanup: async ({ runId: deliveredRunId }) => {
+        delivered.push(`cleanup:${deliveredRunId}`);
+      },
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'workflow_deadline_exceeded' },
+    });
+    expect(delivered).toEqual([`cancel:${runId}`, `cleanup:${runId}`]);
+  });
+
+  it('cancels every recorded active child of a cancelled goal', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'goal-cancel-project');
+    const goalRunId = persistenceId('run', 'goal-cancel-parent');
+    const childRunId = persistenceId(
+      'run',
+      `goal-child-${createHash('sha256')
+        .update(`${goalRunId}\u00001`)
+        .digest('hex')}`,
+    );
+    await repository.createProject({
+      id: projectId,
+      name: 'Goal cancellation',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: goalRunId,
+      projectId,
+      pipeline: 'goal',
+      status: 'cancelled',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: childRunId,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${goalRunId}:step:1:child`),
+      runId: goalRunId,
+      step: 1,
+      status: 'pending',
+      payload: {
+        version: 'goal-child-attempt-v1',
+        childRunId,
+      },
+      recordedAt: now,
+    });
+    const cancelled = new Set<string>();
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async ({ runId }) => {
+        cancelled.add(runId);
+      },
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+
+    await expect(repository.getRun(childRunId)).resolves.toMatchObject({
+      status: 'cancelled',
+    });
+    expect(cancelled).toEqual(new Set([goalRunId, childRunId]));
+  });
+
   it('redelivers durable start, approval, and cancellation intents idempotently', async () => {
     const repository = new InMemoryDomainRepository();
     const projectId = persistenceId('project', 'project-1');

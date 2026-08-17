@@ -54,6 +54,28 @@ describe('Trigger SDK boundary', () => {
     ]);
   });
 
+  it('starts the separately versioned goal task with a pipeline-bound key', async () => {
+    const { sdk, calls } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    await expect(dispatcher.startGoal('goal-1')).resolves.toEqual({
+      externalRunRef: 'trigger-run-safe-ref',
+    });
+    expect(calls).toEqual([
+      {
+        method: 'triggerTask',
+        args: [
+          'agentos-goal-workflow-v1',
+          { version: 'goal-task-payload-v1', runId: 'goal-1' },
+          expect.objectContaining({
+            idempotencyKey: 'goal-workflow:goal-1:v1',
+            idempotencyKeyTTL: '30d',
+          }),
+        ],
+      },
+    ]);
+  });
+
   it('uses waitpoints only as wake signals and never returns public tokens', async () => {
     const { sdk, calls } = fakeSdk();
     const waiter = createTriggerApprovalWaiter(sdk);
