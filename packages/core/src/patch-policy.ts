@@ -1,5 +1,5 @@
 import { DEFAULT_PROTECTED_PATHS } from './config.js';
-import type { AttestationVerifier, OpaqueAttestation } from './attestation.js';
+import type { AttestationVerifier, SignedAttestation } from './attestation.js';
 
 export type ChangeOperation = 'add' | 'modify' | 'delete';
 
@@ -9,7 +9,7 @@ export interface NormalizedChange {
   readonly sizeBytes: number;
   readonly binary: boolean;
   readonly symlink: boolean;
-  readonly metadataAttestation: OpaqueAttestation<NormalizedChangeClaims>;
+  readonly metadataAttestation: SignedAttestation<NormalizedChangeClaims>;
 }
 
 export interface NormalizedChangeClaims {
@@ -139,7 +139,10 @@ export function evaluatePatchPolicy(
       });
       continue;
     }
-    const claims = metadataVerifier.verify(change.metadataAttestation);
+    const claims = metadataVerifier.verify(change.metadataAttestation, {
+      kind: 'normalized-change',
+      subject: `${change.operation}:${normalizedPath}`,
+    });
     if (
       claims === undefined ||
       claims.path !== change.path ||

@@ -255,7 +255,12 @@ describe('budget decisions', () => {
       300,
     );
 
-    expect(retried.decision).toBe('admit');
+    expect(retried).toMatchObject({
+      decision: 'replay',
+      reason: 'settled',
+      settlement: 'consumed',
+      shouldExecute: false,
+    });
     expect(retried.ledger.dailySpentMicrodollars).toBe(300);
     expect(consumedAgain).toBe(retried.ledger);
     expect(() =>
@@ -267,7 +272,32 @@ describe('budget decisions', () => {
     ).toThrow(/different/i);
   });
 
-  it('bounds settled reservation history', () => {
+  it('returns a non-executing replay after release', () => {
+    const request = {
+      reservationId: 'released-r1',
+      workflowId: 'run-1',
+      estimatedMicrodollars: 500,
+    };
+    const admitted = reserveBudget(
+      createUsageLedger('2026-08-16'),
+      request,
+      limits,
+    );
+    const released = releaseBudgetReservation(
+      admitted.ledger,
+      request.reservationId,
+    );
+
+    expect(reserveBudget(released, request, limits)).toMatchObject({
+      decision: 'replay',
+      reason: 'settled',
+      settlement: 'released',
+      shouldExecute: false,
+      ledger: released,
+    });
+  });
+
+  it('retains settled reservation history for durable replay', () => {
     const generousLimits: BudgetLimits = {
       workflowMicrodollars: 1_000_000,
       dailyMicrodollars: 1_000_000,
@@ -285,7 +315,23 @@ describe('budget decisions', () => {
       ledger = releaseBudgetReservation(ledger, reservationId);
     }
 
-    expect(ledger.settledReservationIds).toHaveLength(256);
-    expect(Object.keys(ledger.settledReservations)).toHaveLength(256);
+    expect(ledger.settledReservationIds).toHaveLength(300);
+    expect(Object.keys(ledger.settledReservations)).toHaveLength(300);
+    expect(
+      reserveBudget(
+        ledger,
+        {
+          reservationId: 'history-0',
+          workflowId: 'run-1',
+          estimatedMicrodollars: 1,
+        },
+        generousLimits,
+      ),
+    ).toMatchObject({
+      decision: 'replay',
+      reason: 'settled',
+      settlement: 'released',
+      shouldExecute: false,
+    });
   });
 });

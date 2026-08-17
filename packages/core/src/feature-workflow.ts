@@ -39,7 +39,6 @@ export interface FeatureWorkflowState {
     RepositoryPublisherAttestationClaims,
     'source'
   >;
-  readonly publisherAttestationVerifier?: AttestationVerifier<RepositoryPublisherAttestationClaims>;
 }
 
 interface WorkflowEventBase {
@@ -86,6 +85,9 @@ export interface FeatureWorkflowOptions {
     RepositoryPublisherAttestationClaims,
     'source'
   >;
+}
+
+export interface FeatureWorkflowContext {
   readonly publisherAttestationVerifier?: AttestationVerifier<RepositoryPublisherAttestationClaims>;
 }
 
@@ -105,9 +107,6 @@ export function createFeatureWorkflow(
     ...(options.publicationBinding === undefined
       ? {}
       : { publicationBinding: options.publicationBinding }),
-    ...(options.publisherAttestationVerifier === undefined
-      ? {}
-      : { publisherAttestationVerifier: options.publisherAttestationVerifier }),
   };
 }
 
@@ -161,6 +160,7 @@ function assertPhase(
 export function reduceFeatureWorkflow(
   state: FeatureWorkflowState,
   event: FeatureWorkflowEvent,
+  context: FeatureWorkflowContext = {},
 ): FeatureWorkflowState {
   if (isDuplicateEvent(state, event)) return state;
   if (terminalStatuses.has(state.status)) {
@@ -216,9 +216,6 @@ export function reduceFeatureWorkflow(
       ...(state.publicationBinding === undefined
         ? {}
         : { publicationBinding: state.publicationBinding }),
-      ...(state.publisherAttestationVerifier === undefined
-        ? {}
-        : { publisherAttestationVerifier: state.publisherAttestationVerifier }),
     };
   }
   if (state.status === 'blocked') {
@@ -281,8 +278,12 @@ export function reduceFeatureWorkflow(
       assertPhase(state, 'draft_publication', event);
       if (event.publication.draft !== true)
         throw new Error('Only draft publications may complete the workflow');
-      const publisherClaims = state.publisherAttestationVerifier?.verify(
+      const publisherClaims = context.publisherAttestationVerifier?.verify(
         event.publication.attestation,
+        {
+          kind: 'repository-draft-publication',
+          subject: event.publication.id,
+        },
       );
       if (publisherClaims === undefined)
         throw new Error('A trusted publisher attestation is required');
@@ -308,8 +309,12 @@ export function reduceFeatureWorkflow(
 export function replayFeatureWorkflow(
   events: readonly FeatureWorkflowEvent[],
   options: FeatureWorkflowOptions,
+  context: FeatureWorkflowContext = {},
 ): FeatureWorkflowState {
-  return events.reduce(reduceFeatureWorkflow, createFeatureWorkflow(options));
+  return events.reduce(
+    (state, event) => reduceFeatureWorkflow(state, event, context),
+    createFeatureWorkflow(options),
+  );
 }
 
 export const featureWorkflowReducer = reduceFeatureWorkflow;

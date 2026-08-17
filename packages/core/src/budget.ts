@@ -92,8 +92,6 @@ export interface SettledReservation {
   readonly actualMicrodollars?: Microdollars;
 }
 
-const SETTLED_RESERVATION_WINDOW = 256;
-
 export function createUsageLedger(day: string): UsageLedger {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day))
     throw new Error('Ledger day must use YYYY-MM-DD');
@@ -275,9 +273,18 @@ export function decideBudgetAction(
   return { decision: 'admit', reason: 'within_limits' };
 }
 
-export type BudgetReservationResult = BudgetDecision & {
-  readonly ledger: UsageLedger;
-};
+export type BudgetReservationResult =
+  | (BudgetDecision & {
+      readonly ledger: UsageLedger;
+      readonly shouldExecute: boolean;
+    })
+  | {
+      readonly decision: 'replay';
+      readonly reason: 'settled';
+      readonly settlement: SettledReservation['outcome'];
+      readonly shouldExecute: false;
+      readonly ledger: UsageLedger;
+    };
 
 export function reserveBudget(
   ledger: UsageLedger,
@@ -297,16 +304,28 @@ export function reserveBudget(
       existing.microdollars !== request.estimatedMicrodollars
     )
       throw new Error('Reservation ID was reused with different details');
-    return { decision: 'admit', reason: 'within_limits', ledger };
+    return {
+      decision: 'admit',
+      reason: 'within_limits',
+      shouldExecute: false,
+      ledger,
+    };
   }
   const settled = ownValue(ledger.settledReservations, request.reservationId);
   if (settled !== undefined) {
     if (settled.requestFingerprint !== requestFingerprint)
       throw new Error('Reservation ID was reused with different details');
-    return { decision: 'admit', reason: 'within_limits', ledger };
+    return {
+      decision: 'replay',
+      reason: 'settled',
+      settlement: settled.outcome,
+      shouldExecute: false,
+      ledger,
+    };
   }
   const decision = decideBudgetAction(ledger, request, limits);
-  if (decision.decision !== 'admit') return { ...decision, ledger };
+  if (decision.decision !== 'admit')
+    return { ...decision, shouldExecute: false, ledger };
   const microdollars = toMicrodollars(
     requireNonNegativeInteger(
       request.estimatedMicrodollars,
@@ -315,6 +334,7 @@ export function reserveBudget(
   );
   return {
     ...decision,
+    shouldExecute: true,
     ledger: {
       ...ledger,
       reservations: {
@@ -365,10 +385,6 @@ function settleReservation(
       ...(actualMicrodollars === undefined ? {} : { actualMicrodollars }),
     },
   };
-  while (settledReservationIds.length > SETTLED_RESERVATION_WINDOW) {
-    const expiredId = settledReservationIds.shift();
-    if (expiredId !== undefined) delete settledReservations[expiredId];
-  }
   return { ...ledger, settledReservationIds, settledReservations };
 }
 

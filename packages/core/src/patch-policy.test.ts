@@ -1,13 +1,35 @@
 import { describe, expect, it } from 'vitest';
 
-import { createAttestationAuthority } from './attestation.js';
+import {
+  createHmacAttestationIssuer,
+  createHmacAttestationVerifier,
+} from './attestation.js';
 import {
   evaluatePatchPolicy,
   type ChangeManifest,
   type NormalizedChangeClaims,
 } from './patch-policy.js';
 
-const metadataAuthority = createAttestationAuthority<NormalizedChangeClaims>();
+const metadataKey = { keyId: 'manifest', secret: 'manifest-secret' } as const;
+const metadataIssuer =
+  createHmacAttestationIssuer<NormalizedChangeClaims>(metadataKey);
+const metadataVerifier = createHmacAttestationVerifier<NormalizedChangeClaims>({
+  keys: [metadataKey],
+});
+
+const decodedPath = (path: string): string => {
+  let decoded = path;
+  try {
+    for (let pass = 0; pass < 16; pass += 1) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) return decoded;
+      decoded = next;
+    }
+  } catch {
+    return path;
+  }
+  return decoded;
+};
 
 const change = (
   path: string,
@@ -21,15 +43,21 @@ const change = (
     symlink: false,
     ...overrides,
   };
-  return {
-    ...fields,
-    metadataAttestation: metadataAuthority.issuer.issue({
+  const metadataAttestation = metadataIssuer.issue({
+    kind: 'normalized-change',
+    subject: `${fields.operation}:${decodedPath(fields.path)}`,
+    claims: {
       path: fields.path,
       operation: fields.operation,
       sizeBytes: fields.sizeBytes,
       binary: fields.binary,
       symlink: fields.symlink,
-    }),
+    },
+    issuedAt: '2026-08-16T20:00:00.000Z',
+  });
+  return {
+    ...fields,
+    metadataAttestation: JSON.parse(JSON.stringify(metadataAttestation)),
   };
 };
 
@@ -37,7 +65,7 @@ const evaluate = (changes: ChangeManifest['changes'], options = {}) =>
   evaluatePatchPolicy(
     { baseSha: 'abc123', changes },
     { currentBaseSha: 'abc123', ...options },
-    metadataAuthority.verifier,
+    metadataVerifier,
   );
 
 describe('patch policy', () => {
@@ -68,7 +96,7 @@ describe('patch policy', () => {
         ],
       },
       { currentBaseSha: 'current' },
-      metadataAuthority.verifier,
+      metadataVerifier,
     );
 
     expect(result.allowed).toBe(false);
@@ -169,25 +197,73 @@ describe('patch policy', () => {
   );
 
   it('rejects structural and cross-authority metadata attestations', () => {
-    const authority = createAttestationAuthority<NormalizedChangeClaims>();
-    const other = createAttestationAuthority<NormalizedChangeClaims>();
+    const other = createHmacAttestationIssuer<NormalizedChangeClaims>({
+      keyId: metadataKey.keyId,
+      secret: 'different-manifest-secret',
+    });
     const trustedShape = change('safe.txt');
     const forged = {
       ...trustedShape,
-      metadataAttestation: other.issuer.issue({
-        path: trustedShape.path,
-        operation: trustedShape.operation,
-        sizeBytes: trustedShape.sizeBytes,
-        binary: trustedShape.binary,
-        symlink: trustedShape.symlink,
+      metadataAttestation: other.issue({
+        kind: 'normalized-change',
+        subject: 'modify:safe.txt',
+        claims: {
+          path: trustedShape.path,
+          operation: trustedShape.operation,
+          sizeBytes: trustedShape.sizeBytes,
+          binary: trustedShape.binary,
+          symlink: trustedShape.symlink,
+        },
+        issuedAt: '2026-08-16T20:00:00.000Z',
       }),
     };
 
     const result = evaluatePatchPolicy(
       { baseSha: 'abc123', changes: [forged] },
       { currentBaseSha: 'abc123' },
-      authority.verifier,
+      metadataVerifier,
     );
+    expect(result.violations[0]?.code).toBe('untrusted_metadata');
+  });
+
+  it('binds persisted metadata attestations to the change kind and subject', () => {
+    const key = { keyId: 'manifest', secret: 'manifest-secret' } as const;
+    const issuer = createHmacAttestationIssuer<NormalizedChangeClaims>(key);
+    const verifier = createHmacAttestationVerifier<NormalizedChangeClaims>({
+      keys: [key],
+    });
+    const fields = {
+      path: 'safe.txt',
+      operation: 'modify' as const,
+      sizeBytes: 10,
+      binary: false,
+      symlink: false,
+    };
+    const wrongSubject = JSON.parse(
+      JSON.stringify(
+        issuer.issue({
+          kind: 'normalized-change',
+          subject: 'modify:other.txt',
+          claims: fields,
+          issuedAt: '2026-08-16T20:00:00.000Z',
+        }),
+      ),
+    );
+
+    const result = evaluatePatchPolicy(
+      {
+        baseSha: 'abc123',
+        changes: [
+          {
+            ...fields,
+            metadataAttestation: wrongSubject,
+          } as ChangeManifest['changes'][number],
+        ],
+      },
+      { currentBaseSha: 'abc123' },
+      verifier,
+    );
+
     expect(result.violations[0]?.code).toBe('untrusted_metadata');
   });
 });

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { AttestationVerifier, OpaqueAttestation } from './attestation.js';
+import type { AttestationVerifier, SignedAttestation } from './attestation.js';
 
 interface CriterionBase {
   readonly id: string;
@@ -70,7 +70,7 @@ export interface VerifierAttestationClaims extends VerifierFinding {
   readonly evidenceId: string;
 }
 
-export type VerifierAttestation = OpaqueAttestation<VerifierAttestationClaims>;
+export type VerifierAttestation = SignedAttestation<VerifierAttestationClaims>;
 
 export interface DefinitionOfDoneVerifier {
   readonly id: string;
@@ -181,7 +181,10 @@ export async function verifyCriterion(
     );
   }
   const attestation = await verifier.verify(criterion, evidence);
-  const finding = verifier.attestationVerifier.verify(attestation);
+  const finding = verifier.attestationVerifier.verify(attestation, {
+    kind: 'definition-of-done-verification',
+    subject: `${verifier.id}:${criterion.id}:${evidence.id}`,
+  });
   if (
     finding === undefined ||
     finding.source !== 'registered-verifier' ||

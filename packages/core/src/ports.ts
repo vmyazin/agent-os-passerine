@@ -1,4 +1,4 @@
-import type { OpaqueAttestation } from './attestation.js';
+import type { SignedAttestation } from './attestation.js';
 
 export type Identifier = string;
 
@@ -112,7 +112,7 @@ export interface DraftPublication {
   readonly id: string;
   readonly url: string;
   readonly draft: true;
-  readonly attestation: OpaqueAttestation<RepositoryPublisherAttestationClaims>;
+  readonly attestation: SignedAttestation<RepositoryPublisherAttestationClaims>;
 }
 
 export interface RepositoryPublisherAttestationClaims {
@@ -124,7 +124,7 @@ export interface RepositoryPublisherAttestationClaims {
 }
 
 export type RepositoryPublisherAttestation =
-  OpaqueAttestation<RepositoryPublisherAttestationClaims>;
+  SignedAttestation<RepositoryPublisherAttestationClaims>;
 
 export interface RepositoryPublisher {
   validate(

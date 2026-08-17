@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { createAttestationAuthority } from './attestation.js';
+import {
+  createHmacAttestationIssuer,
+  createHmacAttestationVerifier,
+} from './attestation.js';
 import {
   createFeatureWorkflow,
   reduceFeatureWorkflow,
   replayFeatureWorkflow,
   type FeatureWorkflowEvent,
-  type FeatureWorkflowOptions,
 } from './feature-workflow.js';
 import type { RepositoryPublisherAttestationClaims } from './ports.js';
 
@@ -25,8 +27,21 @@ const publisherClaims: RepositoryPublisherAttestationClaims = {
   source: 'repository-publisher',
   ...publicationBinding,
 };
-const publisherAuthority =
-  createAttestationAuthority<RepositoryPublisherAttestationClaims>();
+const publisherKey = {
+  keyId: 'publisher',
+  secret: 'publisher-test-secret',
+} as const;
+const publisherIssuer =
+  createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>(
+    publisherKey,
+  );
+const publisherVerifier =
+  createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+    keys: [publisherKey],
+  });
+const publisherContext = {
+  publisherAttestationVerifier: publisherVerifier,
+} as const;
 
 const happyPath: FeatureWorkflowEvent[] = [
   event('1', 'specification_completed'),
@@ -43,18 +58,26 @@ const happyPath: FeatureWorkflowEvent[] = [
       id: 'pr-1',
       url: 'https://example.test/pr/1',
       draft: true,
-      attestation: publisherAuthority.issuer.issue(publisherClaims),
+      attestation: publisherIssuer.issue({
+        kind: 'repository-draft-publication',
+        subject: 'pr-1',
+        claims: publisherClaims,
+        issuedAt: '2026-08-16T20:00:00.000Z',
+      }),
     },
   },
 ];
 
 describe('feature workflow reducer', () => {
   it('runs specification through policy validation to draft publication', () => {
-    const completed = replayFeatureWorkflow(happyPath, {
-      maxRetries: 2,
-      publicationBinding,
-      publisherAttestationVerifier: publisherAuthority.verifier,
-    });
+    const completed = replayFeatureWorkflow(
+      happyPath,
+      {
+        maxRetries: 2,
+        publicationBinding,
+      },
+      publisherContext,
+    );
 
     expect(completed).toMatchObject({
       status: 'succeeded',
@@ -155,7 +178,6 @@ describe('feature workflow reducer', () => {
     let state = replayFeatureWorkflow([event('1', 'specification_completed')], {
       maxRetries: 2,
       publicationBinding,
-      publisherAttestationVerifier: publisherAuthority.verifier,
     });
     state = reduceFeatureWorkflow(state, {
       id: 'crash-1',
@@ -184,7 +206,11 @@ describe('feature workflow reducer', () => {
     expect(state).not.toHaveProperty('blockedFromStatus');
     expect(state).not.toHaveProperty('failureReason');
 
-    state = [...happyPath.slice(1)].reduce(reduceFeatureWorkflow, state);
+    state = [...happyPath.slice(1)].reduce(
+      (current, nextEvent) =>
+        reduceFeatureWorkflow(current, nextEvent, publisherContext),
+      state,
+    );
     expect(state.status).toBe('succeeded');
   });
 
@@ -251,14 +277,55 @@ describe('feature workflow reducer', () => {
   });
 
   it('rejects a publisher token issued by a different authority', () => {
-    const authority =
-      createAttestationAuthority<RepositoryPublisherAttestationClaims>();
+    const verifier =
+      createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+        keys: [
+          { keyId: publisherKey.keyId, secret: 'different-publisher-secret' },
+        ],
+      });
     expect(() =>
-      replayFeatureWorkflow(happyPath, {
-        maxRetries: 2,
-        publicationBinding,
-        publisherAttestationVerifier: authority.verifier,
-      } as unknown as FeatureWorkflowOptions),
+      replayFeatureWorkflow(
+        happyPath,
+        { maxRetries: 2, publicationBinding },
+        { publisherAttestationVerifier: verifier },
+      ),
     ).toThrow(/attestation/i);
+  });
+
+  it('keeps verifier ports out of state and validates persisted publisher attestations through reduction context', () => {
+    const key = { keyId: 'publisher', secret: 'publisher-secret' } as const;
+    const issuer =
+      createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>(key);
+    const verifier =
+      createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+        keys: [key],
+      });
+    const ready = replayFeatureWorkflow(happyPath.slice(0, 7), {
+      maxRetries: 2,
+      publicationBinding,
+    });
+    const persistedReady = JSON.parse(JSON.stringify(ready));
+    const publication = JSON.parse(
+      JSON.stringify({
+        id: 'pr-persisted',
+        url: 'https://example.test/pr/persisted',
+        draft: true,
+        attestation: issuer.issue({
+          kind: 'repository-draft-publication',
+          subject: 'pr-persisted',
+          claims: publisherClaims,
+          issuedAt: '2026-08-16T20:00:00.000Z',
+        }),
+      }),
+    );
+
+    expect(persistedReady).not.toHaveProperty('publisherAttestationVerifier');
+    expect(
+      reduceFeatureWorkflow(
+        persistedReady,
+        { id: 'persisted-publication', type: 'draft_published', publication },
+        { publisherAttestationVerifier: verifier },
+      ).status,
+    ).toBe('succeeded');
   });
 });
