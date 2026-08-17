@@ -96,8 +96,8 @@ function existingEventDisposition(
 ): 'new' | 'duplicate' {
   if (event.id.trim().length === 0)
     throw new Error('Goal workflow event id must not be empty');
+  if (!Object.hasOwn(state.processedEventFingerprints, event.id)) return 'new';
   const existing = state.processedEventFingerprints[event.id];
-  if (existing === undefined) return 'new';
   if (existing !== fingerprint)
     throw new Error(
       `Goal workflow event ${event.id} was replayed with different content`,

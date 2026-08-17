@@ -106,6 +106,25 @@ describe('goal workflow reducer', () => {
     ).toThrow(/different/i);
   });
 
+  it('treats prototype-named event IDs as new own keys', () => {
+    const running = reduceGoalWorkflow(
+      createGoalWorkflow({ criteria, maxSteps: 3 }),
+      { id: 'toString', type: 'start' },
+    );
+    const completed = reduceGoalWorkflow(
+      running,
+      stepEvent('__proto__', 1, [passed('unit-tests'), passed('typecheck')]),
+    );
+
+    expect(completed.status).toBe('succeeded');
+    expect(
+      Object.hasOwn(completed.processedEventFingerprints, 'toString'),
+    ).toBe(true);
+    expect(
+      Object.hasOwn(completed.processedEventFingerprints, '__proto__'),
+    ).toBe(true);
+  });
+
   it('succeeds when every required criterion passes', () => {
     const state = replayGoalWorkflow(
       [
