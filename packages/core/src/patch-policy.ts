@@ -140,7 +140,6 @@ export function evaluatePatchPolicy(
       continue;
     }
     const claims = metadataVerifier.verify(change.metadataAttestation, {
-      kind: 'normalized-change',
       subject: `${change.operation}:${normalizedPath}`,
     });
     if (

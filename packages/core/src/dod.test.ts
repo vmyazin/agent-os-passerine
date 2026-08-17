@@ -24,15 +24,20 @@ const criterion: CommandCriterion = {
 };
 
 const createSignedVerifierAuthority = () => {
-  const key = { keyId: 'dod-test', secret: 'dod-test-secret' } as const;
-  const issuer = createHmacAttestationIssuer<VerifierAttestationClaims>(key);
+  const key = {
+    keyId: 'dod-test',
+    secret: 'dod-test-secret-material-32-bytes!',
+  } as const;
+  const issuer = createHmacAttestationIssuer<VerifierAttestationClaims>({
+    ...key,
+    kind: 'definition-of-done-verification',
+  });
   return {
     issuer: {
       issue: (claims: VerifierAttestationClaims): VerifierAttestation =>
         JSON.parse(
           JSON.stringify(
             issuer.issue({
-              kind: 'definition-of-done-verification',
               subject: `${claims.verifierId}:${claims.criterionId}:${claims.evidenceId}`,
               claims,
               issuedAt: '2026-08-16T20:00:00.000Z',
@@ -41,6 +46,7 @@ const createSignedVerifierAuthority = () => {
         ) as VerifierAttestation,
     },
     verifier: createHmacAttestationVerifier<VerifierAttestationClaims>({
+      kind: 'definition-of-done-verification',
       keys: [key],
     }),
   };
@@ -159,19 +165,25 @@ describe('Definition of Done verification', () => {
   });
 
   it('binds persisted verifier attestations to verifier, criterion, and evidence', async () => {
-    const key = { keyId: 'dod', secret: 'dod-secret' } as const;
-    const issuer = createHmacAttestationIssuer<VerifierAttestationClaims>(key);
+    const key = {
+      keyId: 'dod',
+      secret: 'dod-secret-material-for-tests-32!',
+    } as const;
+    const issuer = createHmacAttestationIssuer<VerifierAttestationClaims>({
+      ...key,
+      kind: 'definition-of-done-verification',
+    });
     const registry = registerVerifier(createVerifierRegistry(), 'command', {
       id: 'trusted-command-verifier',
       attestationVerifier:
         createHmacAttestationVerifier<VerifierAttestationClaims>({
+          kind: 'definition-of-done-verification',
           keys: [key],
         }),
       verify: async () =>
         JSON.parse(
           JSON.stringify(
             issuer.issue({
-              kind: 'definition-of-done-verification',
               subject: 'trusted-command-verifier:unit-tests:other-evidence',
               claims: {
                 source: 'registered-verifier',

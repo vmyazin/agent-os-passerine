@@ -10,10 +10,16 @@ import {
   type NormalizedChangeClaims,
 } from './patch-policy.js';
 
-const metadataKey = { keyId: 'manifest', secret: 'manifest-secret' } as const;
-const metadataIssuer =
-  createHmacAttestationIssuer<NormalizedChangeClaims>(metadataKey);
+const metadataKey = {
+  keyId: 'manifest',
+  secret: 'manifest-secret-material-32-bytes!',
+} as const;
+const metadataIssuer = createHmacAttestationIssuer<NormalizedChangeClaims>({
+  ...metadataKey,
+  kind: 'normalized-change',
+});
 const metadataVerifier = createHmacAttestationVerifier<NormalizedChangeClaims>({
+  kind: 'normalized-change',
   keys: [metadataKey],
 });
 
@@ -44,7 +50,6 @@ const change = (
     ...overrides,
   };
   const metadataAttestation = metadataIssuer.issue({
-    kind: 'normalized-change',
     subject: `${fields.operation}:${decodedPath(fields.path)}`,
     claims: {
       path: fields.path,
@@ -199,13 +204,13 @@ describe('patch policy', () => {
   it('rejects structural and cross-authority metadata attestations', () => {
     const other = createHmacAttestationIssuer<NormalizedChangeClaims>({
       keyId: metadataKey.keyId,
-      secret: 'different-manifest-secret',
+      secret: 'different-manifest-secret-material!',
+      kind: 'normalized-change',
     });
     const trustedShape = change('safe.txt');
     const forged = {
       ...trustedShape,
       metadataAttestation: other.issue({
-        kind: 'normalized-change',
         subject: 'modify:safe.txt',
         claims: {
           path: trustedShape.path,
@@ -227,9 +232,16 @@ describe('patch policy', () => {
   });
 
   it('binds persisted metadata attestations to the change kind and subject', () => {
-    const key = { keyId: 'manifest', secret: 'manifest-secret' } as const;
-    const issuer = createHmacAttestationIssuer<NormalizedChangeClaims>(key);
+    const key = {
+      keyId: 'manifest',
+      secret: 'manifest-secret-material-32-bytes!',
+    } as const;
+    const issuer = createHmacAttestationIssuer<NormalizedChangeClaims>({
+      ...key,
+      kind: 'normalized-change',
+    });
     const verifier = createHmacAttestationVerifier<NormalizedChangeClaims>({
+      kind: 'normalized-change',
       keys: [key],
     });
     const fields = {
@@ -242,7 +254,6 @@ describe('patch policy', () => {
     const wrongSubject = JSON.parse(
       JSON.stringify(
         issuer.issue({
-          kind: 'normalized-change',
           subject: 'modify:other.txt',
           claims: fields,
           issuedAt: '2026-08-16T20:00:00.000Z',

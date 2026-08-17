@@ -29,14 +29,16 @@ const publisherClaims: RepositoryPublisherAttestationClaims = {
 };
 const publisherKey = {
   keyId: 'publisher',
-  secret: 'publisher-test-secret',
+  secret: 'publisher-test-secret-material-32!',
 } as const;
 const publisherIssuer =
-  createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>(
-    publisherKey,
-  );
+  createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>({
+    ...publisherKey,
+    kind: 'repository-draft-publication',
+  });
 const publisherVerifier =
   createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+    kind: 'repository-draft-publication',
     keys: [publisherKey],
   });
 const publisherContext = {
@@ -59,7 +61,6 @@ const happyPath: FeatureWorkflowEvent[] = [
       url: 'https://example.test/pr/1',
       draft: true,
       attestation: publisherIssuer.issue({
-        kind: 'repository-draft-publication',
         subject: 'pr-1',
         claims: publisherClaims,
         issuedAt: '2026-08-16T20:00:00.000Z',
@@ -279,8 +280,12 @@ describe('feature workflow reducer', () => {
   it('rejects a publisher token issued by a different authority', () => {
     const verifier =
       createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+        kind: 'repository-draft-publication',
         keys: [
-          { keyId: publisherKey.keyId, secret: 'different-publisher-secret' },
+          {
+            keyId: publisherKey.keyId,
+            secret: 'different-publisher-secret-material!',
+          },
         ],
       });
     expect(() =>
@@ -293,11 +298,18 @@ describe('feature workflow reducer', () => {
   });
 
   it('keeps verifier ports out of state and validates persisted publisher attestations through reduction context', () => {
-    const key = { keyId: 'publisher', secret: 'publisher-secret' } as const;
+    const key = {
+      keyId: 'publisher',
+      secret: 'publisher-secret-material-32-bytes!',
+    } as const;
     const issuer =
-      createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>(key);
+      createHmacAttestationIssuer<RepositoryPublisherAttestationClaims>({
+        ...key,
+        kind: 'repository-draft-publication',
+      });
     const verifier =
       createHmacAttestationVerifier<RepositoryPublisherAttestationClaims>({
+        kind: 'repository-draft-publication',
         keys: [key],
       });
     const ready = replayFeatureWorkflow(happyPath.slice(0, 7), {
@@ -311,7 +323,6 @@ describe('feature workflow reducer', () => {
         url: 'https://example.test/pr/persisted',
         draft: true,
         attestation: issuer.issue({
-          kind: 'repository-draft-publication',
           subject: 'pr-persisted',
           claims: publisherClaims,
           issuedAt: '2026-08-16T20:00:00.000Z',

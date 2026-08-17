@@ -182,7 +182,6 @@ export async function verifyCriterion(
   }
   const attestation = await verifier.verify(criterion, evidence);
   const finding = verifier.attestationVerifier.verify(attestation, {
-    kind: 'definition-of-done-verification',
     subject: `${verifier.id}:${criterion.id}:${evidence.id}`,
   });
   if (

@@ -1,14 +1,17 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
-export interface AttestationIdentity {
-  readonly kind: string;
+export interface AttestationSubject {
   readonly subject: string;
+}
+
+export interface AttestationIdentity extends AttestationSubject {
+  readonly kind: string;
 }
 
 export interface AttestationVerifier<Claims> {
   verify(
     attestation: unknown,
-    expected?: AttestationIdentity,
+    expected?: AttestationSubject,
   ): Claims | undefined;
 }
 
@@ -26,7 +29,7 @@ export interface SignedAttestation<Claims> extends AttestationIdentity {
   readonly signature: string;
 }
 
-export interface SignedAttestationIssue<Claims> extends AttestationIdentity {
+export interface SignedAttestationIssue<Claims> extends AttestationSubject {
   readonly claims: Claims;
   readonly issuedAt: string;
 }
@@ -40,6 +43,10 @@ export type SignedAttestationIssuer<Claims> = AttestationIssuer<Claims>;
 export interface HmacAttestationKey {
   readonly keyId: string;
   readonly secret: string | Uint8Array;
+}
+
+export interface HmacAttestationPurpose extends HmacAttestationKey {
+  readonly kind: string;
 }
 
 function compareCodeUnits(left: string, right: string): number {
@@ -106,17 +113,38 @@ function signaturePayload(attestation: {
   return canonicalJson(attestation);
 }
 
-function sign(secret: HmacAttestationKey['secret'], payload: string): string {
+function requireSecret(secret: HmacAttestationKey['secret']): Uint8Array {
+  const bytes =
+    typeof secret === 'string'
+      ? Buffer.from(secret, 'utf8')
+      : Uint8Array.from(secret);
+  if (bytes.byteLength < 32)
+    throw new Error('Attestation secret must contain at least 32 bytes');
+  return bytes;
+}
+
+function derivePurposeKey(
+  secret: HmacAttestationKey['secret'],
+  kind: string,
+): Uint8Array {
+  return createHmac('sha256', requireSecret(secret))
+    .update('agentos-attestation-purpose:v1\0', 'utf8')
+    .update(kind, 'utf8')
+    .digest();
+}
+
+function sign(secret: Uint8Array, payload: string): string {
   return createHmac('sha256', secret).update(payload).digest('hex');
 }
 
 export function createHmacAttestationIssuer<Claims>(
-  key: HmacAttestationKey,
+  options: HmacAttestationPurpose,
 ): AttestationIssuer<Claims> {
-  const keyId = requireNonEmpty(key.keyId, 'keyId');
+  const keyId = requireNonEmpty(options.keyId, 'keyId');
+  const kind = requireNonEmpty(options.kind, 'kind');
+  const purposeKey = derivePurposeKey(options.secret, kind);
   return Object.freeze({
     issue(request: SignedAttestationIssue<Claims>): SignedAttestation<Claims> {
-      const kind = requireNonEmpty(request.kind, 'kind');
       const subject = requireNonEmpty(request.subject, 'subject');
       const issuedAt = normalizeIssuedAt(request.issuedAt);
       const claimHash = hashClaims(request.claims);
@@ -131,7 +159,7 @@ export function createHmacAttestationIssuer<Claims>(
       return Object.freeze({
         ...signed,
         claims: request.claims,
-        signature: sign(key.secret, signaturePayload(signed)),
+        signature: sign(purposeKey, signaturePayload(signed)),
       });
     },
   });
@@ -154,19 +182,21 @@ function constantTimeSignatureMatches(
 }
 
 export function createHmacAttestationVerifier<Claims>(options: {
+  readonly kind: string;
   readonly keys: readonly HmacAttestationKey[];
 }): AttestationVerifier<Claims> {
-  const keys = new Map<string, HmacAttestationKey['secret']>();
+  const configuredKind = requireNonEmpty(options.kind, 'kind');
+  const keys = new Map<string, Uint8Array>();
   for (const key of options.keys) {
     const keyId = requireNonEmpty(key.keyId, 'keyId');
     if (keys.has(keyId))
       throw new Error(`Duplicate attestation keyId: ${keyId}`);
-    keys.set(keyId, key.secret);
+    keys.set(keyId, derivePurposeKey(key.secret, configuredKind));
   }
   return Object.freeze({
     verify(
       attestation: unknown,
-      expected?: AttestationIdentity,
+      expected?: AttestationSubject,
     ): Claims | undefined {
       if (!isRecord(attestation)) return undefined;
       const {
@@ -182,12 +212,11 @@ export function createHmacAttestationVerifier<Claims>(options: {
       if (
         version !== 1 ||
         typeof keyId !== 'string' ||
-        typeof kind !== 'string' ||
+        kind !== configuredKind ||
         typeof subject !== 'string' ||
         typeof claimHash !== 'string' ||
         typeof issuedAt !== 'string' ||
-        (expected !== undefined &&
-          (kind !== expected.kind || subject !== expected.subject))
+        (expected !== undefined && subject !== expected.subject)
       )
         return undefined;
       const secret = keys.get(keyId);
@@ -218,10 +247,13 @@ export function createHmacAttestationVerifier<Claims>(options: {
 }
 
 export function createHmacAttestationAuthority<Claims>(
-  key: HmacAttestationKey,
+  options: HmacAttestationPurpose,
 ): AttestationAuthority<Claims> {
   return Object.freeze({
-    issuer: createHmacAttestationIssuer<Claims>(key),
-    verifier: createHmacAttestationVerifier<Claims>({ keys: [key] }),
+    issuer: createHmacAttestationIssuer<Claims>(options),
+    verifier: createHmacAttestationVerifier<Claims>({
+      kind: options.kind,
+      keys: [options],
+    }),
   });
 }

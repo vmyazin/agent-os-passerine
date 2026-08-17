@@ -281,7 +281,6 @@ export function reduceFeatureWorkflow(
       const publisherClaims = context.publisherAttestationVerifier?.verify(
         event.publication.attestation,
         {
-          kind: 'repository-draft-publication',
           subject: event.publication.id,
         },
       );
