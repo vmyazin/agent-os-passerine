@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import { isoTimestamp, persistenceId } from '@agentos/core';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
+import { drizzle } from 'drizzle-orm/neon-http';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   EventFingerprintConflictError,
+  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import {
@@ -14,6 +16,7 @@ import {
   createNeonDomainRepositoryFromEnv,
   NeonDomainRepository,
 } from './neon-repository.js';
+import * as schema from './schema.js';
 
 const source = readFileSync(
   new URL('./neon-repository.ts', import.meta.url),
@@ -26,6 +29,45 @@ function repositoryWithRows(rows: readonly Record<string, unknown>[]) {
     execute,
     repository: new NeonDomainRepository({ execute } as never),
   };
+}
+
+function repositoryRecordingGeneratedQueries() {
+  const query = vi.fn().mockResolvedValue({
+    command: 'INSERT',
+    fields: [],
+    rowAsArray: true,
+    rowCount: 1,
+    rows: [[]],
+  });
+  const database = drizzle({ client: { query } as never, schema });
+  return { query, repository: new NeonDomainRepository(database) };
+}
+
+function latestParameters(query: ReturnType<typeof vi.fn>): readonly unknown[] {
+  return (query.mock.calls.at(-1)?.[1] ?? []) as readonly unknown[];
+}
+
+function expectJsonNullParameters(
+  query: ReturnType<typeof vi.fn>,
+  count: number,
+) {
+  expect(
+    latestParameters(query).filter((parameter) => parameter === 'null'),
+  ).toHaveLength(count);
+  expect(
+    ((query.mock.calls.at(-1)?.[0] as string | undefined) ?? '').match(
+      /::jsonb/g,
+    ) ?? [],
+  ).toHaveLength(count);
+}
+
+async function recordGeneratedQuery(
+  query: ReturnType<typeof vi.fn>,
+  action: () => Promise<unknown>,
+) {
+  const callsBefore = query.mock.calls.length;
+  await action().catch(() => undefined);
+  expect(query).toHaveBeenCalledTimes(callsBefore + 1);
 }
 
 function executedSql(execute: ReturnType<typeof vi.fn>): string {
@@ -91,6 +133,174 @@ describe('NeonDomainRepository', () => {
       EventFingerprintConflictError,
     );
     expect(conflict.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a duplicate event sequence to the domain conflict atomically', async () => {
+    const execute = vi.fn().mockRejectedValue(
+      Object.assign(
+        new Error('duplicate key value violates unique constraint'),
+        {
+          code: '23505',
+          constraint: 'domain_events_run_sequence_unique',
+        },
+      ),
+    );
+    const repository = new NeonDomainRepository({ execute } as never);
+
+    await expect(
+      repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', 'event-with-duplicate-sequence'),
+        fingerprint: 'sha256:event-two',
+        sequence: 1,
+        type: 'run.updated',
+        occurredAt: isoTimestamp('2026-08-16T12:01:00.000Z'),
+      }),
+    ).rejects.toBeInstanceOf(EventSequenceConflictError);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('encodes required top-level JSON null as JSONB on Drizzle inserts', async () => {
+    const { query, repository } = repositoryRecordingGeneratedQueries();
+    const createdAt = isoTimestamp('2026-08-16T12:00:00.000Z');
+    const projectId = persistenceId('project', 'project-json');
+    const configRevisionId = persistenceId('configRevision', 'config-json');
+
+    await recordGeneratedQuery(query, () =>
+      repository.createConfigRevision({
+        id: configRevisionId,
+        projectId,
+        revision: 1,
+        config: null,
+        configDigest: 'config',
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: 'sha',
+        createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 1);
+
+    await recordGeneratedQuery(query, () =>
+      repository.createConfigSnapshot({
+        id: persistenceId('configSnapshot', 'snapshot-json'),
+        runId,
+        configRevisionId,
+        config: null,
+        configDigest: 'config',
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: 'sha',
+        createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 1);
+
+    await recordGeneratedQuery(query, () =>
+      repository.createInboxMessage({
+        id: persistenceId('inboxMessage', 'inbox-json'),
+        runId,
+        status: 'pending',
+        body: null,
+        reply: null,
+        createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 2);
+  });
+
+  it('encodes optional JSON null while leaving absent fields as SQL NULL', async () => {
+    const { query, repository } = repositoryRecordingGeneratedQueries();
+    const createdAt = isoTimestamp('2026-08-16T12:00:00.000Z');
+    const projectId = persistenceId('project', 'project-json');
+    await recordGeneratedQuery(query, () =>
+      repository.createRun({
+        id: runId,
+        projectId,
+        pipeline: 'json',
+        status: 'pending',
+        input: null,
+        output: null,
+        error: null,
+        createdAt,
+        updatedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 3);
+
+    await recordGeneratedQuery(query, () =>
+      repository.updateRun(runId, {
+        output: null,
+        error: null,
+        updatedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 2);
+
+    await recordGeneratedQuery(query, () =>
+      repository.upsertStepRun({
+        id: persistenceId('stepRun', 'step-json'),
+        runId,
+        stepKey: 'json',
+        attempt: 1,
+        status: 'pending',
+        input: null,
+        output: null,
+        error: null,
+        createdAt,
+        updatedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 6);
+
+    await recordGeneratedQuery(query, () =>
+      repository.createExternalSession({
+        id: persistenceId('externalSession', 'session-json'),
+        runId,
+        provider: 'test',
+        externalId: 'external-json',
+        status: 'active',
+        state: null,
+        createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 1);
+
+    await recordGeneratedQuery(query, () =>
+      repository.replyInboxMessage({
+        messageId: persistenceId('inboxMessage', 'inbox-json'),
+        reply: null,
+        repliedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 1);
+
+    await recordGeneratedQuery(query, () =>
+      repository.appendGoalProgress({
+        id: persistenceId('goalProgress', 'progress-json'),
+        runId,
+        status: 'pending',
+        payload: null,
+        recordedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 1);
+
+    await recordGeneratedQuery(query, () =>
+      repository.createRun({
+        id: persistenceId('run', 'run-with-absent-json'),
+        projectId,
+        pipeline: 'json',
+        status: 'pending',
+        createdAt,
+        updatedAt: createdAt,
+      }),
+    );
+    expectJsonNullParameters(query, 0);
   });
 
   it('uses a single atomic statement to resolve usage idempotency', async () => {

@@ -18,6 +18,7 @@ import type {
   GoalProgress,
   InboxMessage,
   InboxMessageId,
+  JsonValue,
   Project,
   ProjectId,
   ReplyInboxMessageRequest,
@@ -40,6 +41,7 @@ import {
 } from './database-config.js';
 import {
   EventFingerprintConflictError,
+  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import {
@@ -127,8 +129,30 @@ function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
   );
 }
 
-function jsonbValue(value: unknown) {
-  return value === undefined ? sql`null` : sql`${JSON.stringify(value)}::jsonb`;
+function jsonbValue(value: JsonValue) {
+  return sql`${JSON.stringify(value)}::jsonb`;
+}
+
+function optionalJsonbValue(value: JsonValue | undefined) {
+  return value === undefined ? undefined : jsonbValue(value);
+}
+
+function nullableJsonbValue(value: JsonValue | undefined) {
+  return value === undefined ? sql`null` : jsonbValue(value);
+}
+
+function isPostgresConstraintError(
+  error: unknown,
+  constraint: string,
+): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === '23505' &&
+    'constraint' in error &&
+    error.constraint === constraint
+  );
 }
 
 const timestampTypeParsers = {
@@ -179,7 +203,7 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(configRevisions)
-        .values(revision)
+        .values({ ...revision, config: jsonbValue(revision.config) })
         .returning(configRevisionSelection),
       'Config revision',
       mapConfigRevisionRow,
@@ -216,7 +240,7 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(configSnapshots)
-        .values(snapshot)
+        .values({ ...snapshot, config: jsonbValue(snapshot.config) })
         .returning(configSnapshotSelection),
       'Config snapshot',
       mapConfigSnapshotRow,
@@ -251,7 +275,12 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(workflowRuns)
-        .values(run)
+        .values({
+          ...run,
+          input: optionalJsonbValue(run.input),
+          output: optionalJsonbValue(run.output),
+          error: optionalJsonbValue(run.error),
+        })
         .returning(workflowRunSelection),
       'Run',
       mapWorkflowRunRow,
@@ -294,7 +323,11 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .update(workflowRuns)
-        .set(update)
+        .set({
+          ...update,
+          output: optionalJsonbValue(update.output),
+          error: optionalJsonbValue(update.error),
+        })
         .where(eq(workflowRuns.id, id))
         .returning(workflowRunSelection),
       `Run ${id}`,
@@ -305,14 +338,19 @@ export class NeonDomainRepository implements DomainRepository {
   async upsertStepRun(step: StepRun): Promise<StepRun> {
     const rows = await this.database
       .insert(stepRuns)
-      .values(step)
+      .values({
+        ...step,
+        input: optionalJsonbValue(step.input),
+        output: optionalJsonbValue(step.output),
+        error: optionalJsonbValue(step.error),
+      })
       .onConflictDoUpdate({
         target: [stepRuns.runId, stepRuns.stepKey, stepRuns.attempt],
         set: {
           status: step.status,
-          input: step.input,
-          output: step.output,
-          error: step.error,
+          input: optionalJsonbValue(step.input),
+          output: optionalJsonbValue(step.output),
+          error: optionalJsonbValue(step.error),
           externalSessionId: step.externalSessionId,
           updatedAt: step.updatedAt,
           startedAt: step.startedAt,
@@ -350,7 +388,7 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(externalSessions)
-        .values(session)
+        .values({ ...session, state: optionalJsonbValue(session.state) })
         .returning(externalSessionSelection),
       'External session',
       mapExternalSessionRow,
@@ -437,7 +475,11 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(inboxMessages)
-        .values(message)
+        .values({
+          ...message,
+          body: jsonbValue(message.body),
+          reply: optionalJsonbValue(message.reply),
+        })
         .returning(inboxMessageSelection),
       'Inbox message',
       mapInboxMessageRow,
@@ -479,7 +521,7 @@ export class NeonDomainRepository implements DomainRepository {
       .update(inboxMessages)
       .set({
         status: 'replied',
-        reply: request.reply,
+        reply: jsonbValue(request.reply),
         repliedAt: request.repliedAt,
       })
       .where(
@@ -499,23 +541,33 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async appendEvent(event: DomainEvent): Promise<DomainEvent> {
-    const result = await this.database.execute<Record<string, unknown>>(sql`
-      insert into "domain_events"
-        ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
-      values
-        (${event.runId}, ${event.eventId}, ${event.fingerprint}, ${event.sequence}, ${event.type}, ${jsonbValue(event.payload)}, ${event.occurredAt})
-      on conflict ("run_id", "event_id") do update
-        set "fingerprint" = "domain_events"."fingerprint"
-      returning
-        "run_id" as "runId",
-        "event_id" as "eventId",
-        "fingerprint",
-        "sequence"::float8 as "sequence",
-        "type",
-        "payload",
-        ("payload" is not null) as "payloadPresent",
-        to_char("occurred_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "occurredAt"
-    `);
+    let result: { readonly rows: readonly Record<string, unknown>[] };
+    try {
+      result = await this.database.execute<Record<string, unknown>>(sql`
+        insert into "domain_events"
+          ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
+        values
+          (${event.runId}, ${event.eventId}, ${event.fingerprint}, ${event.sequence}, ${event.type}, ${nullableJsonbValue(event.payload)}, ${event.occurredAt})
+        on conflict ("run_id", "event_id") do update
+          set "fingerprint" = "domain_events"."fingerprint"
+        returning
+          "run_id" as "runId",
+          "event_id" as "eventId",
+          "fingerprint",
+          "sequence"::float8 as "sequence",
+          "type",
+          "payload",
+          ("payload" is not null) as "payloadPresent",
+          to_char("occurred_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "occurredAt"
+      `);
+    } catch (error) {
+      if (
+        isPostgresConstraintError(error, 'domain_events_run_sequence_unique')
+      ) {
+        throw new EventSequenceConflictError(event.runId, event.sequence);
+      }
+      throw error;
+    }
     const existing = mapDomainEventRow(one(result.rows, 'Event'));
     if (existing.fingerprint !== event.fingerprint) {
       throw new EventFingerprintConflictError(event.runId, event.eventId);
@@ -658,7 +710,10 @@ export class NeonDomainRepository implements DomainRepository {
     return mappedOne(
       await this.database
         .insert(goalProgress)
-        .values(progress)
+        .values({
+          ...progress,
+          payload: optionalJsonbValue(progress.payload),
+        })
         .returning(goalProgressSelection),
       'Goal progress',
       mapGoalProgressRow,
