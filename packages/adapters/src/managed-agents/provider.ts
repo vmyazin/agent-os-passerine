@@ -6,7 +6,6 @@ import type {
   RuntimeEvent,
   RuntimeHandle,
   RuntimeOutput,
-  RuntimeProvider,
   RuntimeUsage,
 } from '@agentos/core';
 
@@ -22,9 +21,9 @@ import type {
   ManagedAgentsRemoteSession,
 } from './sdk-contract.js';
 import type {
-  ManagedAgentsClientOptions,
   ManagedAgentsCustomToolResult,
   ManagedAgentsLimits,
+  ManagedAgentsProvider,
   ManagedAgentsRuntimeEnvironment,
   ManagedAgentsRuntimeHandle,
   ManagedAgentsRuntimeProviderOptions,
@@ -79,7 +78,7 @@ const DEFAULT_LIMITS: RequiredLimits = {
   streamReconnectDelayMs: 100,
 };
 
-export class ManagedAgentsRuntimeProvider implements RuntimeProvider {
+class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   readonly #client: ManagedAgentsClient;
   readonly #clock: Clock;
   readonly #limits: RequiredLimits;
@@ -428,19 +427,24 @@ export class ManagedAgentsRuntimeProvider implements RuntimeProvider {
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.retrieve(handle.id),
     );
-    if (!isSessionStatus(session.status)) {
-      throw new Error('Unsupported provider status');
-    }
-    return { status: session.status };
+    return { status: normalizeSessionStatus(session.status) };
   }
 
   async cleanup(handle: RuntimeHandle): Promise<void> {
     if (this.#cleanedSessions.has(handle.id)) return;
-    const session = await this.#wrap(() =>
+    let session = await this.#wrap(() =>
       this.#client.beta.sessions.retrieve(handle.id),
     );
-    if (session.status === 'running' || session.status === 'rescheduling') {
+    let status = normalizeSessionStatus(session.status);
+    if (status === 'running' || status === 'rescheduling') {
       await this.#interrupt(handle.id);
+      session = await this.#wrap(() =>
+        this.#client.beta.sessions.retrieve(handle.id),
+      );
+      status = normalizeSessionStatus(session.status);
+    }
+    if (status !== 'idle' && status !== 'terminated') {
+      throw new Error('Session remained active after interrupt');
     }
     await this.#wrap(() => this.#client.beta.sessions.archive(handle.id));
     await this.#wrap(() => this.#client.beta.sessions.delete(handle.id));
@@ -472,11 +476,33 @@ export class ManagedAgentsRuntimeProvider implements RuntimeProvider {
 
 export async function createManagedAgentsRuntimeProvider(
   options: ManagedAgentsRuntimeProviderOptions,
-): Promise<ManagedAgentsRuntimeProvider> {
+): Promise<ManagedAgentsProvider> {
+  return createManagedAgentsRuntimeProviderWithDependencies(options, {});
+}
+
+export interface ManagedAgentsClientOptions {
+  readonly apiKey: string;
+  readonly baseURL?: string;
+  readonly timeout: number;
+  readonly fetch?: typeof fetch;
+}
+
+export interface ManagedAgentsProviderDependencies {
+  readonly client?: ManagedAgentsClient;
+  readonly clientFactory?: (
+    options: ManagedAgentsClientOptions,
+  ) => ManagedAgentsClient | Promise<ManagedAgentsClient>;
+  readonly clock?: Clock;
+}
+
+export async function createManagedAgentsRuntimeProviderWithDependencies(
+  options: ManagedAgentsRuntimeProviderOptions,
+  dependencies: ManagedAgentsProviderDependencies,
+): Promise<ManagedAgentsProvider> {
   const validated = validateOptions(options);
   const client =
-    options.client ??
-    (await (options.clientFactory ?? defaultClientFactory)({
+    dependencies.client ??
+    (await (dependencies.clientFactory ?? defaultClientFactory)({
       apiKey: options.apiKey,
       ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
       timeout: validated.requestTimeoutMs,
@@ -484,7 +510,7 @@ export async function createManagedAgentsRuntimeProvider(
     }));
   return new ManagedAgentsRuntimeProvider(
     client,
-    options.clock ?? systemClock,
+    dependencies.clock ?? systemClock,
     validated.limits,
     options.allowUnrestrictedNetworking === true,
   );
@@ -870,15 +896,21 @@ function nonnegative(value: unknown): number {
     : 0;
 }
 
-function isSessionStatus(
+function normalizeSessionStatus(
   value: unknown,
-): value is ManagedAgentsRemoteSession['status'] {
-  return (
+): ManagedAgentsRemoteSession['status'] {
+  if (value === undefined || value === null || typeof value !== 'string') {
+    throw new Error('Malformed provider status');
+  }
+  if (
     value === 'rescheduling' ||
     value === 'running' ||
     value === 'idle' ||
     value === 'terminated'
-  );
+  ) {
+    return value;
+  }
+  throw new Error('Unsupported provider status');
 }
 
 function isLocalError(error: unknown): boolean {

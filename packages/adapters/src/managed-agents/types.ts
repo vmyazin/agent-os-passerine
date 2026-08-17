@@ -1,11 +1,10 @@
 import type {
-  Clock,
   RuntimeEnvironment,
+  RuntimeEvent,
   RuntimeHandle,
+  RuntimeProvider,
   RuntimeStartRequest,
 } from '@agentos/core';
-
-import type { ManagedAgentsClient } from './sdk-contract.js';
 
 export interface ManagedAgentsLimits {
   readonly maxRemoteResources?: number;
@@ -17,25 +16,13 @@ export interface ManagedAgentsLimits {
   readonly streamReconnectDelayMs?: number;
 }
 
-export interface ManagedAgentsClientOptions {
-  readonly apiKey: string;
-  readonly baseURL?: string;
-  readonly timeout: number;
-  readonly fetch?: typeof fetch;
-}
-
 export interface ManagedAgentsRuntimeProviderOptions {
   readonly apiKey: string;
   readonly baseURL?: string;
   readonly requestTimeoutMs?: number;
   readonly allowUnrestrictedNetworking?: boolean;
   readonly limits?: ManagedAgentsLimits;
-  readonly client?: ManagedAgentsClient;
-  readonly clientFactory?: (
-    options: ManagedAgentsClientOptions,
-  ) => ManagedAgentsClient | Promise<ManagedAgentsClient>;
   readonly transport?: typeof fetch;
-  readonly clock?: Clock;
 }
 
 export interface ManagedAgentsLimitedNetworking {
@@ -114,4 +101,13 @@ export type ManagedAgentsNormalizedStatus =
 
 export interface ManagedAgentsStatus {
   readonly status: 'rescheduling' | 'running' | 'idle' | 'terminated';
+}
+
+export interface ManagedAgentsProvider extends RuntimeProvider {
+  start(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle>;
+  syncEnvironment(environment: ManagedAgentsRuntimeEnvironment): Promise<void>;
+  listEvents(handle: RuntimeHandle): Promise<readonly RuntimeEvent[]>;
+  status(handle: RuntimeHandle): Promise<ManagedAgentsStatus>;
 }

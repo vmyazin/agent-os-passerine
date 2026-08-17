@@ -6,14 +6,14 @@ import type {
   ManagedAgentsRemoteAgent,
   ManagedAgentsRemoteEnvironment,
   ManagedAgentsRemoteSession,
-} from './sdk-contract.js';
+} from './test-support.js';
 import {
   ManagedAgentsConflictError,
   ManagedAgentsLimitError,
   ManagedAgentsProviderError,
-  createManagedAgentsRuntimeProvider,
   type ManagedAgentsRuntimeHandle,
 } from './index.js';
+import { createManagedAgentsRuntimeProviderForTest as createManagedAgentsRuntimeProvider } from './test-support.js';
 
 const NOW = new Date('2026-08-17T12:00:00.000Z');
 
@@ -39,6 +39,8 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
   readonly streamOptions: Array<{ signal?: AbortSignal } | undefined> = [];
   readonly archived: string[] = [];
   readonly deleted: string[] = [];
+  readonly operationLog: string[] = [];
+  readonly retrieveStatuses: unknown[] = [];
   readonly agents: ManagedAgentsRemoteAgent[] = [];
   readonly environments: ManagedAgentsRemoteEnvironment[] = [];
   readonly sessions = new Map<string, ManagedAgentsRemoteSession>();
@@ -138,12 +140,18 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
       },
       retrieve: async (id: string) => {
         this.throwIfConfigured();
+        this.operationLog.push(`retrieve:${id}`);
         const session = this.sessions.get(id);
         if (!session) throw new Error('not found');
-        return session;
+        if (this.retrieveStatuses.length === 0) return session;
+        return {
+          ...session,
+          status: this.retrieveStatuses.shift(),
+        } as ManagedAgentsRemoteSession;
       },
       archive: async (id: string) => {
         this.throwIfConfigured();
+        this.operationLog.push(`archive:${id}`);
         this.archived.push(id);
         const session = this.sessions.get(id);
         if (!session) throw new Error('not found');
@@ -152,6 +160,7 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
       },
       delete: async (id: string) => {
         this.throwIfConfigured();
+        this.operationLog.push(`delete:${id}`);
         this.deleted.push(id);
         this.sessions.delete(id);
         return { id, type: 'session_deleted' as const };
@@ -171,7 +180,14 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
         },
         send: async (id: string, params: unknown) => {
           this.throwIfConfigured();
+          this.operationLog.push(`send:${id}`);
           this.sentEvents.push({ id, params });
+          const events = (params as { events?: Array<{ type?: string }> })
+            .events;
+          if (events?.some((event) => event.type === 'user.interrupt')) {
+            const session = this.sessions.get(id);
+            if (session) session.status = 'idle';
+          }
           return { data: [] };
         },
       },
@@ -1052,5 +1068,161 @@ describe('status and cleanup', () => {
     ]);
     expect(client.archived).toEqual([handle.id]);
     expect(client.deleted).toEqual([handle.id]);
+    expect(client.operationLog).toEqual([
+      `retrieve:${handle.id}`,
+      `send:${handle.id}`,
+      `retrieve:${handle.id}`,
+      `archive:${handle.id}`,
+      `delete:${handle.id}`,
+    ]);
+  });
+
+  it.each(['running', 'rescheduling'] as const)(
+    'revalidates %s after interrupt before destructive cleanup',
+    async (status) => {
+      const { client, provider } = await syncedProvider();
+      const handle = await provider.start({
+        runId: 'run-1',
+        stepId: 'step-1',
+        agentId: 'writer',
+        environmentId: 'node',
+        input: 'work',
+      });
+      client.sessions.get(handle.id)!.status = status;
+
+      await provider.cleanup(handle);
+
+      expect(client.operationLog).toEqual([
+        `retrieve:${handle.id}`,
+        `send:${handle.id}`,
+        `retrieve:${handle.id}`,
+        `archive:${handle.id}`,
+        `delete:${handle.id}`,
+      ]);
+    },
+  );
+
+  it.each(['idle', 'terminated'] as const)(
+    'cleans up known %s sessions without interrupting',
+    async (status) => {
+      const { client, provider } = await syncedProvider();
+      const handle = await provider.start({
+        runId: 'run-1',
+        stepId: 'step-1',
+        agentId: 'writer',
+        environmentId: 'node',
+        input: 'work',
+      });
+      client.sessions.get(handle.id)!.status = status;
+
+      await provider.cleanup(handle);
+
+      expect(client.operationLog).toEqual([
+        `retrieve:${handle.id}`,
+        `archive:${handle.id}`,
+        `delete:${handle.id}`,
+      ]);
+      expect(client.sentEvents).toEqual([]);
+    },
+  );
+
+  it('fails closed on an unknown initial status without destructive calls', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    client.retrieveStatuses.push('provider_new_status');
+
+    await expect(provider.cleanup(handle)).rejects.toThrow(
+      'Unsupported provider status',
+    );
+    expect(client.archived).toEqual([]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sentEvents).toEqual([]);
+  });
+
+  it('fails closed on a malformed initial status without destructive calls', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    client.retrieveStatuses.push(null);
+
+    await expect(provider.cleanup(handle)).rejects.toThrow(
+      'Malformed provider status',
+    );
+    expect(client.archived).toEqual([]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sentEvents).toEqual([]);
+  });
+
+  it('fails closed when post-interrupt status is unknown', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    client.retrieveStatuses.push('running', undefined);
+
+    await expect(provider.cleanup(handle)).rejects.toThrow(
+      'Malformed provider status',
+    );
+    expect(client.archived).toEqual([]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sentEvents).toHaveLength(1);
+  });
+
+  it.each(['running', 'rescheduling'] as const)(
+    'does not destructively clean up when %s persists after interrupt',
+    async (status) => {
+      const { client, provider } = await syncedProvider();
+      const handle = await provider.start({
+        runId: 'run-1',
+        stepId: 'step-1',
+        agentId: 'writer',
+        environmentId: 'node',
+        input: 'work',
+      });
+      client.retrieveStatuses.push(status, status);
+
+      await expect(provider.cleanup(handle)).rejects.toThrow(
+        'Session remained active after interrupt',
+      );
+      expect(client.archived).toEqual([]);
+      expect(client.deleted).toEqual([]);
+      expect(client.sentEvents).toHaveLength(1);
+    },
+  );
+
+  it('uses the same strict status normalizer for retrieval and cleanup', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    client.retrieveStatuses.push('future_status', 'future_status');
+
+    await expect(provider.status(handle)).rejects.toThrow(
+      'Unsupported provider status',
+    );
+    await expect(provider.cleanup(handle)).rejects.toThrow(
+      'Unsupported provider status',
+    );
+    expect(client.archived).toEqual([]);
+    expect(client.deleted).toEqual([]);
   });
 });

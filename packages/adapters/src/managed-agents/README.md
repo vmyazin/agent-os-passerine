@@ -11,8 +11,9 @@ rename is contained to the adapter. Upgrade the SDK only with a review of that
 facade, the official Managed Agents reference, and the full contract suite.
 
 Importing the adapter performs no client construction or network I/O. The
-async factory validates configuration before constructing a client and accepts
-an injected client, client factory/transport, and clock for deterministic tests.
+async public factory validates configuration before constructing a client and
+accepts a narrow transport override. SDK clients and clocks are injectable only
+through a non-entrypoint test seam that runs the same validation path.
 
 Remote agents and environments are declaratively keyed by
 `agentos.local_id`/`agentos.config_digest` metadata. Agent updates include the
