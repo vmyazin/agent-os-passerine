@@ -1,4 +1,5 @@
 import { lstat, realpath } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { CliError } from './args.js';
@@ -16,6 +17,19 @@ async function existingEntry(path: string) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw new CliError(`cannot inspect workspace path: ${path}`);
+  }
+}
+
+function assertTrustedDirectory(path: string, info: Stats): void {
+  if (!info.isDirectory()) {
+    throw new CliError(`workspace path is not a directory: ${path}`);
+  }
+  const uid = process.getuid?.();
+  if (uid !== undefined && info.uid !== uid) {
+    throw new CliError(`workspace directory ownership is unsafe: ${path}`);
+  }
+  if ((info.mode & 0o022) !== 0) {
+    throw new CliError(`workspace directory permissions are unsafe: ${path}`);
   }
 }
 
@@ -38,6 +52,11 @@ async function discoverWorkspaceRoot(start: string): Promise<WorkspaceRoot> {
     for (const marker of ROOT_MARKERS) {
       const info = await existingEntry(resolve(current, marker));
       if (info !== undefined && !info.isSymbolicLink()) {
+        const rootInfo = await existingEntry(current);
+        if (rootInfo === undefined) {
+          throw new CliError(`cannot inspect workspace path: ${current}`);
+        }
+        assertTrustedDirectory(current, rootInfo);
         return { canonical: current, lexical: current };
       }
     }
@@ -53,6 +72,33 @@ async function discoverWorkspaceRoot(start: string): Promise<WorkspaceRoot> {
 
 export async function findWorkspaceRoot(start: string): Promise<string> {
   return (await discoverWorkspaceRoot(start)).canonical;
+}
+
+export async function assertTrustedConfigurationDirectories(
+  root: string,
+  path: string,
+): Promise<void> {
+  const parent = dirname(path);
+  if (!isWithin(root, parent)) {
+    throw new CliError('configuration path is outside the workspace');
+  }
+  const child = relative(root, parent);
+  const directories = [root];
+  let current = root;
+  for (const component of child.split(sep).filter(Boolean)) {
+    current = resolve(current, component);
+    directories.push(current);
+  }
+  for (const directory of directories) {
+    const info = await existingEntry(directory);
+    if (info === undefined) break;
+    if (info.isSymbolicLink()) {
+      throw new CliError(
+        `configuration path contains a symbolic link: ${directory}`,
+      );
+    }
+    assertTrustedDirectory(directory, info);
+  }
 }
 
 async function assertNoSymlinkComponents(
@@ -90,6 +136,7 @@ export async function resolveConfigurationPath(
   if (inspectionRoot === undefined) {
     throw new CliError('configuration path is outside the workspace');
   }
+  await assertTrustedConfigurationDirectories(inspectionRoot, candidate);
   await assertNoSymlinkComponents(inspectionRoot, candidate);
   const existing = await existingEntry(candidate);
   let resolved: string;

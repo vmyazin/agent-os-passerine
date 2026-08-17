@@ -162,6 +162,11 @@ export interface ConfigRevision extends PersistenceDigests {
 
 export type ConfigRevisionDraft = Omit<ConfigRevision, 'revision'>;
 
+export interface ConfigRevisionPrecondition {
+  readonly revision: number | null;
+  readonly digest: string | null;
+}
+
 export interface ConfigSnapshot extends PersistenceDigests {
   readonly id: ConfigSnapshotId;
   readonly runId: WorkflowRunId;
@@ -377,6 +382,7 @@ export interface DomainRepository {
   applyConfigRevision(
     project: Project,
     revision: ConfigRevisionDraft,
+    precondition?: ConfigRevisionPrecondition,
   ): Promise<ConfigRevision>;
   getConfigRevision(id: ConfigRevisionId): Promise<ConfigRevision | undefined>;
   getLatestConfigRevision(): Promise<ConfigRevision | undefined>;

@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 import {
   createNeonDomainRepository,
@@ -145,7 +146,10 @@ describe('NeonDomainRepository', () => {
     ).resolves.toEqual(recorded);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(executedSql(execute)).toContain('pg_advisory_xact_lock');
+    expect(executedSql(execute)).toContain('"global_configuration_lock"');
     expect(executedSql(execute)).toContain('"existing_revision"');
+    expect(executedSql(execute)).toContain('"active_revision"');
+    expect(executedSql(execute)).toContain('"precondition"');
     expect(executedSql(execute)).toContain('where not exists');
     expect(executedSql(execute)).toContain('"name" = excluded."name"');
     expect(executedSql(execute)).not.toContain(
@@ -173,6 +177,22 @@ describe('NeonDomainRepository', () => {
       concurrent.applyConfigRevision(project, revision),
     ).resolves.toMatchObject({ revision: 2 });
     expect(retryExecute).toHaveBeenCalledTimes(2);
+
+    const staleExecute = vi
+      .fn()
+      .mockRejectedValueOnce({
+        code: '23505',
+        constraint: 'config_revisions_project_revision_unique',
+      })
+      .mockResolvedValueOnce({ rows: [] });
+    const stale = new NeonDomainRepository({ execute: staleExecute } as never);
+    await expect(
+      stale.applyConfigRevision(project, revision, {
+        revision: 1,
+        digest: 'config',
+      }),
+    ).rejects.toBeInstanceOf(StaleConfigurationError);
+    expect(staleExecute).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed before constructing a client when database configuration is absent', () => {

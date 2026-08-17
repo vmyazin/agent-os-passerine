@@ -31,8 +31,22 @@ export const configurationApplySchema = z
       .min(2)
       .max(56 * 1024),
     digest: z.string().regex(/^[a-f0-9]{64}$/),
+    expectedRevision: z.number().int().positive().nullable(),
+    expectedDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.expectedRevision === null) !== (value.expectedDigest === null)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expectedRevision'],
+        message: 'expected revision and digest must both be null or non-null',
+      });
+    }
+  });
 export const configurationProjectionSchema = z
   .object({
     canonicalConfig: z.string().optional(),

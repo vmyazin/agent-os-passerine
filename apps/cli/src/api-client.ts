@@ -1,7 +1,10 @@
 import { CliError } from './args.js';
 
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_REQUEST_BYTES = 64 * 1024;
+export const MAX_CONFIGURATION_REQUEST_BYTES = 512 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const BEARER_TOKEN = /^[A-Za-z0-9._~+/-]+=*$/;
 const REMOTE_CODES = new Set([
   'approval_already_decided',
   'approval_expired',
@@ -12,6 +15,7 @@ const REMOTE_CODES = new Set([
   'configuration_digest_mismatch',
   'configuration_invalid',
   'configuration_not_canonical',
+  'configuration_stale',
   'idempotency_conflict',
   'idempotency_key_required',
   'invalid_api_token',
@@ -30,6 +34,13 @@ export class ApiError extends CliError {
   ) {
     super(message, status === 401 || status === 403 ? 4 : 3);
     this.name = 'ApiError';
+  }
+}
+
+class RequestValidationError extends CliError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RequestValidationError';
   }
 }
 
@@ -118,8 +129,10 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions) {
     this.#baseUrl = checkedBaseUrl(options.url);
-    this.#token = options.token.trim();
+    this.#token = options.token;
     if (!this.#token) throw new CliError('Agent OS API token is required');
+    if (!BEARER_TOKEN.test(this.#token))
+      throw new CliError('Agent OS API token is invalid');
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (
       !Number.isSafeInteger(this.#timeoutMs) ||
@@ -144,23 +157,38 @@ export class ApiClient {
     ) {
       throw new CliError('API path is invalid');
     }
-    const headers = new Headers({
-      accept: 'application/json',
-      authorization: `Bearer ${this.#token}`,
-    });
-    if (body !== undefined) headers.set('content-type', 'application/json');
-    if (idempotencyKey !== undefined)
-      headers.set('idempotency-key', idempotencyKey);
     const signal = AbortSignal.timeout(this.#timeoutMs);
     let response: Response;
     try {
+      let serializedBody: string | undefined;
+      if (body !== undefined) {
+        serializedBody = JSON.stringify(body);
+        if (serializedBody === undefined)
+          throw new RequestValidationError(
+            'request body is not JSON serializable',
+          );
+        const limit =
+          url.pathname === '/api/configuration/apply'
+            ? MAX_CONFIGURATION_REQUEST_BYTES
+            : MAX_REQUEST_BYTES;
+        if (new TextEncoder().encode(serializedBody).byteLength > limit)
+          throw new RequestValidationError('request body is too large');
+      }
+      const headers = new Headers({
+        accept: 'application/json',
+        authorization: `Bearer ${this.#token}`,
+      });
+      if (body !== undefined) headers.set('content-type', 'application/json');
+      if (idempotencyKey !== undefined)
+        headers.set('idempotency-key', idempotencyKey);
       response = await this.#fetch(url, {
         method,
         headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(serializedBody === undefined ? {} : { body: serializedBody }),
         signal,
       });
     } catch (error) {
+      if (error instanceof RequestValidationError) throw error;
       if (signal.aborted) throw new ApiError('request timed out');
       const message = error instanceof Error ? error.message : 'request failed';
       throw new ApiError(redact(message, this.#token));

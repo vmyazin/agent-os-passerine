@@ -48,7 +48,7 @@ export interface CliIo {
 
 function connection(command: Command, io: CliIo): ApiClient {
   const url = command.url ?? io.env.AGENTOS_URL?.trim();
-  const token = command.token ?? io.env.AGENTOS_API_TOKEN?.trim();
+  const token = command.token ?? io.env.AGENTOS_API_TOKEN;
   if (!url)
     throw new CliError(
       'Agent OS URL is required; set AGENTOS_URL or use --url',
@@ -122,6 +122,7 @@ function boundedReply(value: string): string {
 function activeConfiguration(value: unknown): {
   readonly canonicalConfig: string;
   readonly digest: string;
+  readonly revision: number;
 } | null {
   if (value === null || typeof value !== 'object' || !('active' in value)) {
     throw new ApiError('server returned an invalid configuration projection');
@@ -133,11 +134,16 @@ function activeConfiguration(value: unknown): {
     active === null ||
     typeof (active as { canonicalConfig?: unknown }).canonicalConfig !==
       'string' ||
-    typeof (active as { digest?: unknown }).digest !== 'string'
+    typeof (active as { digest?: unknown }).digest !== 'string' ||
+    typeof (active as { revision?: unknown }).revision !== 'number'
   ) {
     throw new ApiError('server returned an invalid configuration projection');
   }
-  return active as { canonicalConfig: string; digest: string };
+  return active as {
+    canonicalConfig: string;
+    digest: string;
+    revision: number;
+  };
 }
 
 async function execute(command: Command, io: CliIo): Promise<unknown> {
@@ -191,10 +197,19 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
         io.cwd ?? process.cwd(),
       );
       const loaded = await readConfiguration(path);
-      return remote(connection(command, io)).request({
+      const client = remote(connection(command, io));
+      const current = activeConfiguration(
+        await client.request({ method: 'GET', path: '/api/configuration' }),
+      );
+      return client.request({
         method: 'POST',
         path: '/api/configuration/apply',
-        body: { canonicalConfig: loaded.canonical, digest: loaded.digest },
+        body: {
+          canonicalConfig: loaded.canonical,
+          digest: loaded.digest,
+          expectedRevision: current?.revision ?? null,
+          expectedDigest: current?.digest ?? null,
+        },
         idempotencyKey: command.idempotencyKey,
       });
     }

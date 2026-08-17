@@ -8,6 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "agentos": "pnpm --silent --filter @agentos/cli... build && node apps/cli/dist/index.js",
     "build": "turbo run build",
     "db:check": "drizzle-kit check",
     "db:generate": "drizzle-kit generate",

@@ -67,8 +67,17 @@ describe('atomic mutation outbox contract', () => {
       createdAt: at,
     } as const;
 
-    const first = await repository.applyConfigRevision(project, revision);
-    const replay = await repository.applyConfigRevision(project, revision);
+    const noActive = { revision: null, digest: null } as const;
+    const first = await repository.applyConfigRevision(
+      project,
+      revision,
+      noActive,
+    );
+    const replay = await repository.applyConfigRevision(
+      project,
+      revision,
+      noActive,
+    );
 
     expect(replay).toEqual(first);
     expect(first.revision).toBe(1);
@@ -76,11 +85,46 @@ describe('atomic mutation outbox contract', () => {
       first,
     ]);
     await expect(
-      repository.applyConfigRevision(project, {
-        ...revision,
-        configDigest: 'changed',
-      }),
+      repository.applyConfigRevision(
+        project,
+        {
+          ...revision,
+          configDigest: 'changed',
+        },
+        noActive,
+      ),
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+    const concurrent = await Promise.allSettled([
+      repository.applyConfigRevision(
+        project,
+        {
+          ...revision,
+          id: persistenceId('configRevision', 'configuration-next-a'),
+          config: { version: 2 },
+          configDigest: 'config-a',
+        },
+        { revision: 1, digest: 'config' },
+      ),
+      repository.applyConfigRevision(
+        project,
+        {
+          ...revision,
+          id: persistenceId('configRevision', 'configuration-next-b'),
+          config: { version: 3 },
+          configDigest: 'config-b',
+        },
+        { revision: 1, digest: 'config' },
+      ),
+    ]);
+    expect(
+      concurrent.filter((entry) => entry.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      concurrent.find((entry) => entry.status === 'rejected'),
+    ).toMatchObject({
+      reason: { name: 'StaleConfigurationError' },
+    });
   });
 
   it('atomically replays concurrent run creation and rejects changed payloads', async () => {

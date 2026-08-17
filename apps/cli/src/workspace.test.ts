@@ -1,8 +1,15 @@
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { findWorkspaceRoot, resolveConfigurationPath } from './workspace.js';
 
@@ -79,4 +86,40 @@ describe('workspace configuration discovery', () => {
       resolveConfigurationPath('linked-agentos/agent-os.yaml', nested),
     ).rejects.toThrow('symbolic link');
   });
+
+  it('rejects a group-writable workspace root', async () => {
+    const { root, nested } = await workspace();
+    await chmod(root, 0o770);
+
+    await expect(findWorkspaceRoot(nested)).rejects.toThrow(
+      'workspace directory permissions',
+    );
+  });
+
+  it('rejects group- or world-writable directories below the workspace root', async () => {
+    const { root, nested } = await workspace();
+    await chmod(join(root, 'agentos'), 0o777);
+
+    await expect(
+      resolveConfigurationPath('agentos/agent-os.yaml', nested),
+    ).rejects.toThrow('workspace directory permissions');
+  });
+
+  it.runIf(typeof process.getuid === 'function')(
+    'rejects workspace directories owned by another uid when ownership is available',
+    async () => {
+      const { nested } = await workspace();
+      const getuid = process.getuid as () => number;
+      const getuidSpy = vi
+        .spyOn(process, 'getuid')
+        .mockReturnValue(getuid() + 1);
+      try {
+        await expect(findWorkspaceRoot(nested)).rejects.toThrow(
+          'workspace directory ownership',
+        );
+      } finally {
+        getuidSpy.mockRestore();
+      }
+    },
+  );
 });

@@ -47,6 +47,8 @@ runtime: { provider: local }
     const input = {
       canonicalConfig: canonicalConfigJson(config),
       digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
     };
 
     const first = await service.applyConfiguration('apply-key', input);
@@ -96,6 +98,8 @@ runtime: { provider: local }
     await service.applyConfiguration('apply-key', {
       canonicalConfig,
       digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
     });
 
     await expect(
@@ -105,6 +109,8 @@ runtime: { provider: local }
           '"concurrency":2',
         ),
         digest: '0'.repeat(64),
+        expectedRevision: null,
+        expectedDigest: null,
       }),
     ).rejects.toMatchObject({
       code: 'configuration_digest_mismatch',
@@ -117,6 +123,8 @@ runtime: { provider: local }
       service.applyConfiguration('apply-key', {
         canonicalConfig: canonicalConfigJson(changed),
         digest: canonicalConfigHash(changed),
+        expectedRevision: null,
+        expectedDigest: null,
       }),
     ).rejects.toMatchObject({ code: 'idempotency_conflict', status: 409 });
   });
@@ -172,6 +180,8 @@ runtime: { provider: local }
     const first = await service.applyConfiguration('revision-1', {
       canonicalConfig: canonicalConfigJson(config),
       digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
     });
     clock = isoTimestamp('2026-08-17T12:01:00.000Z');
     const changed = {
@@ -186,6 +196,8 @@ runtime: { provider: local }
     const second = await service.applyConfiguration('revision-2', {
       canonicalConfig: canonicalConfigJson(changed),
       digest: canonicalConfigHash(changed),
+      expectedRevision: first.revision,
+      expectedDigest: first.digest,
     });
 
     expect(second).toMatchObject({ projectId: first.projectId, revision: 2 });
@@ -199,29 +211,43 @@ runtime: { provider: local }
     });
 
     clock = isoTimestamp('2026-08-17T12:02:00.000Z');
-    const concurrent = await Promise.all(
-      Array.from({ length: 8 }, (_value, index) =>
+    const candidates = [3, 4].map((concurrency) => ({
+      ...changed,
+      budgets: { ...changed.budgets, concurrency },
+    }));
+    const concurrent = await Promise.allSettled(
+      candidates.map((candidate, index) =>
         service.applyConfiguration(`concurrent-${String(index)}`, {
-          canonicalConfig: canonicalConfigJson(changed),
-          digest: canonicalConfigHash(changed),
+          canonicalConfig: canonicalConfigJson(candidate),
+          digest: canonicalConfigHash(candidate),
+          expectedRevision: second.revision,
+          expectedDigest: second.digest,
         }),
       ),
     );
     expect(
-      concurrent.map((entry) => entry.revision).sort((a, b) => a - b),
-    ).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+      concurrent.filter((entry) => entry.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      concurrent.filter((entry) => entry.status === 'rejected'),
+    ).toHaveLength(1);
+    expect(
+      concurrent.find((entry) => entry.status === 'rejected'),
+    ).toMatchObject({
+      reason: { code: 'configuration_stale', status: 409 },
+    });
     const revisions = await repository.listConfigRevisions(
       persistenceId('project', first.projectId),
       { limit: 100 },
     );
-    expect(revisions).toHaveLength(10);
+    expect(revisions).toHaveLength(3);
     expect(new Set(revisions.map((entry) => entry.id))).toHaveProperty(
       'size',
-      10,
+      3,
     );
   });
 
-  it('uses one project identity for concurrent first configuration applies', async () => {
+  it('allows only one concurrent first configuration apply', async () => {
     const repository = new InMemoryDomainRepository();
     const service = createService(repository);
     const firstConfig = loadAgentOsConfig(`
@@ -240,20 +266,24 @@ runtime: { provider: local }
       ...firstConfig,
       project: { ...firstConfig.project, name: 'Second Project' },
     };
-    const applied = await Promise.all(
+    const applied = await Promise.allSettled(
       [firstConfig, secondConfig].map((entry, index) =>
         service.applyConfiguration(`first-${String(index)}`, {
           canonicalConfig: canonicalConfigJson(entry),
           digest: canonicalConfigHash(entry),
+          expectedRevision: null,
+          expectedDigest: null,
         }),
       ),
     );
 
-    expect(new Set(applied.map((entry) => entry.projectId))).toHaveProperty(
-      'size',
-      1,
-    );
-    expect(applied.map((entry) => entry.revision).sort()).toEqual([1, 2]);
+    expect(
+      applied.filter((entry) => entry.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(applied.find((entry) => entry.status === 'rejected')).toMatchObject({
+      reason: { code: 'configuration_stale', status: 409 },
+    });
+    await expect(repository.listProjects()).resolves.toHaveLength(1);
   });
 
   it('creates a feature idempotently across service restarts', async () => {

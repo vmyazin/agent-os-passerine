@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   link,
+  lstat,
   mkdir,
   open,
   realpath,
@@ -19,6 +20,10 @@ import {
 } from '@agentos/core';
 
 import { CliError } from './args.js';
+import {
+  assertTrustedConfigurationDirectories,
+  findWorkspaceRoot,
+} from './workspace.js';
 
 export const MAX_CONFIG_BYTES = 56 * 1024;
 
@@ -32,6 +37,41 @@ async function assertCanonicalParent(path: string): Promise<void> {
     if (error instanceof CliError) throw error;
     throw new CliError(`cannot inspect configuration path: ${path}`);
   }
+}
+
+async function configurationWorkspaceRoot(path: string): Promise<string> {
+  let current = dirname(path);
+  while (true) {
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) {
+        throw new CliError(
+          `configuration path contains a symbolic link: ${current}`,
+        );
+      }
+      if (!info.isDirectory()) {
+        throw new CliError(`workspace path is not a directory: ${current}`);
+      }
+      return await findWorkspaceRoot(current);
+    } catch (error) {
+      if (error instanceof CliError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new CliError(`cannot inspect configuration path: ${path}`);
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      throw new CliError(
+        'workspace root not found; run agentos inside a repository',
+      );
+    }
+    current = parent;
+  }
+}
+
+async function assertTrustedBoundary(path: string): Promise<void> {
+  const root = await configurationWorkspaceRoot(path);
+  await assertTrustedConfigurationDirectories(root, path);
 }
 
 export const STARTER_CONFIG = `version: 1
@@ -99,6 +139,7 @@ runtime:
 async function readBounded(path: string): Promise<string> {
   let handle;
   try {
+    await assertTrustedBoundary(path);
     await assertCanonicalParent(path);
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = await handle.stat();
@@ -185,6 +226,7 @@ export async function initConfiguration(
   path: string,
   force: boolean,
 ): Promise<{ readonly created: true; readonly path: string }> {
+  await assertTrustedBoundary(path);
   if (!force) {
     try {
       await stat(path);
@@ -199,7 +241,9 @@ export async function initConfiguration(
     }
   }
   const parent = dirname(path);
+  await assertTrustedBoundary(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
+  await assertTrustedBoundary(path);
   await assertCanonicalParent(path);
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   let handle;
@@ -216,6 +260,7 @@ export async function initConfiguration(
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await assertTrustedBoundary(path);
     await assertCanonicalParent(path);
     if (force) {
       await rename(temporary, path);

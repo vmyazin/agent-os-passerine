@@ -1,4 +1,6 @@
 import {
+  chmod,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -18,9 +20,15 @@ import {
   readConfiguration,
 } from './config-files.js';
 
+async function repository(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  await writeFile(join(root, '.git'), 'gitdir: elsewhere\n');
+  return root;
+}
+
 describe('configuration files', () => {
   it('writes the approved v1 starter atomically with owner-only permissions', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-init-')));
+    const root = await repository('agentos-init-');
     const path = join(root, 'agentos', 'agent-os.yaml');
 
     const result = await initConfiguration(path, false);
@@ -38,9 +46,7 @@ describe('configuration files', () => {
   });
 
   it('refuses overwrite unless force is explicit', async () => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), 'agentos-overwrite-')),
-    );
+    const root = await repository('agentos-overwrite-');
     const path = join(root, 'agent-os.yaml');
     await writeFile(path, 'keep-me', { mode: 0o600 });
 
@@ -53,7 +59,7 @@ describe('configuration files', () => {
   });
 
   it('allows only one concurrent non-force initializer to create the target', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-race-')));
+    const root = await repository('agentos-race-');
     const path = join(root, 'agent-os.yaml');
 
     const results = await Promise.allSettled([
@@ -73,9 +79,7 @@ describe('configuration files', () => {
   });
 
   it('reports validation paths and rejects oversized files before parsing', async () => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), 'agentos-invalid-')),
-    );
+    const root = await repository('agentos-invalid-');
     const invalid = join(root, 'invalid.yaml');
     await writeFile(invalid, 'version: 1\nproject: {}\n', 'utf8');
     await expect(readConfiguration(invalid)).rejects.toThrow('project.name');
@@ -86,9 +90,7 @@ describe('configuration files', () => {
   });
 
   it('revalidates parent directories at the read and write boundary', async () => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), 'agentos-operation-boundary-')),
-    );
+    const root = await repository('agentos-operation-boundary-');
     const outside = await realpath(
       await mkdtemp(join(tmpdir(), 'agentos-operation-outside-')),
     );
@@ -104,5 +106,29 @@ describe('configuration files', () => {
     await expect(readFile(join(outside, 'new.yaml'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('revalidates trusted directory permissions at the read boundary', async () => {
+    const root = await repository('agentos-read-permissions-');
+    const directory = join(root, 'agentos');
+    await mkdir(directory);
+    const path = join(directory, 'agent-os.yaml');
+    await writeFile(path, 'version: 1\n');
+    await chmod(directory, 0o777);
+
+    await expect(readConfiguration(path)).rejects.toThrow(
+      'workspace directory permissions',
+    );
+  });
+
+  it('revalidates trusted directory permissions at the write boundary', async () => {
+    const root = await repository('agentos-write-permissions-');
+    await chmod(root, 0o770);
+    const path = join(root, 'agentos', 'agent-os.yaml');
+
+    await expect(initConfiguration(path, false)).rejects.toThrow(
+      'workspace directory permissions',
+    );
+    await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

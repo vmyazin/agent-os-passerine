@@ -13,6 +13,7 @@ import type {
   ArtifactRecord,
   ConfigRevision,
   ConfigRevisionDraft,
+  ConfigRevisionPrecondition,
   ConfigRevisionId,
   ConfigSnapshot,
   ConfigSnapshotId,
@@ -58,6 +59,7 @@ import {
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 import {
   approvalSelection,
@@ -332,13 +334,18 @@ export class NeonDomainRepository implements DomainRepository {
   async applyConfigRevision(
     project: Project,
     revision: ConfigRevisionDraft,
+    precondition?: ConfigRevisionPrecondition,
   ): Promise<ConfigRevision> {
     let result: unknown;
     for (let attempt = 0; attempt < 32; attempt += 1) {
       try {
         result = await this.database.execute<Record<string, unknown>>(sql`
-        with "idempotency_lock" as materialized (
+        with "global_configuration_lock" as materialized (
+          select pg_advisory_xact_lock(hashtextextended('agentos:configuration', 0)) as "held"
+        ),
+        "idempotency_lock" as materialized (
           select pg_advisory_xact_lock(hashtextextended(${revision.id}, 0)) as "held"
+          from "global_configuration_lock"
         ),
         "configuration_lock" as materialized (
           select pg_advisory_xact_lock(hashtextextended(${project.id}, 0)) as "held"
@@ -349,12 +356,32 @@ export class NeonDomainRepository implements DomainRepository {
           from "config_revisions" as "existing", "configuration_lock"
           where "existing"."id" = ${revision.id}
         ),
+        "active_revision" as materialized (
+          select "active"."revision", "active"."config_digest"
+          from "config_revisions" as "active", "configuration_lock"
+          order by "active"."created_at" desc, "active"."revision" desc,
+                   "active"."id" collate "C" desc
+          limit 1
+        ),
+        "precondition" as materialized (
+          select case
+            when ${precondition === undefined} then true
+            when ${precondition?.revision ?? null} is null then
+              not exists (select 1 from "active_revision")
+            else exists (
+              select 1 from "active_revision"
+              where "revision" = ${precondition?.revision ?? null}
+                and "config_digest" = ${precondition?.digest ?? null}
+            )
+          end as "matches"
+        ),
         "project_row" as (
           insert into "projects" ("id", "name", "repository", "created_at", "updated_at")
           select ${project.id}, ${project.name}, ${project.repository ?? null},
                  ${project.createdAt}, ${project.updatedAt}
           from "configuration_lock"
           where not exists (select 1 from "existing_revision")
+            and (select "matches" from "precondition")
           on conflict ("id") do update set
             "name" = excluded."name",
             "repository" = excluded."repository",
@@ -412,9 +439,9 @@ export class NeonDomainRepository implements DomainRepository {
     }
     if (result === undefined)
       throw new Error('configuration revision was not returned');
-    const created = mapConfigRevisionRow(
-      one(executionRows(result), 'Config revision'),
-    );
+    const rows = executionRows(result);
+    if (rows.length === 0) throw new StaleConfigurationError();
+    const created = mapConfigRevisionRow(one(rows, 'Config revision'));
     if (!configRevisionMatches(created, revision)) {
       throw new IdempotencyConflictError('Config revision', revision.id);
     }

@@ -20,3 +20,10 @@ export class IdempotencyConflictError extends Error {
     this.name = 'IdempotencyConflictError';
   }
 }
+
+export class StaleConfigurationError extends Error {
+  public constructor() {
+    super('Active configuration changed before apply');
+    this.name = 'StaleConfigurationError';
+  }
+}

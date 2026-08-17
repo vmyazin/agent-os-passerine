@@ -2,6 +2,7 @@ export {
   EventFingerprintConflictError,
   EventSequenceConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 export { InMemoryDomainRepository } from './in-memory.js';
 export {

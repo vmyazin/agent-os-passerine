@@ -116,6 +116,17 @@ describe('runCli', () => {
     const fetch = vi.fn(
       async (url: string | URL | Request, init?: RequestInit) => {
         requests.push({ url: String(url), init });
+        if (init?.method === 'GET') {
+          return Response.json({
+            active: {
+              projectId: 'project_1',
+              digest: 'a'.repeat(64),
+              revision: 7,
+              appliedAt: '2026-08-17T12:00:00.000Z',
+              canonicalConfig: '{}',
+            },
+          });
+        }
         return Response.json({ ok: true });
       },
     );
@@ -135,12 +146,15 @@ describe('runCli', () => {
         apply.io,
       ),
     ).resolves.toBe(0);
-    expect(requests[0]?.url).toBe(
+    expect(requests[0]?.url).toBe('https://control.example/api/configuration');
+    expect(requests[1]?.url).toBe(
       'https://control.example/api/configuration/apply',
     );
-    expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
+    expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({
       canonicalConfig: expect.any(String),
       digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      expectedRevision: 7,
+      expectedDigest: 'a'.repeat(64),
     });
 
     const reply = capture({ ...shared, stdin: async () => 'approved\n' });
@@ -150,7 +164,7 @@ describe('runCli', () => {
         reply.io,
       ),
     ).resolves.toBe(0);
-    expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
+    expect(JSON.parse(String(requests[2]?.init?.body))).toEqual({
       reply: 'approved',
     });
   });
@@ -169,6 +183,24 @@ describe('runCli', () => {
     expect(code).toBe(3);
     expect(failure.stderr.join('')).toContain('[REDACTED]');
     expect(failure.stderr.join('')).not.toContain('super-secret-token');
+  });
+
+  it('rejects an invalid environment API token without exposing it', async () => {
+    const token = 'super-secret-token\nsmuggled-header';
+    const fetch = vi.fn();
+    const failure = capture({
+      env: {
+        AGENTOS_URL: 'https://control.example',
+        AGENTOS_API_TOKEN: token,
+      },
+      fetch,
+    });
+
+    expect(await runCli(['runs', 'list'], failure.io)).toBe(2);
+    expect(failure.stderr.join('')).toContain('API token is invalid');
+    expect(failure.stderr.join('')).not.toContain(token);
+    expect(failure.stderr.join('')).not.toContain('smuggled-header');
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('never emits an untrusted remote error code in JSON output', async () => {

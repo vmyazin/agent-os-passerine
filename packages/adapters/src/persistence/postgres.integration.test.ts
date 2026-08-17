@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
@@ -69,6 +70,64 @@ describePostgres('PostgreSQL persistence integration', () => {
   });
 
   repositoryParityContract('postgresql', () => repository);
+
+  it('allows exactly one concurrent configuration apply for an expected active revision', async () => {
+    const suffix = randomUUID();
+    const at = isoTimestamp('2026-08-17T12:00:00.123456Z');
+    const current = await repository.getLatestConfigRevision();
+    const currentProject =
+      current === undefined
+        ? undefined
+        : await repository.getProject(current.projectId);
+    const project = {
+      id:
+        currentProject?.id ??
+        persistenceId('project', `configuration-${suffix}`),
+      name: 'Concurrent configuration',
+      createdAt: currentProject?.createdAt ?? at,
+      updatedAt: at,
+    };
+    const draft = (id: string, digest: string, version: number) => ({
+      id: persistenceId('configRevision', `${id}-${suffix}`),
+      projectId: project.id,
+      config: { version },
+      configDigest: digest,
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      repositorySha: '0'.repeat(40),
+      createdAt: at,
+    });
+    const first = await repository.applyConfigRevision(
+      project,
+      draft('first', 'config-first', 1),
+      {
+        revision: current?.revision ?? null,
+        digest: current?.configDigest ?? null,
+      },
+    );
+
+    const results = await Promise.allSettled([
+      repository.applyConfigRevision(
+        project,
+        draft('second-a', 'config-second-a', 2),
+        { revision: first.revision, digest: first.configDigest },
+      ),
+      repository.applyConfigRevision(
+        project,
+        draft('second-b', 'config-second-b', 3),
+        { revision: first.revision, digest: first.configDigest },
+      ),
+    ]);
+
+    expect(
+      results.filter((entry) => entry.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(results.find((entry) => entry.status === 'rejected')).toMatchObject({
+      reason: expect.any(StaleConfigurationError),
+    });
+  });
 
   async function seed(suffix: string) {
     const projectId = persistenceId('project', `${suffix}-project`);

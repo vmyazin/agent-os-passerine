@@ -30,6 +30,8 @@ runtime: { provider: local }
 const body = {
   canonicalConfig: canonicalConfigJson(config),
   digest: canonicalConfigHash(config),
+  expectedRevision: null,
+  expectedDigest: null,
 };
 
 function request(path: string, options: RequestInit = {}) {
@@ -205,5 +207,80 @@ describe('configuration API routes', () => {
       'unknown',
     );
     expect(unknown.status).toBe(422);
+  });
+
+  it('accepts quote-heavy canonical configuration bodies above the ordinary API limit', async () => {
+    const prompt = '"\n'.repeat(12_000);
+    const largeConfig = {
+      ...config,
+      agents: {
+        implementer: { ...config.agents.implementer!, prompt },
+      },
+    };
+    const requestBody = {
+      canonicalConfig: canonicalConfigJson(largeConfig),
+      digest: canonicalConfigHash(largeConfig),
+      expectedRevision: null,
+      expectedDigest: null,
+    };
+    const encoded = JSON.stringify(requestBody);
+    expect(Buffer.byteLength(requestBody.canonicalConfig)).toBeLessThanOrEqual(
+      56 * 1024,
+    );
+    expect(Buffer.byteLength(encoded)).toBeGreaterThan(64 * 1024);
+    expect(Buffer.byteLength(encoded)).toBeLessThan(512 * 1024);
+
+    const response = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'large-config' },
+        body: encoded,
+      }),
+    );
+    expect(response.status).toBe(201);
+  });
+
+  it('allows only one apply against the same active configuration', async () => {
+    const initial = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'concurrency-initial' },
+        body: JSON.stringify(body),
+      }),
+    );
+    const active = await initial.json();
+    const candidates = [2, 3].map((concurrency) => {
+      const changed = {
+        ...config,
+        budgets: { ...config.budgets, concurrency },
+      };
+      return {
+        canonicalConfig: canonicalConfigJson(changed),
+        digest: canonicalConfigHash(changed),
+        expectedRevision: active.revision as number,
+        expectedDigest: active.digest as string,
+      };
+    });
+    const responses = await Promise.all(
+      candidates.map((candidate, index) =>
+        POST(
+          request('/api/configuration/apply', {
+            method: 'POST',
+            headers: {
+              'idempotency-key': `concurrency-${String(index)}`,
+            },
+            body: JSON.stringify(candidate),
+          }),
+        ),
+      ),
+    );
+
+    expect(responses.map((response) => response.status).sort()).toEqual([
+      201, 409,
+    ]);
+    const stale = responses.find((response) => response.status === 409);
+    await expect(stale?.json()).resolves.toMatchObject({
+      error: { code: 'configuration_stale' },
+    });
   });
 });

@@ -11,6 +11,7 @@ import type {
   ArtifactRecord,
   ConfigRevision,
   ConfigRevisionDraft,
+  ConfigRevisionPrecondition,
   ConfigRevisionId,
   ConfigSnapshot,
   ConfigSnapshotId,
@@ -47,6 +48,7 @@ import type {
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 import { boundedListLimit } from './pagination.js';
 import {
@@ -62,6 +64,7 @@ export {
   EventFingerprintConflictError,
   EventSequenceConflictError,
   IdempotencyConflictError,
+  StaleConfigurationError,
 } from './errors.js';
 
 function copy<T>(value: T): T {
@@ -253,6 +256,7 @@ export class InMemoryDomainRepository implements DomainRepository {
   async applyConfigRevision(
     project: Project,
     revision: ConfigRevisionDraft,
+    precondition?: ConfigRevisionPrecondition,
   ): Promise<ConfigRevision> {
     const existing = this.#configRevisions.get(revision.id);
     if (existing !== undefined) {
@@ -260,6 +264,24 @@ export class InMemoryDomainRepository implements DomainRepository {
         throw new IdempotencyConflictError('Config revision', revision.id);
       }
       return copy(existing);
+    }
+    const active = [...this.#configRevisions.values()].sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        right.revision - left.revision ||
+        right.id.localeCompare(left.id),
+    )[0];
+    if (
+      precondition !== undefined &&
+      (active?.revision ?? null) !== precondition.revision
+    ) {
+      throw new StaleConfigurationError();
+    }
+    if (
+      precondition !== undefined &&
+      (active?.configDigest ?? null) !== precondition.digest
+    ) {
+      throw new StaleConfigurationError();
     }
     const existingProject = this.#projects.get(project.id);
     const storedProject: Project =

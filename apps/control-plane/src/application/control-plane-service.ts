@@ -49,6 +49,8 @@ export interface CreateRunInput extends PersistenceDigests {
 export interface ConfigurationInput {
   readonly canonicalConfig: string;
   readonly digest: string;
+  readonly expectedRevision: number | null;
+  readonly expectedDigest: string | null;
 }
 
 export interface ConfigurationProjection {
@@ -421,6 +423,13 @@ export class ControlPlaneService {
         422,
       );
     }
+    if ((input.expectedRevision === null) !== (input.expectedDigest === null)) {
+      throw new ServiceError(
+        'configuration_invalid',
+        'configuration precondition is invalid',
+        422,
+      );
+    }
     const now = this.clock();
     const active = await this.repository.getLatestConfigRevision();
     const projectId =
@@ -447,6 +456,10 @@ export class ControlPlaneService {
           ...configurationDigests(config),
           createdAt: now,
         },
+        {
+          revision: input.expectedRevision,
+          digest: input.expectedDigest,
+        },
       );
       return configurationProjection(revision);
     } catch (error) {
@@ -454,6 +467,13 @@ export class ControlPlaneService {
         throw new ServiceError(
           'idempotency_conflict',
           'idempotency key was already used with another configuration',
+          409,
+        );
+      }
+      if (error instanceof Error && error.name === 'StaleConfigurationError') {
+        throw new ServiceError(
+          'configuration_stale',
+          'active configuration changed; plan and apply again',
           409,
         );
       }

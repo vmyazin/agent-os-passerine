@@ -4,13 +4,15 @@ import { z } from 'zod';
 import { AuthError } from '../auth/auth';
 import { ServiceError } from '../application/control-plane-service';
 
-const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_CONFIG_APPLY_BODY_BYTES = 512 * 1024;
 
 export interface ApiContract<TBody = unknown> {
   readonly authorize?: () => void;
   readonly body?: z.ZodType<TBody>;
   readonly output?: z.ZodType;
   readonly successStatus?: number;
+  readonly maxBodyBytes?: number;
 }
 
 function errorResponse(
@@ -24,9 +26,10 @@ function errorResponse(
 async function parseBody<T>(
   request: Request,
   schema: z.ZodType<T>,
+  maxBodyBytes: number,
 ): Promise<T> {
   const contentLength = Number(request.headers.get('content-length') ?? '0');
-  if (contentLength > MAX_BODY_BYTES) {
+  if (contentLength > maxBodyBytes) {
     await request.body?.cancel();
     throw new ServiceError(
       'payload_too_large',
@@ -43,7 +46,7 @@ async function parseBody<T>(
         const { done, value } = await reader.read();
         if (done) break;
         receivedBytes += value.byteLength;
-        if (receivedBytes > MAX_BODY_BYTES) {
+        if (receivedBytes > maxBodyBytes) {
           await reader.cancel();
           throw new ServiceError(
             'payload_too_large',
@@ -93,7 +96,11 @@ export async function handleApi<TBody = unknown>(
   try {
     contract.authorize?.();
     const body = contract.body
-      ? await parseBody(request, contract.body)
+      ? await parseBody(
+          request,
+          contract.body,
+          contract.maxBodyBytes ?? MAX_BODY_BYTES,
+        )
       : (undefined as TBody);
     const output = await handler(body);
     const checked = contract.output?.safeParse(output);
