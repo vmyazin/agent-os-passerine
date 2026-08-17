@@ -1,0 +1,6 @@
+.next
+apps/control-plane/next-env.d.ts
+coverage
+dist
+node_modules
+pnpm-lock.yaml
