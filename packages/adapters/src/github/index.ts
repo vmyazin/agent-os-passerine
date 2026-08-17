@@ -14,3 +14,7 @@ export {
   type TrustedSourceSnapshotIngestor,
   type TrustedSourceSnapshotIngestorOptions,
 } from './source-snapshot.js';
+export {
+  createTrustedRepositoryHeadResolver,
+  type TrustedRepositoryHeadResolver,
+} from './repository-head.js';

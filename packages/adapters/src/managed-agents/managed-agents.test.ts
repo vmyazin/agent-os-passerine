@@ -194,7 +194,11 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
         this.throwIfConfigured();
         this.operationLog.push(`retrieve:${id}`);
         const session = this.sessions.get(id);
-        if (!session) throw new Error('not found');
+        if (!session)
+          throw Object.assign(new Error('not found'), {
+            status: 404,
+            type: 'not_found_error',
+          });
         if (this.retrieveStatuses.length === 0) return session;
         return {
           ...session,
@@ -206,7 +210,11 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
         this.operationLog.push(`archive:${id}`);
         this.archived.push(id);
         const session = this.sessions.get(id);
-        if (!session) throw new Error('not found');
+        if (!session)
+          throw Object.assign(new Error('not found'), {
+            status: 404,
+            type: 'not_found_error',
+          });
         session.archived_at = NOW.toISOString();
         return session;
       },
@@ -1099,7 +1107,7 @@ describe('sessions and controls', () => {
     ]);
   });
 
-  it('rejects forged or unowned handles before interrupting or cleanup', async () => {
+  it('rejects forged handles and treats an already-absent owned session as cleaned', async () => {
     const { client, provider } = await syncedProvider();
     const handle = await provider.start({
       runId: 'run-1',
@@ -1138,9 +1146,7 @@ describe('sessions and controls', () => {
     expect(client.deleted).toEqual([]);
 
     const unknown = { ...handle, id: 'unknown-session' };
-    await expect(provider.cleanup(unknown)).rejects.toBeInstanceOf(
-      ManagedAgentsProviderError,
-    );
+    await expect(provider.cleanup(unknown)).resolves.toBeUndefined();
     expect(client.sentEvents).toEqual([]);
     expect(client.archived).toEqual([]);
     expect(client.deleted).toEqual([]);
@@ -1671,6 +1677,37 @@ describe('bounded normalization, replay, output, and usage', () => {
 });
 
 describe('status and cleanup', () => {
+  it('cleans independent vault and file resources when the session is already absent', async () => {
+    const { client, provider } = await syncedProvider();
+    const access = await provider.provisionSessionAccess({
+      idempotencyKey: 'cleanup-after-session-404',
+      mcpUrl: 'https://artifacts.example.test/mcp',
+      bearerToken: 'scoped-capability',
+      files: [
+        {
+          filename: 'input.json',
+          mediaType: 'application/json',
+          bytes: new TextEncoder().encode('{}'),
+          mountPath: '/workspace/inputs/input.json',
+        },
+      ],
+    });
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+      resources: access.resources,
+      credentialRefs: access.credentialRefs,
+    });
+    client.sessions.delete(handle.id);
+
+    await expect(provider.cleanup(handle)).resolves.toBeUndefined();
+    expect(client.vaults).toEqual([]);
+    expect(client.files).toEqual([]);
+  });
+
   it.each(['running', 'idle', 'rescheduling', 'terminated'] as const)(
     'retrieves the %s status',
     async (status) => {

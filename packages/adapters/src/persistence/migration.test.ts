@@ -35,6 +35,7 @@ describe('domain persistence migration', () => {
     'goal_progress',
     'publication_records',
     'publication_events',
+    'workflow_reconciliation_cursors',
   ])('creates the %s table', (table) => {
     expect(migration).toContain(`create table "${table}"`);
   });

@@ -4,10 +4,10 @@ import {
   type ArtifactStore,
 } from '@agentos/core';
 
-import { createGitHubAppClientFactory } from './github-app.js';
+import { createGitHubReadOnlyClientFactory } from './github-app.js';
 import type {
-  GitHubInstallationClientFactory,
-  InstallationClientScope,
+  GitHubReadOnlyClientFactory,
+  ReadOnlyInstallationClientScope,
 } from './types.js';
 
 const MAX_FILES = 5_000;
@@ -64,23 +64,23 @@ export function createTrustedSourceSnapshotIngestor(
 ): TrustedSourceSnapshotIngestor {
   return createTrustedSourceSnapshotIngestorWithClientFactory(
     options,
-    createGitHubAppClientFactory(options.githubApp),
+    createGitHubReadOnlyClientFactory(options.githubApp),
   );
 }
 
 export function createTrustedSourceSnapshotIngestorWithClientFactory(
   options: TrustedSourceSnapshotIngestorOptions,
-  github: GitHubInstallationClientFactory,
+  github: GitHubReadOnlyClientFactory,
 ): TrustedSourceSnapshotIngestor {
   return Object.freeze({
     async ensure(runId: string): Promise<ArtifactMetadata> {
       const binding = await options.resolveBinding(runId);
       if (binding.runId !== runId)
         throw new Error('source snapshot binding run mismatch');
-      const scope: InstallationClientScope = {
+      const scope: ReadOnlyInstallationClientScope = {
         ...binding.repository,
         repositoryIds: [binding.repository.repositoryId],
-        permissions: { contents: 'write', pullRequests: 'write' },
+        permissions: { contents: 'read' },
       };
       return github.withClient(scope, async (client) => {
         const repository = await client.getRepository();

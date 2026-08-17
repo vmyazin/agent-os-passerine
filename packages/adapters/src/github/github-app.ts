@@ -6,7 +6,9 @@ import type {
   GitHubInstallationClientFactory,
   GitTreeEntry,
   InstallationClientScope,
+  ReadOnlyInstallationClientScope,
   PullRequest,
+  GitHubReadOnlyClientFactory,
 } from './types.js';
 
 const OFFICIAL_API_BASE = 'https://api.github.com';
@@ -84,13 +86,16 @@ function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-function repositoryPath(scope: InstallationClientScope): string {
+type RepositoryClientScope =
+  InstallationClientScope | ReadOnlyInstallationClientScope;
+
+function repositoryPath(scope: RepositoryClientScope): string {
   return `/repos/${pathSegment(scope.owner)}/${pathSegment(scope.name)}`;
 }
 
 function verifyAuthResult(
   value: unknown,
-  scope: InstallationClientScope,
+  scope: RepositoryClientScope,
   now: Date,
 ): string {
   const result = record(value);
@@ -116,8 +121,11 @@ function verifyAuthResult(
     repositoryIds === undefined ||
     repositoryIds.length !== 1 ||
     Number(repositoryIds[0]) !== scope.repositoryId ||
-    permissions?.contents !== 'write' ||
-    permissions.pull_requests !== 'write' ||
+    permissions?.contents !== scope.permissions.contents ||
+    ('pullRequests' in scope.permissions
+      ? permissions.pull_requests !== scope.permissions.pullRequests
+      : permissions.pull_requests !== undefined &&
+        permissions.pull_requests !== 'none') ||
     unexpectedPermission ||
     token === undefined ||
     token.length === 0 ||
@@ -183,7 +191,7 @@ function parsePullRequest(value: unknown): PullRequest {
 }
 
 function createClient(
-  scope: InstallationClientScope,
+  scope: RepositoryClientScope,
   token: string,
   fetchImplementation: typeof globalThis.fetch,
 ): GitHubInstallationClient {
@@ -404,11 +412,12 @@ function createClient(
 
 function createFactory(
   dependencies: FactoryDependencies,
-): GitHubInstallationClientFactory {
+  permissionMode: 'read' | 'write',
+) {
   const now = dependencies.now ?? (() => new Date());
   return Object.freeze({
     async withClient<T>(
-      scope: InstallationClientScope,
+      scope: RepositoryClientScope,
       operation: (client: GitHubInstallationClient) => Promise<T>,
     ): Promise<T> {
       let authentication: unknown;
@@ -417,7 +426,10 @@ function createFactory(
           type: 'installation',
           installationId: scope.installationId,
           repositoryIds: [...scope.repositoryIds],
-          permissions: { contents: 'write', pull_requests: 'write' },
+          permissions:
+            permissionMode === 'write'
+              ? { contents: 'write', pull_requests: 'write' }
+              : { contents: 'read' },
           refresh: true,
         });
       } catch {
@@ -459,14 +471,52 @@ export function createGitHubAppClientFactory(
     appId: options.appId,
     privateKey: options.privateKey,
   });
-  return createFactory({
-    auth: (input) => auth(input as InstallationAuthOptions),
-    fetch: options.fetch ?? globalThis.fetch,
+  return createFactory(
+    {
+      auth: (input) => auth(input as InstallationAuthOptions),
+      fetch: options.fetch ?? globalThis.fetch,
+    },
+    'write',
+  ) as GitHubInstallationClientFactory;
+}
+
+/** Narrow trusted reader. It cannot mint contents-write or pull-request tokens. */
+export function createGitHubReadOnlyClientFactory(
+  options: GitHubAppClientFactoryOptions,
+): GitHubReadOnlyClientFactory {
+  if (!Number.isSafeInteger(options.appId) || options.appId <= 0)
+    throw new Error('GitHub App ID must be a positive safe integer');
+  if (
+    !/^-----BEGIN (?:RSA )?PRIVATE KEY-----\n[\s\S]+\n-----END (?:RSA )?PRIVATE KEY-----\n?$/.test(
+      options.privateKey,
+    )
+  )
+    throw new Error('GitHub App private key must be a PEM private key');
+  if ((options.apiBaseUrl ?? OFFICIAL_API_BASE) !== OFFICIAL_API_BASE)
+    throw new Error(
+      'Only the official https://api.github.com API is supported',
+    );
+  const auth = createAppAuth({
+    appId: options.appId,
+    privateKey: options.privateKey,
   });
+  return createFactory(
+    {
+      auth: (input) => auth(input as InstallationAuthOptions),
+      fetch: options.fetch ?? globalThis.fetch,
+    },
+    'read',
+  ) as GitHubReadOnlyClientFactory;
 }
 
 export function createGitHubAppClientFactoryForTest(
   dependencies: FactoryDependencies,
 ): GitHubInstallationClientFactory {
-  return createFactory(dependencies);
+  return createFactory(dependencies, 'write');
+}
+
+export function createGitHubReadOnlyClientFactoryForTest(
+  dependencies: FactoryDependencies,
+): GitHubReadOnlyClientFactory {
+  return createFactory(dependencies, 'read');
 }

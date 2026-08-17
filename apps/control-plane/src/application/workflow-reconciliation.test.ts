@@ -1,5 +1,10 @@
 import { InMemoryDomainRepository } from '@agentos/adapters';
-import { isoTimestamp, persistenceId } from '@agentos/core';
+import {
+  isoTimestamp,
+  persistenceId,
+  type TimestampListCursor,
+  type WorkflowRunId,
+} from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
 import { reconcileWorkflowOutbox } from './workflow-reconciliation';
@@ -191,5 +196,74 @@ describe('workflow outbox reconciliation', () => {
     ).resolves.toEqual({ scannedRuns: 1_001, delivered: 1_001, failed: 0 });
     expect(cancelled).toHaveLength(1_001);
     expect(cancelled).toContain('cancelled-1000');
+  });
+
+  it('resumes after the last durably scanned run when an invocation is interrupted', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'cursor-project');
+    await repository.createProject({
+      id: projectId,
+      name: 'Cursor recovery',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let index = 0; index < 125; index += 1) {
+      await repository.createRun({
+        id: persistenceId('run', `cursor-${String(index).padStart(3, '0')}`),
+        projectId,
+        pipeline: 'feature',
+        status: 'cancelled',
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    let cursor: TimestampListCursor<WorkflowRunId> | undefined;
+    const cursorStore = {
+      load: async () => cursor,
+      save: async (value: typeof cursor) => {
+        cursor = value;
+      },
+    };
+    const baseListRuns = repository.listRuns.bind(repository);
+    let listCalls = 0;
+    const interruptedRepository = new Proxy(repository, {
+      get(target, property, receiver) {
+        if (property !== 'listRuns') {
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+        return async (...args: Parameters<typeof repository.listRuns>) => {
+          listCalls += 1;
+          if (listCalls === 2) throw new Error('invocation interrupted');
+          return baseListRuns(...args);
+        };
+      },
+    });
+    const cancelled: string[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async ({ runId }) => {
+        cancelled.push(runId);
+      },
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(
+        interruptedRepository,
+        outbox,
+        () => now,
+        cursorStore,
+      ),
+    ).rejects.toThrow('invocation interrupted');
+    expect(cancelled).toHaveLength(100);
+    expect(cursor?.id).toBe('cursor-099');
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now, cursorStore),
+    ).resolves.toEqual({ scannedRuns: 25, delivered: 25, failed: 0 });
+    expect(cancelled).toHaveLength(125);
+    expect(cancelled).toContain('cursor-124');
+    expect(cursor).toBeUndefined();
   });
 });

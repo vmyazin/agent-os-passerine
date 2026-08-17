@@ -14,7 +14,7 @@ const now = '2026-08-17T12:00:00.000Z';
 
 async function startedEffect(
   store: InMemoryWorkflowCheckpointStore,
-  input: { key: string; kind: string; externalRef: string },
+  input: { key: string; kind: string; externalRef?: string },
 ) {
   const effect = await store.claimEffect(
     {
@@ -37,7 +37,8 @@ async function startedEffect(
     leaseVersion: effect.leaseVersion,
   };
   await store.markEffectStarted(lease, now);
-  await store.attachExternalRef(lease, input.externalRef, now);
+  if (input.externalRef !== undefined)
+    await store.attachExternalRef(lease, input.externalRef, now);
 }
 
 function collaborators(
@@ -74,12 +75,34 @@ function collaborators(
         ? {}
         : {
             runtimeHandles: {
+              store: vi.fn(async () => undefined),
               load: async (externalId: string) => ({
                 id: externalId,
                 ownershipCapability: 'sealed-capability',
               }),
               markCancelled: vi.fn(async () => undefined),
               markCleaned: vi.fn(async () => undefined),
+            },
+            runtimeStartRecovery: {
+              resolve: vi.fn(async ({ effectKey }: { effectKey: string }) => ({
+                request: {
+                  runId: 'run-1',
+                  stepId: 'implementation',
+                  agentId: 'implementer',
+                  environmentId: 'implementation',
+                  input: {},
+                  idempotencyKey: effectKey,
+                },
+                aadForExternalId: (externalId: string) => ({ externalId }),
+                role: 'implementation' as const,
+                stepRunId: 'implementation',
+                stepKey: 'implementation',
+                resources: [],
+                credentialRefs: [],
+                model: 'sonnet',
+                pricingVersion: 'pricing-v1',
+                priceUsage: () => 123_456,
+              })),
             },
           }),
     }),
@@ -400,7 +423,8 @@ describe('durable Trigger outbox cancellation', () => {
       repository.listUsage(persistenceId('run', 'run-1')),
     ).resolves.toEqual([
       expect.objectContaining({
-        microdollars: 700_000,
+        model: 'sonnet@pricing-v1',
+        microdollars: 123_456,
         inputTokens: 11,
         outputTokens: 7,
       }),
@@ -408,5 +432,185 @@ describe('durable Trigger outbox cancellation', () => {
     await expect(
       checkpoints.listExpiredReservations('run-1', now),
     ).resolves.toEqual([]);
+  });
+
+  it('discovers, seals, cancels, and settles an expired ambiguous start with no external reference', async () => {
+    const repository = new InMemoryDomainRepository();
+    const at = isoTimestamp('2026-08-17T11:00:00.000Z');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Ambiguous recovery',
+      createdAt: at,
+      updatedAt: at,
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'run-1'),
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const recovered = { id: 'runtime-session-recovered' };
+    const runtime = {
+      reconcileStart: vi.fn(async () => recovered),
+      cancel: vi.fn(async () => undefined),
+      usage: vi.fn(async () => ({
+        inputTokens: 3,
+        outputTokens: 2,
+        runtimeMs: 10_000,
+      })),
+      cleanup: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, outbox } = collaborators(runtime, repository);
+    const effect = await checkpoints.claimEffect(
+      {
+        key: 'runtime:run-1:implementation:1',
+        runId: 'run-1',
+        kind: 'runtime-session',
+        inputFingerprint: 'c'.repeat(64),
+        createdAt: at,
+        updatedAt: at,
+      },
+      {
+        ownerId: 'crashed-trigger-attempt',
+        now: at,
+        leaseExpiresAt: '2026-08-17T11:21:00.000Z',
+      },
+    );
+    await checkpoints.markEffectStarted(
+      {
+        key: effect.key,
+        ownerId: 'crashed-trigger-attempt',
+        leaseVersion: effect.leaseVersion,
+      },
+      at,
+    );
+    await checkpoints.admitSession({
+      reservationKey: 'reservation:runtime:run-1:implementation:1',
+      projectId: 'project-1',
+      runId: 'run-1',
+      stepKey: 'implementation',
+      estimatedMicrodollars: 700_000,
+      workflowSpentMicrodollars: 0,
+      dailySpentMicrodollars: 0,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      admissionNumerator: 80,
+      admissionDenominator: 100,
+      now: at,
+      leaseExpiresAt: '2026-08-17T11:21:00.000Z',
+    });
+
+    await outbox.requestOrphanReconciliation({
+      idempotencyKey: 'orphan:run-1',
+      runId: 'run-1',
+    });
+
+    expect(runtime.reconcileStart).toHaveBeenCalledOnce();
+    expect(runtime.cancel).toHaveBeenCalledWith(
+      recovered,
+      'runtime session lease expired',
+    );
+    expect(runtime.cleanup).toHaveBeenCalledWith(recovered);
+    await expect(
+      checkpoints.getEffect('runtime:run-1:implementation:1'),
+    ).resolves.toMatchObject({ externalRef: recovered.id });
+    await expect(
+      checkpoints.listExpiredReservations('run-1', now),
+    ).resolves.toEqual([]);
+  });
+
+  it('persists a recovered cancellation reference so cleanup survives a missing original ref', async () => {
+    const runtime = {
+      reconcileStart: vi.fn(async () => ({ id: 'runtime-recovered-cancel' })),
+      cancel: vi.fn(async () => undefined),
+      cleanup: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, outbox } = collaborators(runtime);
+    await startedEffect(checkpoints, {
+      key: 'runtime:run-1:implementation:1',
+      kind: 'runtime-session',
+    });
+
+    await outbox.requestCancel({
+      idempotencyKey: 'cancel:run-1',
+      runId: 'run-1',
+    });
+    await outbox.requestCleanup({
+      idempotencyKey: 'cleanup:run-1',
+      runId: 'run-1',
+    });
+
+    expect(runtime.reconcileStart).toHaveBeenCalledOnce();
+    expect(runtime.cancel).toHaveBeenCalledOnce();
+    expect(runtime.cleanup).toHaveBeenCalledOnce();
+    await expect(checkpoints.listEffects('run-1')).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'runtime-session-cancel',
+          output: expect.objectContaining({
+            externalRef: 'runtime-recovered-cancel',
+            runtimeEffectKey: 'runtime:run-1:implementation:1',
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'runtime-session-cleanup',
+          status: 'succeeded',
+        }),
+      ]),
+    );
+  });
+
+  it('replays an outer cancellation after its recovered runtime cancel already committed', async () => {
+    const runtime = {
+      reconcileStart: vi.fn(async () => undefined),
+      cancel: vi.fn(async () => undefined),
+      cleanup: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, outbox } = collaborators(runtime);
+    await startedEffect(checkpoints, {
+      key: 'runtime:run-1:implementation:1',
+      kind: 'runtime-session',
+    });
+    const child = await checkpoints.claimEffect(
+      {
+        key: 'cancel:run-1:runtime:runtime-recovered',
+        runId: 'run-1',
+        kind: 'runtime-session-cancel',
+        inputFingerprint: 'f'.repeat(64),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        ownerId: 'seed-cancel',
+        now,
+        leaseExpiresAt: '2026-08-17T12:02:00.000Z',
+      },
+    );
+    const childLease = {
+      key: child.key,
+      ownerId: 'seed-cancel',
+      leaseVersion: child.leaseVersion,
+    };
+    await checkpoints.markEffectStarted(childLease, now);
+    await checkpoints.completeEffect(
+      childLease,
+      {
+        externalRef: 'runtime-recovered',
+        runtimeEffectKey: 'runtime:run-1:implementation:1',
+        cancelled: true,
+      },
+      now,
+    );
+
+    await expect(
+      outbox.requestCancel({
+        idempotencyKey: 'cancel:run-1',
+        runId: 'run-1',
+      }),
+    ).resolves.toBeUndefined();
+    expect(runtime.reconcileStart).not.toHaveBeenCalled();
+    expect(runtime.cancel).not.toHaveBeenCalled();
   });
 });

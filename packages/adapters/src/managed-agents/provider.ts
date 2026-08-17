@@ -853,6 +853,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
 
   async cleanup(handle: RuntimeHandle): Promise<void> {
     if (this.#cleanedSessions.has(handle.id)) return;
+    let sessionFailure: unknown;
     try {
       let session = await this.#ownedSession(handle);
       let status = normalizeSessionStatus(session.status);
@@ -867,39 +868,56 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       await this.#wrap(() => this.#client.beta.sessions.archive(handle.id));
       await this.#ownedSession(handle);
       await this.#wrap(() => this.#client.beta.sessions.delete(handle.id));
-      if (isManagedHandle(handle)) {
-        for (const vaultId of handle.credentialRefs ?? []) {
-          await ignoreNotFound(() =>
-            this.#wrap(() =>
-              this.#client.beta.vaults.archive(vaultId, {
-                betas: [MANAGED_AGENTS_BETA],
-              }),
-            ),
-          );
-          await ignoreNotFound(() =>
-            this.#wrap(() =>
-              this.#client.beta.vaults.delete(vaultId, {
-                betas: [MANAGED_AGENTS_BETA],
-              }),
-            ),
-          );
-        }
-        for (const fileId of handle.uploadedFileIds ?? []) {
-          await ignoreNotFound(() =>
-            this.#wrap(() =>
-              this.#client.beta.files.delete(fileId, {
-                betas: [MANAGED_AGENTS_BETA],
-              }),
-            ),
-          );
-        }
-      }
     } catch (error) {
-      if (!isProviderNotFound(error)) throw error;
+      if (!isProviderNotFound(error)) sessionFailure = error;
       // A previous cleanup may have deleted the session before its local
       // checkpoint committed. Provider absence is the desired terminal state.
     }
+    if (isManagedHandle(handle)) {
+      await this.cleanupAccess({
+        credentialRefs: handle.credentialRefs ?? [],
+        resources: (handle.uploadedFileIds ?? []).map((fileId) => ({
+          type: 'file' as const,
+          fileId,
+        })),
+      });
+    }
+    if (sessionFailure !== undefined) throw sessionFailure;
     this.#cleanedSessions.add(handle.id);
+  }
+
+  async cleanupAccess(input: {
+    readonly resources: readonly {
+      readonly type: 'file';
+      readonly fileId: string;
+    }[];
+    readonly credentialRefs: readonly string[];
+  }): Promise<void> {
+    for (const vaultId of input.credentialRefs) {
+      await ignoreNotFound(() =>
+        this.#wrap(() =>
+          this.#client.beta.vaults.archive(vaultId, {
+            betas: [MANAGED_AGENTS_BETA],
+          }),
+        ),
+      );
+      await ignoreNotFound(() =>
+        this.#wrap(() =>
+          this.#client.beta.vaults.delete(vaultId, {
+            betas: [MANAGED_AGENTS_BETA],
+          }),
+        ),
+      );
+    }
+    for (const resource of input.resources) {
+      await ignoreNotFound(() =>
+        this.#wrap(() =>
+          this.#client.beta.files.delete(resource.fileId, {
+            betas: [MANAGED_AGENTS_BETA],
+          }),
+        ),
+      );
+    }
   }
 
   async #interrupt(handle: RuntimeHandle): Promise<void> {

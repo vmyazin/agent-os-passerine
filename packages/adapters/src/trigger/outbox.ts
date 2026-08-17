@@ -5,7 +5,11 @@ import {
   isoTimestamp,
   persistenceId,
   type DomainRepository,
+  type JsonValue,
+  type RuntimeFileResource,
+  type RuntimeHandle,
   type RuntimeProvider,
+  type RuntimeStartRequest,
 } from '@agentos/core';
 
 import {
@@ -37,6 +41,27 @@ export interface DurableTriggerOutboxOptions {
       readonly key: string;
       readonly digest: string;
       readonly sizeBytes: number;
+    }>;
+  };
+  readonly runtimeStartRecovery?: {
+    resolve(input: {
+      readonly runId: string;
+      readonly effectKey: string;
+    }): Promise<{
+      readonly request: RuntimeStartRequest;
+      readonly aadForExternalId: (externalId: string) => JsonValue;
+      readonly role: import('./types.js').FeatureRole;
+      readonly stepRunId: string;
+      readonly stepKey: string;
+      readonly resources: readonly RuntimeFileResource[];
+      readonly credentialRefs: readonly string[];
+      readonly model: string;
+      readonly pricingVersion: string;
+      readonly priceUsage: (usage: {
+        readonly inputTokens: number;
+        readonly outputTokens: number;
+        readonly runtimeMs: number;
+      }) => number;
     }>;
   };
 }
@@ -119,6 +144,81 @@ async function ownedClaim(
     effect,
     lease: { key: effect.key, ownerId, leaseVersion: effect.leaseVersion },
   };
+}
+
+async function recoverRuntimeStart(
+  options: DurableTriggerOutboxOptions,
+  input: { readonly runId: string; readonly effect: WorkflowEffect },
+): Promise<
+  | {
+      readonly status: 'found';
+      readonly handle: RuntimeHandle;
+      readonly recovery: Awaited<
+        ReturnType<
+          NonNullable<
+            DurableTriggerOutboxOptions['runtimeStartRecovery']
+          >['resolve']
+        >
+      >;
+    }
+  | {
+      readonly status: 'absent';
+      readonly recovery: Awaited<
+        ReturnType<
+          NonNullable<
+            DurableTriggerOutboxOptions['runtimeStartRecovery']
+          >['resolve']
+        >
+      >;
+    }
+> {
+  if (
+    options.runtime === undefined ||
+    options.runtimeHandles === undefined ||
+    options.runtimeStartRecovery === undefined ||
+    options.runtime.reconcileStart === undefined
+  )
+    throw new Error('runtime start recovery is not configured');
+  const recovery = await options.runtimeStartRecovery.resolve({
+    runId: input.runId,
+    effectKey: input.effect.key,
+  });
+  const handle = await options.runtime.reconcileStart(recovery.request);
+  if (handle === undefined) return { status: 'absent', recovery };
+  await options.runtimeHandles.store({
+    handle,
+    runId: input.runId,
+    stepRunId: recovery.stepRunId,
+    role: recovery.role,
+    aad: recovery.aadForExternalId(handle.id),
+    at: options.clock(),
+  });
+  return { status: 'found', handle, recovery };
+}
+
+function effectOutput(
+  effect: WorkflowEffect,
+): { readonly [key: string]: JsonValue } | undefined {
+  const output = effect.output;
+  return typeof output === 'object' && output !== null && !Array.isArray(output)
+    ? (output as { readonly [key: string]: JsonValue })
+    : undefined;
+}
+
+function cleanupExternalReference(effect: WorkflowEffect): string | undefined {
+  if (effect.kind === 'runtime-session') return effect.externalRef;
+  const output = effectOutput(effect);
+  if (
+    (effect.kind === 'runtime-session-cancel' ||
+      effect.kind === 'runtime-session-orphan-reconcile') &&
+    effect.status === 'succeeded' &&
+    typeof output === 'object' &&
+    output !== null &&
+    !Array.isArray(output) &&
+    typeof output.externalRef === 'string'
+  )
+    return output.externalRef;
+  return undefined;
 }
 
 export function createDurableTriggerOutbox(
@@ -218,12 +318,41 @@ export function createDurableTriggerOutbox(
       const activeRuntimeEffects = effects.filter(
         (runtimeEffect) =>
           runtimeEffect.kind === 'runtime-session' &&
-          runtimeEffect.status === 'started' &&
-          runtimeEffect.externalRef !== undefined,
+          runtimeEffect.status === 'started',
       );
       const failures: Error[] = [];
       for (const runtimeEffect of activeRuntimeEffects) {
-        const externalRef = runtimeEffect.externalRef!;
+        let externalRef = runtimeEffect.externalRef;
+        let recoveredHandle: RuntimeHandle | undefined;
+        if (externalRef === undefined) {
+          const completedCancellation = effects.find((candidate) => {
+            const output = effectOutput(candidate);
+            return (
+              candidate.kind === 'runtime-session-cancel' &&
+              candidate.status === 'succeeded' &&
+              output?.runtimeEffectKey === runtimeEffect.key &&
+              typeof output.externalRef === 'string'
+            );
+          });
+          if (completedCancellation !== undefined) continue;
+          try {
+            const recovered = await recoverRuntimeStart(options, {
+              runId: request.runId,
+              effect: runtimeEffect,
+            });
+            if (recovered.status === 'absent')
+              throw new Error('ambiguous runtime start is not visible yet');
+            externalRef = recovered.handle.id;
+            recoveredHandle = recovered.handle;
+          } catch (error) {
+            failures.push(
+              error instanceof Error
+                ? error
+                : new Error('runtime start recovery failed'),
+            );
+            continue;
+          }
+        }
         const cancelRequest = {
           runId: request.runId,
           idempotencyKey: `${request.idempotencyKey}:runtime:${externalRef}`,
@@ -246,10 +375,9 @@ export function createDurableTriggerOutbox(
               runtimeClaim.lease,
               options.clock(),
             );
-            const handle = await options.runtimeHandles.load(
-              externalRef,
-              request.runId,
-            );
+            const handle =
+              recoveredHandle ??
+              (await options.runtimeHandles.load(externalRef, request.runId));
             await options.runtime.cancel(
               handle,
               'authoritative run cancellation',
@@ -260,7 +388,11 @@ export function createDurableTriggerOutbox(
             );
             await options.checkpoints.completeEffect(
               runtimeClaim.lease,
-              { externalRef, cancelled: true },
+              {
+                externalRef,
+                runtimeEffectKey: runtimeEffect.key,
+                cancelled: true,
+              },
               options.clock(),
             );
           }
@@ -315,12 +447,14 @@ export function createDurableTriggerOutbox(
       if (options.runtime === undefined || options.runtimeHandles === undefined)
         throw new Error('runtime cleanup requires trusted runtime composition');
       const effects = await options.checkpoints.listEffects(request.runId);
-      for (const runtimeEffect of effects.filter(
-        (candidate) =>
-          candidate.kind === 'runtime-session' &&
-          candidate.externalRef !== undefined,
-      )) {
-        const externalRef = runtimeEffect.externalRef!;
+      const externalRefs = [
+        ...new Set(
+          effects
+            .map(cleanupExternalReference)
+            .filter((value): value is string => value !== undefined),
+        ),
+      ];
+      for (const externalRef of externalRefs) {
         const cleanupRequest = {
           ...request,
           idempotencyKey: `${request.idempotencyKey}:${externalRef}`,
@@ -414,11 +548,10 @@ export function createDurableTriggerOutbox(
         const runtimeEffect = effects.find(
           (candidate) =>
             candidate.kind === 'runtime-session' &&
-            candidate.externalRef !== undefined &&
             candidate.key.includes(`:${reservation.stepKey}:`),
         );
-        if (runtimeEffect?.externalRef === undefined)
-          throw new Error('expired reservation runtime handle is unavailable');
+        if (runtimeEffect === undefined)
+          throw new Error('expired reservation runtime intent is unavailable');
         const reconcileRequest = {
           runId: request.runId,
           idempotencyKey: `${request.idempotencyKey}:${reservation.reservationKey}`,
@@ -433,47 +566,119 @@ export function createDurableTriggerOutbox(
           claim.lease,
           options.clock(),
         );
-        const handle = await options.runtimeHandles.load(
-          runtimeEffect.externalRef,
-          request.runId,
-        );
-        try {
-          await options.runtime.cancel(handle, 'runtime session lease expired');
-        } catch {
-          // Cleanup below also interrupts active sessions and is the authoritative
-          // confirmation that the paid session no longer runs.
+        const recovery =
+          runtimeEffect.externalRef === undefined
+            ? await recoverRuntimeStart(options, {
+                runId: request.runId,
+                effect: runtimeEffect,
+              })
+            : undefined;
+        let externalRef = runtimeEffect.externalRef;
+        let handle: RuntimeHandle | undefined;
+        const recoveryBinding =
+          recovery?.recovery ??
+          (await options.runtimeStartRecovery?.resolve({
+            runId: request.runId,
+            effectKey: runtimeEffect.key,
+          }));
+        if (recoveryBinding === undefined)
+          throw new Error('runtime start recovery binding is unavailable');
+        if (recovery?.status === 'found') {
+          handle = recovery.handle;
+          externalRef = handle.id;
+          const recoveredEffect = await options.checkpoints.claimEffect(
+            {
+              key: runtimeEffect.key,
+              runId: runtimeEffect.runId,
+              kind: runtimeEffect.kind,
+              inputFingerprint: runtimeEffect.inputFingerprint,
+              createdAt: runtimeEffect.createdAt,
+              updatedAt: runtimeEffect.updatedAt,
+            },
+            {
+              ownerId: `orphan-recovery:${runtimeEffect.key}`,
+              now,
+              leaseExpiresAt: new Date(
+                Date.parse(now) + 2 * 60_000,
+              ).toISOString(),
+            },
+          );
+          if (
+            recoveredEffect.ownerId !== `orphan-recovery:${runtimeEffect.key}`
+          )
+            throw new Error('runtime recovery effect is still fenced');
+          await options.checkpoints.attachExternalRef(
+            {
+              key: recoveredEffect.key,
+              ownerId: recoveredEffect.ownerId,
+              leaseVersion: recoveredEffect.leaseVersion,
+            },
+            handle.id,
+            now,
+          );
+        } else if (externalRef !== undefined) {
+          handle = await options.runtimeHandles.load(
+            externalRef,
+            request.runId,
+          );
         }
         let usage = {
           inputTokens: 0,
           outputTokens: 0,
           runtimeMs: FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs,
         };
-        try {
-          usage = await options.runtime.usage(handle);
-        } catch {
-          // The full reservation is charged below when exact provider usage is
-          // unavailable after a crash.
+        let microdollars = reservation.estimatedMicrodollars;
+        let usageModel = 'conservative-orphan-reservation';
+        if (handle !== undefined) {
+          try {
+            await options.runtime.cancel(
+              handle,
+              'runtime session lease expired',
+            );
+          } catch {
+            // Cleanup below also interrupts active sessions.
+          }
+          try {
+            usage = await options.runtime.usage(handle);
+            microdollars = recoveryBinding.priceUsage(usage);
+            if (!Number.isSafeInteger(microdollars) || microdollars < 0)
+              throw new Error('recovered runtime price is invalid');
+            usageModel = `${recoveryBinding.model}@${recoveryBinding.pricingVersion}`;
+          } catch {
+            microdollars = reservation.estimatedMicrodollars;
+            usageModel = 'conservative-orphan-reservation';
+          }
+          await options.runtime.cleanup(handle);
+          await options.runtimeHandles.markCancelled(
+            handle.id,
+            options.clock(),
+          );
+          await options.runtimeHandles.markCleaned(handle.id, options.clock());
+        } else {
+          if (
+            options.runtime.cleanupAccess === undefined &&
+            (recoveryBinding.resources.length > 0 ||
+              recoveryBinding.credentialRefs.length > 0)
+          )
+            throw new Error(
+              'runtime access cleanup is required before releasing the session fence',
+            );
+          await options.runtime.cleanupAccess?.({
+            resources: recoveryBinding.resources,
+            credentialRefs: recoveryBinding.credentialRefs,
+          });
         }
-        await options.runtime.cleanup(handle);
-        await options.runtimeHandles.markCancelled(
-          runtimeEffect.externalRef,
-          options.clock(),
-        );
-        await options.runtimeHandles.markCleaned(
-          runtimeEffect.externalRef,
-          options.clock(),
-        );
         await options.repository.appendUsage({
           idempotencyId: persistenceId(
             'usage',
             `usage:orphan-reconcile:${reservation.reservationKey}`,
           ),
           runId: persistenceId('run', reservation.runId),
-          model: 'conservative-orphan-reservation',
+          model: usageModel,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           runtimeMs: usage.runtimeMs,
-          microdollars: reservation.estimatedMicrodollars,
+          microdollars,
           recordedAt: isoTimestamp(now),
         });
         const spent = (
@@ -486,7 +691,7 @@ export function createDurableTriggerOutbox(
           reservationKey: reservation.reservationKey,
           runId: reservation.runId,
           stepKey: reservation.stepKey,
-          actualMicrodollars: reservation.estimatedMicrodollars,
+          actualMicrodollars: microdollars,
           workflowSpentMicrodollars: spent,
           dailySpentMicrodollars: spent,
           workflowLimitMicrodollars:
@@ -524,8 +729,8 @@ export function createDurableTriggerOutbox(
         await options.checkpoints.completeEffect(
           claim.lease,
           {
-            externalRef: runtimeEffect.externalRef,
-            settledMicrodollars: reservation.estimatedMicrodollars,
+            ...(externalRef === undefined ? {} : { externalRef }),
+            settledMicrodollars: microdollars,
           },
           options.clock(),
         );

@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTrustedSourceSnapshotIngestorWithClientFactory } from './source-snapshot.js';
 import type {
   GitTreeEntry,
-  GitHubInstallationClient,
-  GitHubInstallationClientFactory,
+  GitHubReadOnlyInstallationClient,
+  GitHubReadOnlyClientFactory,
+  ReadOnlyInstallationClientScope,
 } from './types.js';
 
 const sha = (character: string) => character.repeat(40);
@@ -39,9 +40,17 @@ function fixture(
       const bytes = new TextEncoder().encode('export const ok = true;\n');
       return { sha: blobSha, size: bytes.byteLength, bytes };
     }),
-  } as unknown as GitHubInstallationClient;
-  const factory: GitHubInstallationClientFactory = {
-    withClient: async (_scope, operation) => operation(client),
+  } as GitHubReadOnlyInstallationClient;
+  const scopes: ReadOnlyInstallationClientScope[] = [];
+  const withClient: GitHubReadOnlyClientFactory['withClient'] = async (
+    scope,
+    operation,
+  ) => {
+    scopes.push(scope);
+    return operation(client);
+  };
+  const factory: GitHubReadOnlyClientFactory = {
+    withClient,
   };
   const ingestor = createTrustedSourceSnapshotIngestorWithClientFactory(
     {
@@ -62,12 +71,12 @@ function fixture(
     },
     factory,
   );
-  return { artifacts, client, ingestor };
+  return { artifacts, client, ingestor, scopes };
 }
 
 describe('trusted GitHub source snapshot ingestion', () => {
   it('writes one content-addressed SHA-bound source/bundle-v1 artifact', async () => {
-    const { artifacts, ingestor } = fixture();
+    const { artifacts, ingestor, scopes } = fixture();
     const first = await ingestor.ensure('run-1');
     const second = await ingestor.ensure('run-1');
     expect(second).toEqual(first);
@@ -80,6 +89,10 @@ describe('trusted GitHub source snapshot ingestion', () => {
       repositorySha: sha('a'),
       treeSha: sha('b'),
       files: [{ path: 'src/index.ts', mode: '100644' }],
+    });
+    expect(scopes[0]).toMatchObject({
+      repositoryIds: [42],
+      permissions: { contents: 'read' },
     });
   });
 

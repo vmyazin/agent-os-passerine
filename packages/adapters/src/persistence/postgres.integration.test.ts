@@ -19,6 +19,7 @@ import {
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createPostgresPublicationStoreForTest } from '../github/postgres-store.js';
 import { createPostgresWorkflowCheckpointStoreForTest } from '../trigger/postgres-checkpoint-store.js';
+import { PostgresWorkflowReconciliationCursorStore } from '../trigger/reconciliation-cursor-store.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
 import * as schema from './schema.js';
@@ -101,6 +102,20 @@ describePostgres('PostgreSQL persistence integration', () => {
           Record<string, unknown>
         >[],
     });
+    const cursorStore = new PostgresWorkflowReconciliationCursorStore({
+      execute: async (query, parameters) =>
+        (await client.unsafe(query, [
+          ...parameters,
+        ] as never[])) as unknown as readonly Readonly<
+          Record<string, unknown>
+        >[],
+    });
+    await cursorStore.save({ at, id: runId });
+    const loadedCursor = await cursorStore.load();
+    expect(loadedCursor?.id).toBe(runId);
+    expect(Date.parse(loadedCursor!.at)).toBe(Date.parse(at));
+    await cursorStore.save(undefined);
+    await expect(cursorStore.load()).resolves.toBeUndefined();
     const effect = {
       key: `runtime:${suffix}`,
       runId,
@@ -274,7 +289,7 @@ describePostgres('PostgreSQL persistence integration', () => {
       promptDigest: 'prompt',
       environmentDigest: 'environment',
       policyDigest: 'policy',
-      repositorySha: '0'.repeat(40),
+      repositorySha: 'd'.repeat(40),
       createdAt: at,
     });
     const first = await repository.applyConfigRevision(

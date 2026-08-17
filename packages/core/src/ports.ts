@@ -132,6 +132,10 @@ export interface RuntimeProvider {
   collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput>;
   usage(handle: RuntimeHandle): Promise<RuntimeUsage>;
   cleanup(handle: RuntimeHandle): Promise<void>;
+  cleanupAccess?(input: {
+    readonly resources: readonly RuntimeFileResource[];
+    readonly credentialRefs: readonly string[];
+  }): Promise<void>;
   observeCommand?(
     handle: RuntimeHandle,
     expectedCommand: string,

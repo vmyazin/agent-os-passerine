@@ -129,6 +129,14 @@ export interface WorkflowHandleSealer {
 }
 
 export interface RuntimeHandleVault {
+  store(input: {
+    readonly handle: RuntimeHandle;
+    readonly runId: string;
+    readonly stepRunId: string;
+    readonly role: FeatureRole;
+    readonly aad: JsonValue;
+    readonly at: string;
+  }): Promise<void>;
   load(externalId: string, runId: string): Promise<RuntimeHandle>;
   markCancelled(externalId: string, at: string): Promise<void>;
   markCleaned(externalId: string, at: string): Promise<void>;
@@ -285,6 +293,7 @@ export interface DurableFeatureWorkflowDependencies {
     prepare(input: {
       readonly workflow: FeatureWorkflowInput;
       readonly stepId: string;
+      readonly logicalStepId: string;
       readonly role: FeatureRole;
       readonly stepInput: JsonValue;
       readonly idempotencyKey: string;

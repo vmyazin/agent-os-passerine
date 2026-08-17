@@ -6,7 +6,7 @@ import {
   persistenceId,
   isoTimestamp,
 } from '@agentos/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ControlPlaneService, ServiceError } from './control-plane-service';
 
@@ -29,6 +29,62 @@ const feature = {
 };
 
 describe('ControlPlaneService', () => {
+  it('binds an applied workflow configuration to the trusted selected-repository head', async () => {
+    const repository = new InMemoryDomainRepository();
+    const resolve = vi.fn(async () => 'b'.repeat(40));
+    const requestStart = vi.fn();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      {
+        requestStart,
+        requestApprovalResume: vi.fn(),
+      },
+      { resolve },
+    );
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const applied = await service.applyConfiguration('trusted-head', {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+
+    expect(resolve).toHaveBeenCalledWith(config);
+    const projects = await repository.listProjects();
+    const revisions = await repository.listConfigRevisions(projects[0]!.id);
+    expect(revisions).toEqual([
+      expect.objectContaining({ repositorySha: 'b'.repeat(40) }),
+    ]);
+    const revision = revisions[0]!;
+    await expect(
+      service.createFeatureRun('trusted-head-feature', {
+        projectId: applied.projectId,
+        title: 'Use the real selected head',
+        description: 'Snapshot the exact applied revision.',
+        repositorySha: revision.repositorySha,
+        configDigest: revision.configDigest,
+        modelDigest: revision.modelDigest,
+        promptDigest: revision.promptDigest,
+        environmentDigest: revision.environmentDigest,
+        policyDigest: revision.policyDigest,
+      }),
+    ).resolves.toMatchObject({ repositorySha: 'b'.repeat(40) });
+    expect(requestStart).toHaveBeenCalledOnce();
+  });
+
   it('records configuration immutably and replays the same apply key', async () => {
     const repository = new InMemoryDomainRepository();
     const service = createService(repository);

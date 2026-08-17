@@ -437,11 +437,22 @@ describe('durable feature workflow', () => {
   it('runs separate least-privilege role sessions through trusted draft publication', async () => {
     const f = await fixture();
     const published: unknown[] = [];
+    const accessRequests: Array<{
+      logicalStepId: string;
+      stepId: string;
+      stepInput: unknown;
+    }> = [];
     const workflow = createDurableFeatureWorkflow({
       repository: f.repository,
       checkpoints: new InMemoryWorkflowCheckpointStore(),
       artifacts: f.artifacts,
       runtime: f.runtime,
+      runtimeAccess: {
+        prepare: async (request) => {
+          accessRequests.push(request);
+          return { resources: [], credentialRefs: [] };
+        },
+      },
       approval: f.waiter,
       roles,
       clock: () => now,
@@ -508,6 +519,26 @@ describe('durable feature workflow', () => {
       expect.objectContaining({ timeout: '3600s' }),
     ]);
     expect(f.runtime.cleaned).toHaveLength(5);
+    expect(accessRequests.map((request) => request.logicalStepId)).toEqual([
+      'specification',
+      'planning',
+      'implementation',
+      'review',
+      'verification',
+    ]);
+    expect(accessRequests[1]?.stepId).toMatch(/^run-1:planning:1$/);
+    expect(accessRequests[1]?.stepInput).toMatchObject({
+      specificationArtifact: { stepId: 'specification' },
+      definitionOfDoneArtifact: { stepId: 'specification' },
+    });
+    expect(accessRequests[2]?.stepInput).toMatchObject({
+      planArtifact: { stepId: 'planning' },
+    });
+    expect(accessRequests[3]?.stepInput).toMatchObject({
+      changeSetArtifact: { stepId: 'implementation' },
+      testEvidenceArtifact: { stepId: 'implementation' },
+      definitionOfDoneArtifact: { stepId: 'specification' },
+    });
   });
 
   it('stops after authoritative rejection even when the waitpoint wakes', async () => {

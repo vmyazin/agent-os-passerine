@@ -35,6 +35,39 @@ export function createRepositoryRuntimeHandleVault(options: {
     return session;
   };
   return Object.freeze({
+    async store(
+      input: Parameters<RuntimeHandleVault['store']>[0],
+    ): Promise<void> {
+      const id = persistenceId('externalSession', `runtime:${input.handle.id}`);
+      const existing = await options.repository.getExternalSession(id);
+      if (existing !== undefined) {
+        if (
+          existing.runId !== input.runId ||
+          existing.stepRunId !== input.stepRunId ||
+          existing.externalId !== input.handle.id
+        )
+          throw new Error(
+            'sealed runtime handle conflicts with recovery state',
+          );
+        return;
+      }
+      const sealedHandle = await options.sealer.seal(input.handle, input.aad);
+      await options.repository.createExternalSession({
+        id,
+        runId: persistenceId('run', input.runId),
+        stepRunId: persistenceId('stepRun', input.stepRunId),
+        provider: 'runtime',
+        externalId: input.handle.id,
+        status: 'active',
+        state: {
+          version: 'sealed-runtime-handle-state-v1',
+          sealedHandle,
+          aad: input.aad,
+          role: input.role,
+        },
+        createdAt: isoTimestamp(input.at),
+      });
+    },
     async load(externalId: string, runId: string): Promise<RuntimeHandle> {
       const session = await find(externalId, runId);
       const state = session.state as Record<string, JsonValue>;

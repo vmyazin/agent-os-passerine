@@ -105,12 +105,30 @@ export type InstallationClientScope = PublicationManifestBody['repository'] & {
   };
 };
 
+export type ReadOnlyInstallationClientScope =
+  PublicationManifestBody['repository'] & {
+    readonly repositoryIds: readonly [number];
+    readonly permissions: { readonly contents: 'read' };
+  };
+
 export interface GitHubInstallationClientFactory {
   withClient<T>(
     scope: InstallationClientScope,
     operation: (client: GitHubInstallationClient) => Promise<T>,
   ): Promise<T>;
 }
+
+export interface GitHubReadOnlyClientFactory {
+  withClient<T>(
+    scope: ReadOnlyInstallationClientScope,
+    operation: (client: GitHubReadOnlyInstallationClient) => Promise<T>,
+  ): Promise<T>;
+}
+
+export type GitHubReadOnlyInstallationClient = Pick<
+  GitHubInstallationClient,
+  'getRepository' | 'getReference' | 'getCommit' | 'getTree' | 'getBlob'
+>;
 
 export interface PublicationRecord {
   readonly key: string;

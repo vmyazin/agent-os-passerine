@@ -20,10 +20,12 @@ Last reviewed: 2026-08-17
 5. **Durable feature coordination:** Trigger.dev v4 task/wait integration,
    fenced Postgres side-effect delivery, reserved/settled spend, sealed runtime
    handles, scoped spec/DoD approval, separate role sessions, provider start
-   reconciliation, SHA-bound source ingestion, scoped Managed vault/MCP access,
+   reconciliation, read-only GitHub SHA-bound source ingestion, mounted
+   upstream artifacts plus logical-step-scoped Managed vault/MCP access,
    isolated provider-observed command verification, one review/fix/final-review
-   pass, trusted publication, independent cancellation, orphan charging, and
-   cleanup reconciliation.
+   pass, trusted publication, independent cancellation, sealed ambiguous-start
+   recovery, config-bound actual orphan pricing, cleanup reconciliation, and a
+   persistent fair reconciliation cursor.
 
 ## Verification boundary
 
@@ -33,14 +35,20 @@ Managed Agents and R2 smoke tests require the explicit `AGENTOS_LIVE_TESTS=1`
 opt-in. No Trigger deployment, model session, R2 write, GitHub branch, or pull
 request has been created by the implementation session.
 
-The durable workflow task is testable through stable local interfaces.
-The repo-owned task registers its fail-closed concrete composition at module
-load; runtime initialization resolves Neon, R2/source bundles, Managed Agents,
+The durable workflow task is testable through stable local interfaces. The
+repo-owned task registers its fail-closed concrete composition at module load;
+runtime initialization resolves Neon, R2/source bundles, Managed Agents,
 secretless sandbox test observation, and the composite GitHub publisher from
-server-only environment variables. This implements the staged feature-workflow
-slice but does not establish its live exit gate. No Trigger deployment, R2 source bundle, paid model
-session, or GitHub publication was exercised in this build. PostgreSQL
-integration also remains unexecuted when `TEST_DATABASE_URL` is absent.
+server-only environment variables. This implements the staged
+feature-workflow slice but does not establish its live exit gate. No Trigger
+deployment, R2 source bundle, paid model session, or GitHub publication was
+exercised in this build. PostgreSQL integration also remains unexecuted when
+`TEST_DATABASE_URL` is absent.
+
+The Playwright build/server path completed in this host, but all three browser
+cases hit the bounded Chromium-launch timeout before reaching application
+assertions; the earlier three-case baseline passed. This host result is a local
+browser-runtime limitation, not evidence that the current UI assertions ran.
 
 ## Remaining product stages
 

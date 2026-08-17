@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createGitHubAppClientFactory,
   createGitHubAppClientFactoryForTest,
+  createGitHubReadOnlyClientFactoryForTest,
 } from './github-app.js';
 import type { InstallationClientScope } from './types.js';
 
@@ -31,6 +32,33 @@ function authResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe('GitHub App installation client factory', () => {
+  it('mints source-reader tokens with contents read and no pull-request permission', async () => {
+    const auth = vi.fn(async () =>
+      authResult({ permissions: { contents: 'read' } }),
+    );
+    const factory = createGitHubReadOnlyClientFactoryForTest({
+      auth,
+      fetch: vi.fn(),
+      now: () => new Date('2026-08-17T12:00:00.000Z'),
+    });
+    await expect(
+      factory.withClient(
+        {
+          ...scope,
+          permissions: { contents: 'read' },
+        },
+        async () => 'read-only',
+      ),
+    ).resolves.toBe('read-only');
+    expect(auth).toHaveBeenCalledExactlyOnceWith({
+      type: 'installation',
+      installationId: 42,
+      repositoryIds: [314159],
+      permissions: { contents: 'read' },
+      refresh: true,
+    });
+  });
+
   it('mints one opaque repository-scoped token with only required effective permissions', async () => {
     const auth = vi.fn(async () => authResult());
     const fetch = vi.fn(

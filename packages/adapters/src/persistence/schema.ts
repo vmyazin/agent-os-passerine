@@ -76,6 +76,16 @@ export const workflowEffectStatus = pgEnum('workflow_effect_status', [
   'dead_letter',
 ]);
 
+export const workflowReconciliationCursors = pgTable(
+  'workflow_reconciliation_cursors',
+  {
+    cursorKey: text('cursor_key').primaryKey(),
+    cursorAt: instant('cursor_at').notNull(),
+    cursorId: text('cursor_id').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+);
+
 export const projects = pgTable(
   'projects',
   {

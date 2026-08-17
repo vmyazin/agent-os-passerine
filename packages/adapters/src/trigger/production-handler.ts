@@ -464,6 +464,7 @@ export async function createProductionFeatureWorkflowFromEnv(
             source: { sourceSnapshotDigest: string };
           };
           stepId: string;
+          logicalStepId: string;
           role:
             | 'specification'
             | 'planning'
@@ -543,7 +544,7 @@ export async function createProductionFeatureWorkflowFromEnv(
               methods: ['artifact.get', 'artifact.put', 'artifact.list'],
               projectId: request.workflow.projectId,
               runId: request.workflow.runId,
-              stepId: request.stepId,
+              stepId: request.logicalStepId,
               maxBytes: 1_000_000,
               maxCalls: 1_000,
               maxCumulativeBytes: 16 * 1024 * 1024,

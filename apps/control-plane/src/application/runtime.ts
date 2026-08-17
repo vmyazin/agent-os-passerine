@@ -7,8 +7,10 @@ import {
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createRepositoryRuntimeHandleVault,
+  createRuntimeStartRecoveryResolver,
   createR2ArtifactStore,
   createTrustedSourceSnapshotIngestor,
+  createTrustedRepositoryHeadResolver,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
 } from '@agentos/adapters';
@@ -68,6 +70,12 @@ function cancellationRuntime(): RuntimeProvider {
     collectOutput: async (handle) => (await get()).collectOutput(handle),
     usage: async (handle) => (await get()).usage(handle),
     cleanup: async (handle) => (await get()).cleanup(handle),
+    cleanupAccess: async (input) => {
+      const runtime = await get();
+      if (runtime.cleanupAccess === undefined)
+        throw new Error('runtime access cleanup is unavailable');
+      await runtime.cleanupAccess(input);
+    },
   };
 }
 
@@ -117,9 +125,10 @@ export function workflowDispatchFromEnv() {
       const repositorySha = provenance.provenance?.repositorySha;
       if (
         typeof repositorySha !== 'string' ||
-        !/^[0-9a-f]{40}$/.test(repositorySha)
+        !/^[0-9a-f]{40}$/.test(repositorySha) ||
+        repositorySha !== snapshots[0]!.repositorySha
       )
-        throw new Error('source snapshot repository SHA is invalid');
+        throw new Error('source snapshot repository SHA binding is invalid');
       return {
         projectId: run.projectId,
         runId: run.id,
@@ -137,14 +146,16 @@ export function workflowDispatchFromEnv() {
         Buffer.from(requiredRuntime('AGENTOS_RUNTIME_HANDLE_KEY'), 'base64url'),
       ),
     }));
+  const checkpoints = createNeonWorkflowCheckpointStore(process.env);
   return createDurableTriggerOutbox({
-    checkpoints: createNeonWorkflowCheckpointStore(process.env),
+    checkpoints,
     trigger: createTriggerWorkflowDispatcher(),
     approval: createTriggerApprovalWaiter(),
     clock: () => new Date().toISOString(),
     runtime: cancellationRuntime(),
     repository,
     runtimeHandles: {
+      store: (input) => runtimeHandles().store(input),
       load: (externalId, runId): Promise<RuntimeHandle> =>
         runtimeHandles().load(externalId, runId),
       markCancelled: (externalId, at) =>
@@ -152,17 +163,55 @@ export function workflowDispatchFromEnv() {
       markCleaned: (externalId, at) =>
         runtimeHandles().markCleaned(externalId, at),
     },
+    runtimeStartRecovery: createRuntimeStartRecoveryResolver({
+      repository,
+      checkpoints,
+      artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
+    }),
     sourceSnapshot,
   });
 }
 
 export function controlPlaneService(): ControlPlaneService {
-  service ??= new ControlPlaneService(
-    repositoryFromEnv(),
-    () => isoTimestamp(new Date().toISOString()),
-    deterministicId,
-    workflowDispatchFromEnv(),
-  );
+  if (service === undefined) {
+    const dispatch = workflowDispatchFromEnv();
+    const repositoryHead =
+      dispatch === undefined
+        ? undefined
+        : (() => {
+            const selected = parsedRuntimeJson<
+              PublicationManifestBody['repository'][]
+            >('GITHUB_SELECTED_REPOSITORIES_JSON');
+            if (selected.length !== 1)
+              throw new Error(
+                'the POC requires exactly one selected repository',
+              );
+            const resolver = createTrustedRepositoryHeadResolver({
+              githubApp: {
+                appId: Number(requiredRuntime('GITHUB_APP_ID')),
+                privateKey: requiredRuntime('GITHUB_APP_PRIVATE_KEY'),
+              },
+            });
+            return {
+              resolve: (config: ReturnType<typeof parseAgentOsConfig>) => {
+                if (config.project.repository === undefined)
+                  throw new Error('GitHub repository URL is required');
+                return resolver.resolve({
+                  repository: selected[0]!,
+                  repositoryUrl: config.project.repository,
+                  defaultBranch: config.project.defaultBranch,
+                });
+              },
+            };
+          })();
+    service = new ControlPlaneService(
+      repositoryFromEnv(),
+      () => isoTimestamp(new Date().toISOString()),
+      deterministicId,
+      dispatch,
+      repositoryHead,
+    );
+  }
   return service;
 }
 

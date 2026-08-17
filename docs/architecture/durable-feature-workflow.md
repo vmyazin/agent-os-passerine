@@ -7,8 +7,10 @@ session leases.
 
 ## Execution path
 
-1. `POST /api/features` creates the idempotent `pending` domain run. A durable
-   outbox effect then reads the exact base commit with the selected GitHub App,
+1. Configuration apply resolves and persists the selected repository's exact
+   default-branch head through a contents-read-only GitHub App token.
+   `POST /api/features` creates the idempotent `pending` domain run bound to
+   that revision. A durable outbox effect then reads the exact base commit,
    validates and writes a bounded `source/bundle-v1` artifact, and only then
    requests the versioned Trigger task.
 2. The specification role writes separately hashed specification and measurable
@@ -17,8 +19,11 @@ session leases.
    and DoD. It stores a domain approval and a Trigger waitpoint reference. The
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
-4. Planning, implementation/testing, review, and trusted verification use distinct agents,
-   environments, and runtime sessions. A requested fix gets one fresh
+4. Planning, implementation/testing, review, and trusted verification use
+   distinct agents, environments, and runtime sessions. Each role receives the
+   exact source bundle plus verified upstream artifacts as read-only mounted
+   files. Its Artifact MCP capability can write only to that role's logical
+   step scope. A requested fix gets one fresh
    implementation session followed by a fresh final-review session; a final
    `changes_requested` decision cannot publish.
 5. Verification runs the allowlisted test command in a separate, secretless
@@ -44,7 +49,12 @@ waitpoint completion, and draft publication are safe to retry through their own
 idempotency contracts.
 
 A runtime start that is durably marked `started` but has no external reference
-is reconciled by the provider's deterministic run/step/idempotency binding.
+is repeatedly reconciled by the provider's deterministic
+run/step/idempotency binding. The sealed start inputs are reconstructed from
+the immutable step/config/access checkpoints. If no session is discoverable by
+the reservation's bounded reconciliation deadline, trusted cleanup removes
+the uploaded files and vaults, charges the full reservation, and only then
+releases the global fence.
 Managed Agents session listing reconstructs the same HMAC-derived ownership
 capability across replicas. Publication retries re-enter the composite GitHub
 publisher's durable reconciliation. Full runtime handles are AES-GCM sealed in
@@ -54,13 +64,16 @@ retries runtime-session and Trigger-run cancellation effects, so one provider
 failure cannot suppress the other. Cleanup is a separate durable effect and is
 reconciled after process termination.
 
-The bounded control-plane sweep also CAS-fails active feature runs once their
+The bounded control-plane sweep persists its run cursor in Postgres, so a
+terminated invocation resumes beyond its last scanned run instead of starving
+the tail. It also CAS-fails active feature runs once their
 absolute 60-minute domain deadline passes, expires any still-pending scoped
 approval, and redelivers cancellation plus cleanup. Expired spend reservations
 retain the global fence until reconciliation has cancelled and cleaned the
-remote session. The reconciler records observed usage when available and
-otherwise charges the full reservation before releasing the fence, so a killed
-worker cannot silently erase paid usage or admit a second paid session.
+remote session. The reconciler prices observed usage through the exact stored
+model/rate configuration digest when available and otherwise charges the full
+reservation before releasing the fence, so a killed worker cannot silently
+erase paid usage or admit a second paid session.
 
 Trigger retries the version-locked task at most once. Invalid inputs,
 unregistered composition, and unclassified handler failures use Trigger's
@@ -103,7 +116,9 @@ pnpm install --frozen-lockfile
 pnpm db:migrate
 pnpm test
 pnpm typecheck
+pnpm lint
 pnpm build
+pnpm db:check
 ```
 
 Set `TEST_DATABASE_URL` to include the PostgreSQL checkpoint/admission contract

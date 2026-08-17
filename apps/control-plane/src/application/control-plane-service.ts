@@ -166,6 +166,7 @@ function configurationProjection(
 
 function configurationDigests(
   config: AgentOsConfig,
+  repositorySha: string,
 ): Omit<PersistenceDigests, 'configDigest'> {
   return {
     modelDigest: fingerprint(config.models),
@@ -191,7 +192,7 @@ function configurationDigests(
         allowedModes: ['100644', '100755'],
       }),
     ),
-    repositorySha: '0'.repeat(40),
+    repositorySha,
   };
 }
 
@@ -421,6 +422,9 @@ export class ControlPlaneService {
     private readonly clock: () => IsoTimestamp,
     private readonly generateId: IdGenerator,
     private readonly workflowDispatch?: WorkflowDispatchOutbox,
+    private readonly repositoryHead?: {
+      resolve(config: AgentOsConfig): Promise<string>;
+    },
   ) {}
 
   async getConfiguration(includeCanonical = true): Promise<{
@@ -473,6 +477,35 @@ export class ControlPlaneService {
       );
     }
     const now = this.clock();
+    let repositorySha: string;
+    if (this.repositoryHead !== undefined) {
+      try {
+        repositorySha = await this.repositoryHead.resolve(config);
+      } catch {
+        throw new ServiceError(
+          'repository_head_unavailable',
+          'selected repository default branch could not be resolved',
+          503,
+        );
+      }
+      if (!/^[0-9a-f]{40}$/.test(repositorySha))
+        throw new ServiceError(
+          'repository_head_invalid',
+          'selected repository returned an invalid commit SHA',
+          503,
+        );
+    } else {
+      if (this.workflowDispatch !== undefined)
+        throw new ServiceError(
+          'repository_head_required',
+          'workflow configuration requires a trusted repository head resolver',
+          503,
+        );
+      repositorySha = fingerprint({
+        source: 'unbound-local-configuration',
+        configDigest: digest,
+      }).slice(0, 40);
+    }
     const active = await this.repository.getLatestConfigRevision();
     const projectId =
       active?.projectId ?? this.generateId('project', 'configuration');
@@ -495,7 +528,7 @@ export class ControlPlaneService {
           projectId,
           config: JSON.parse(canonicalConfig) as JsonValue,
           configDigest: digest,
-          ...configurationDigests(config),
+          ...configurationDigests(config, repositorySha),
           createdAt: now,
         },
         {

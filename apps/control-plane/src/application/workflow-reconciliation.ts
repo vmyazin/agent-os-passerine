@@ -11,6 +11,11 @@ import {
 } from '@agentos/core';
 import type { WorkflowDispatchOutbox } from './control-plane-service';
 
+export interface WorkflowReconciliationCursorStore {
+  load(): Promise<TimestampListCursor<WorkflowRunId> | undefined>;
+  save(cursor: TimestampListCursor<WorkflowRunId> | undefined): Promise<void>;
+}
+
 function isObject(value: JsonValue | undefined): value is {
   readonly [key: string]: JsonValue;
 } {
@@ -21,20 +26,24 @@ export async function reconcileWorkflowOutbox(
   repository: DomainRepository,
   outbox: WorkflowDispatchOutbox,
   clock: () => string = () => new Date().toISOString(),
+  cursorStore?: WorkflowReconciliationCursorStore,
 ): Promise<{ scannedRuns: number; delivered: number; failed: number }> {
   let scannedRuns = 0;
   let delivered = 0;
   let failed = 0;
-  let after: TimestampListCursor<WorkflowRunId> | undefined;
-  // Keep a strict advancing cursor and scan the complete bounded POC domain.
-  // The former ten-page cap restarted from the oldest run every cron and could
-  // permanently starve actionable runs after the first 1,000.
+  let after = await cursorStore?.load();
+  let completedCycle = false;
+  // Persist progress after each run. A terminated cron invocation resumes
+  // strictly after that run instead of rescanning the oldest page forever.
   for (let page = 0; page < 10_000; page += 1) {
     const runs = await repository.listRuns({
       limit: 100,
       ...(after === undefined ? {} : { after }),
     });
-    if (runs.length === 0) break;
+    if (runs.length === 0) {
+      completedCycle = true;
+      break;
+    }
     for (const listedRun of runs) {
       scannedRuns += 1;
       const deliver = async (operation: () => Promise<void>) => {
@@ -49,7 +58,6 @@ export async function reconcileWorkflowOutbox(
       const now = clock();
       if (
         run.pipeline === 'feature' &&
-        ['pending', 'running', 'waiting'].includes(run.status) &&
         outbox.requestOrphanReconciliation !== undefined
       ) {
         await deliver(() =>
@@ -131,6 +139,8 @@ export async function reconcileWorkflowOutbox(
             }),
           );
         }
+        after = { at: listedRun.createdAt, id: listedRun.id };
+        await cursorStore?.save(after);
         continue;
       }
       if (run.pipeline === 'feature' && run.status === 'pending') {
@@ -167,6 +177,8 @@ export async function reconcileWorkflowOutbox(
         }
         if (snapshots.length !== 1) {
           failed += 1;
+          after = { at: listedRun.createdAt, id: listedRun.id };
+          await cursorStore?.save(after);
           continue;
         }
         await deliver(() =>
@@ -222,10 +234,14 @@ export async function reconcileWorkflowOutbox(
           }),
         );
       }
+      after = { at: listedRun.createdAt, id: listedRun.id };
+      await cursorStore?.save(after);
     }
-    const last = runs.at(-1)!;
-    after = { at: last.createdAt, id: last.id };
-    if (runs.length < 100) break;
+    if (runs.length < 100) {
+      completedCycle = true;
+      break;
+    }
   }
+  if (completedCycle) await cursorStore?.save(undefined);
   return { scannedRuns, delivered, failed };
 }
