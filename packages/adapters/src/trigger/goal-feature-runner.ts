@@ -20,7 +20,10 @@ import type {
   GoalStepResult,
   GoalStepRunner,
 } from './types.js';
-import { GoalWorkflowTaskTransientError } from './types.js';
+import {
+  FeatureWorkflowTaskTransientError,
+  GoalWorkflowTaskTransientError,
+} from './types.js';
 
 const parentInputSchema = z
   .object({
@@ -407,6 +410,8 @@ export function createFeatureGoalStepRunner(
             { status: 'pending', updatedAt: options.clock() },
             active.stateVersion,
           );
+        if (error instanceof FeatureWorkflowTaskTransientError)
+          throw new GoalWorkflowTaskTransientError(error.message);
         throw error;
       }
       const completed = await options.repository.getRun(

@@ -12,7 +12,10 @@ import { createInMemoryArtifactStorage } from '../artifacts/in-memory.js';
 import { InMemoryDomainRepository } from '../persistence/in-memory.js';
 import { createFeatureGoalStepRunner } from './goal-feature-runner.js';
 import { deterministicGoalChildRunId } from './goal-workflow.js';
-import { GoalWorkflowTaskTransientError } from './types.js';
+import {
+  FeatureWorkflowTaskTransientError,
+  GoalWorkflowTaskTransientError,
+} from './types.js';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const criterion: CommandCriterion = {
@@ -314,5 +317,40 @@ describe('feature goal step runner', () => {
     releaseFeatureTask();
     await expect(first).resolves.toMatchObject({ status: 'succeeded' });
     expect(featureTask.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the child claim and maps feature transients to goal retries', async () => {
+    const seeded = await fixture();
+    const runner = createFeatureGoalStepRunner({
+      repository: seeded.repository,
+      artifacts: seeded.artifacts,
+      featureTask: {
+        run: vi.fn(async () => {
+          throw new FeatureWorkflowTaskTransientError('retry child');
+        }),
+      },
+      clock: () => now,
+    });
+    const childRunId = deterministicGoalChildRunId(seeded.parentRunId, 1);
+
+    await expect(
+      runner.run({
+        parentRunId: seeded.parentRunId,
+        projectId: seeded.projectId,
+        childRunId,
+        step: 1,
+        criteria: [criterion],
+        snapshot: seeded.snapshot,
+        priorFailures: [],
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: 'GoalWorkflowTaskTransientError',
+        message: 'retry child',
+      }),
+    );
+    await expect(seeded.repository.getRun(childRunId)).resolves.toMatchObject({
+      status: 'pending',
+    });
   });
 });
