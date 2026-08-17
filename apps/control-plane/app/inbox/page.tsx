@@ -28,11 +28,11 @@ export default async function InboxPage() {
           {approvals.map((approval) => (
             <article className="inbox-card" key={approval.id}>
               <p className="card-kind">Approval</p>
-              <h2>{approval.scope}</h2>
+              <h2>{approval.scopePreview}</h2>
               <dl>
                 <dt>Scope hash</dt>
                 <dd>
-                  <code>{approval.fingerprint}</code>
+                  <code>{approval.scopeHash}</code>
                 </dd>
                 <dt>Expires</dt>
                 <dd>{approval.expiresAt}</dd>

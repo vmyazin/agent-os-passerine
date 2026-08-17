@@ -103,12 +103,11 @@ describePostgres('PostgreSQL persistence integration', () => {
       occurredAt: at,
     } as const;
 
-    await expect(
-      Promise.all([
-        repository.appendEvent(event),
-        repository.appendEvent(event),
-      ]),
-    ).resolves.toHaveLength(2);
+    const replayed = await Promise.all([
+      repository.appendEvent(event),
+      repository.appendEvent(event),
+    ]);
+    expect(replayed.map((entry) => entry.sequence)).toEqual([1, 1]);
     await expect(
       repository.appendEvent({ ...event, fingerprint: 'sha256:different' }),
     ).rejects.toBeInstanceOf(EventFingerprintConflictError);
@@ -118,7 +117,140 @@ describePostgres('PostgreSQL persistence integration', () => {
         eventId: persistenceId('event', 'event-sequence-conflict'),
         fingerprint: 'sha256:sequence',
       }),
-    ).resolves.toMatchObject({ eventId: 'event-sequence-conflict' });
+    ).resolves.toMatchObject({
+      eventId: 'event-sequence-conflict',
+      sequence: 2,
+    });
+  });
+
+  it('atomically replays concurrent run creation and rejects changed payloads', async () => {
+    const projectId = persistenceId('project', `run-${randomUUID()}-project`);
+    await repository.createProject({
+      id: projectId,
+      name: 'concurrent run',
+      createdAt: isoTimestamp('2026-08-17T12:00:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T12:00:00.000Z'),
+    });
+    const run = {
+      id: persistenceId('run', `run-${randomUUID()}`),
+      projectId,
+      pipeline: 'feature',
+      status: 'pending' as const,
+      input: { title: 'same payload' },
+      createdAt: isoTimestamp('2026-08-17T12:00:01.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T12:00:01.000Z'),
+    };
+
+    const [first, replay] = await Promise.all([
+      repository.createRunIdempotently(run, 'sha256:same-run'),
+      repository.createRunIdempotently(run, 'sha256:same-run'),
+    ]);
+    expect(replay).toEqual(first);
+    await expect(
+      repository.createRunIdempotently(
+        { ...run, input: { title: 'changed payload' } },
+        'sha256:changed-run',
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
+  it('replays concurrent serialized cancel, approval, and inbox mutations', async () => {
+    const { runId, at } = await seed(`serialized-${randomUUID()}`);
+    const cancelEvent = {
+      runId,
+      eventId: persistenceId('event', 'serialized-cancel'),
+      fingerprint: 'sha256:serialized-cancel',
+      type: 'run.cancelled',
+      payload: {},
+      occurredAt: at,
+    } as const;
+    const cancelled = await Promise.all([
+      repository.cancelRunWithEvent(
+        runId,
+        { status: 'cancelled', updatedAt: at, completedAt: at },
+        cancelEvent,
+      ),
+      repository.cancelRunWithEvent(
+        runId,
+        { status: 'cancelled', updatedAt: at, completedAt: at },
+        cancelEvent,
+      ),
+    ]);
+    expect(cancelled.map((run) => run.status)).toEqual([
+      'cancelled',
+      'cancelled',
+    ]);
+    await expect(
+      repository.cancelRunWithEvent(
+        runId,
+        { status: 'cancelled', updatedAt: at, completedAt: at },
+        { ...cancelEvent, fingerprint: 'sha256:changed' },
+      ),
+    ).rejects.toBeInstanceOf(EventFingerprintConflictError);
+
+    const approvalId = persistenceId('approval', 'serialized-approval');
+    await repository.createApproval({
+      id: approvalId,
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'scope-hash',
+      status: 'pending',
+      createdAt: at,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+    const approvalRequest = {
+      approvalId,
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'scope-hash',
+      consumedAt: at,
+    } as const;
+    const approvalEvent = {
+      runId,
+      eventId: persistenceId('event', 'serialized-approval-event'),
+      fingerprint: 'sha256:serialized-approval',
+      type: 'approval.approved',
+      payload: { approvalId },
+      occurredAt: at,
+    } as const;
+    const approvals = await Promise.all([
+      repository.consumeApprovalWithEvent(approvalRequest, approvalEvent),
+      repository.consumeApprovalWithEvent(approvalRequest, approvalEvent),
+    ]);
+    expect(approvals.map((approval) => approval?.status)).toEqual([
+      'consumed',
+      'consumed',
+    ]);
+
+    const messageId = persistenceId('inboxMessage', 'serialized-message');
+    await repository.createInboxMessage({
+      id: messageId,
+      runId,
+      status: 'pending',
+      body: { question: 'Proceed?' },
+      createdAt: at,
+    });
+    const replyRequest = {
+      messageId,
+      reply: { answer: 'yes' },
+      repliedAt: at,
+    } as const;
+    const replyEvent = {
+      runId,
+      eventId: persistenceId('event', 'serialized-reply-event'),
+      fingerprint: 'sha256:serialized-reply',
+      type: 'inbox.replied',
+      payload: { messageId },
+      occurredAt: at,
+    } as const;
+    const replies = await Promise.all([
+      repository.replyInboxMessageWithEvent(replyRequest, replyEvent),
+      repository.replyInboxMessageWithEvent(replyRequest, replyEvent),
+    ]);
+    expect(replies.map((message) => message.status)).toEqual([
+      'replied',
+      'replied',
+    ]);
   });
 
   it('resolves concurrent usage replays and rejects changed content', async () => {

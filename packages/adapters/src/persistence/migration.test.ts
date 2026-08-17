@@ -83,6 +83,20 @@ describe('domain persistence migration', () => {
     expect(migration).toContain('alter column "claim_token" set not null');
   });
 
+  it('serializes event mutations with deterministic per-run advisory locks', () => {
+    for (const functionName of [
+      'agentos_append_event',
+      'agentos_cancel_run_with_event',
+      'agentos_consume_approval_with_event',
+      'agentos_reply_inbox_with_event',
+    ]) {
+      expect(migration).toContain(`function "${functionName}"`);
+    }
+    expect(migration).toContain('pg_advisory_xact_lock');
+    expect(migration).toContain('hashtextextended');
+    expect(migration).toContain('agentos_event_conflict');
+  });
+
   it('bounds bigint values and indexes every production list path', () => {
     expect(migration).toContain('9007199254740991');
     for (const index of [

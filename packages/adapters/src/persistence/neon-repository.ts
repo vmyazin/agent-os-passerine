@@ -199,43 +199,26 @@ function nullableJsonbValue(value: JsonValue | undefined) {
   return value === undefined ? sql`null` : jsonbValue(value);
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  return canonicalJson(left) === canonicalJson(right);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === undefined) return 'undefined';
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-      .join(',')}}`;
+function hasDatabaseError(error: unknown, message: string): boolean {
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof current !== 'object' || current === null || seen.has(current))
+      return false;
+    seen.add(current);
+    try {
+      if (
+        Reflect.get(current, 'code') === 'P0001' &&
+        String(Reflect.get(current, 'message')).includes(message)
+      ) {
+        return true;
+      }
+      current = Reflect.get(current, 'cause');
+    } catch {
+      return false;
+    }
   }
-  return JSON.stringify(value);
-}
-
-function assertEventReplayMatches(
-  row: Readonly<Record<string, unknown>>,
-  event: DomainEventDraft,
-): void {
-  if (
-    row.eventFingerprint !== event.fingerprint ||
-    row.eventType !== event.type ||
-    !sameJson(row.eventPayload ?? undefined, event.payload)
-  ) {
-    throw new EventFingerprintConflictError(event.runId, event.eventId);
-  }
-}
-
-function withoutEventMetadata(
-  row: Readonly<Record<string, unknown>>,
-): Readonly<Record<string, unknown>> {
-  const entity = { ...row };
-  delete entity.eventFingerprint;
-  delete entity.eventType;
-  delete entity.eventPayload;
-  return entity;
+  return false;
 }
 
 const timestampTypeParsers = {
@@ -399,6 +382,31 @@ export class NeonDomainRepository implements DomainRepository {
       'Run',
       mapWorkflowRunRow,
     );
+  }
+
+  async createRunIdempotently(
+    run: WorkflowRun,
+    idempotencyFingerprint: string,
+  ): Promise<WorkflowRun> {
+    const rows = await this.database
+      .insert(workflowRuns)
+      .values({
+        ...run,
+        idempotencyFingerprint,
+        input: optionalJsonbValue(run.input),
+        output: optionalJsonbValue(run.output),
+        error: optionalJsonbValue(run.error),
+      })
+      .onConflictDoUpdate({
+        target: workflowRuns.id,
+        set: { id: run.id },
+      })
+      .returning(workflowRunSelection);
+    const row = one(rows, 'Run');
+    if (row.idempotencyFingerprint !== idempotencyFingerprint) {
+      throw new IdempotencyConflictError('Run', run.id);
+    }
+    return mapWorkflowRunRow(row);
   }
 
   async getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined> {
@@ -721,47 +729,30 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async appendEvent(event: DomainEventDraft): Promise<DomainEvent> {
-    const result = await this.database.execute<Record<string, unknown>>(sql`
-      with existing as (
-        select * from "domain_events"
-        where "run_id" = ${event.runId} and "event_id" = ${event.eventId}
-      ), allocated as (
-        insert into "run_event_sequences" ("run_id", "next_sequence")
-        select ${event.runId}, 2 where not exists (select 1 from existing)
-        on conflict ("run_id") do update
-          set "next_sequence" = "run_event_sequences"."next_sequence" + 1
-        returning "next_sequence" - 1 as "sequence"
-      ), inserted as (
-        insert into "domain_events"
-          ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
-        select ${event.runId}, ${event.eventId}, ${event.fingerprint}, "sequence", ${event.type}, ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
-        from allocated
-        on conflict ("run_id", "event_id") do update
-          set "fingerprint" = "domain_events"."fingerprint"
-        returning *
-      ), selected as (
-        select * from existing union all select * from inserted
-      )
-      select
-        "run_id" as "runId", "event_id" as "eventId", "fingerprint",
-        "sequence"::text as "sequence", "type", "payload",
-        ("payload" is not null) as "payloadPresent",
-        to_char("occurred_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "occurredAt"
-      from selected limit 1
-    `);
+    let result: unknown;
+    try {
+      result = await this.database.execute<Record<string, unknown>>(sql`
+        select
+          "run_id" as "runId", "event_id" as "eventId", "fingerprint",
+          "sequence"::text as "sequence", "type", "payload",
+          ("payload" is not null) as "payloadPresent",
+          to_char("occurred_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "occurredAt"
+        from "agentos_append_event"(
+          ${event.runId}, ${event.eventId}, ${event.fingerprint}, ${event.type},
+          ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
+        )
+      `);
+    } catch (error) {
+      if (hasDatabaseError(error, 'agentos_event_conflict')) {
+        throw new EventFingerprintConflictError(event.runId, event.eventId);
+      }
+      throw error;
+    }
     const eventRow = one(executionRows(result), 'Event');
-    const existing = mapDomainEventRow({
+    return mapDomainEventRow({
       ...eventRow,
       sequence: databaseSafeInteger(eventRow.sequence, 'sequence'),
     });
-    if (
-      existing.fingerprint !== event.fingerprint ||
-      existing.type !== event.type ||
-      !sameJson(existing.payload, event.payload)
-    ) {
-      throw new EventFingerprintConflictError(event.runId, event.eventId);
-    }
-    return existing;
   }
 
   async getEvent(
@@ -785,53 +776,32 @@ export class NeonDomainRepository implements DomainRepository {
   ): Promise<WorkflowRun> {
     if (event.runId !== runId)
       throw new Error('event run does not match mutation');
-    const result = await this.database.execute<Record<string, unknown>>(sql`
-      with existing as (
-        select * from "domain_events"
-        where "run_id" = ${runId} and "event_id" = ${event.eventId}
-      ), mutated as (
-        update "workflow_runs" set
-          "status" = 'cancelled',
-          "updated_at" = ${update.updatedAt},
-          "completed_at" = ${update.completedAt ?? update.updatedAt}
-        where "id" = ${runId}
-          and "status" not in ('succeeded', 'failed', 'cancelled')
-          and not exists (select 1 from existing)
-        returning *
-      ), allocated as (
-        insert into "run_event_sequences" ("run_id", "next_sequence")
-        select ${runId}, 2 from mutated
-        on conflict ("run_id") do update
-          set "next_sequence" = "run_event_sequences"."next_sequence" + 1
-        returning "next_sequence" - 1 as "sequence"
-      ), inserted as (
-        insert into "domain_events"
-          ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
-        select ${runId}, ${event.eventId}, ${event.fingerprint}, "sequence", ${event.type}, ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
-        from allocated returning *
-      ), entity as (
-        select * from mutated
-        union all
-        select r.* from existing e join "workflow_runs" r on r."id" = e."run_id"
-      ), selected_event as (
-        select * from existing union all select * from inserted
-      )
-      select
-        r."id", r."project_id" as "projectId", r."config_revision_id" as "configRevisionId",
-        r."pipeline", r."status", r."input", (r."input" is not null) as "inputPresent",
-        r."output", (r."output" is not null) as "outputPresent",
-        r."error", (r."error" is not null) as "errorPresent",
-        to_char(r."created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
-        to_char(r."updated_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
-        to_char(r."started_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "startedAt",
-        to_char(r."completed_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "completedAt",
-        to_char(r."cleanup_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "cleanupAt",
-        e."fingerprint" as "eventFingerprint", e."type" as "eventType", e."payload" as "eventPayload"
-      from entity r cross join selected_event e limit 1
-    `);
-    const row = one(executionRows(result), 'Cancelled run');
-    assertEventReplayMatches(row, event);
-    return mapWorkflowRunRow(withoutEventMetadata(row));
+    try {
+      const result = await this.database.execute<Record<string, unknown>>(sql`
+        select
+          "id", "project_id" as "projectId", "config_revision_id" as "configRevisionId",
+          "pipeline", "idempotency_fingerprint" as "idempotencyFingerprint", "status",
+          "input", ("input" is not null) as "inputPresent",
+          "output", ("output" is not null) as "outputPresent",
+          "error", ("error" is not null) as "errorPresent",
+          to_char("created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
+          to_char("updated_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
+          to_char("started_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "startedAt",
+          to_char("completed_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "completedAt",
+          to_char("cleanup_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "cleanupAt"
+        from "agentos_cancel_run_with_event"(
+          ${runId}, ${update.updatedAt}, ${update.completedAt ?? update.updatedAt},
+          ${event.eventId}, ${event.fingerprint}, ${event.type},
+          ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
+        )
+      `);
+      return mapWorkflowRunRow(one(executionRows(result), 'Cancelled run'));
+    } catch (error) {
+      if (hasDatabaseError(error, 'agentos_event_conflict')) {
+        throw new EventFingerprintConflictError(event.runId, event.eventId);
+      }
+      throw error;
+    }
   }
 
   async consumeApprovalWithEvent(
@@ -840,98 +810,53 @@ export class NeonDomainRepository implements DomainRepository {
   ): Promise<Approval | undefined> {
     if (event.runId !== request.runId)
       throw new Error('event run does not match mutation');
-    const result = await this.database.execute<Record<string, unknown>>(sql`
-      with existing as (
-        select * from "domain_events"
-        where "run_id" = ${request.runId} and "event_id" = ${event.eventId}
-      ), mutated as (
-        update "approvals" set "status" = 'consumed', "consumed_at" = ${request.consumedAt}
-        where "id" = ${request.approvalId} and "run_id" = ${request.runId}
-          and "scope" = ${request.scope} and "fingerprint" = ${request.fingerprint}
-          and "status" = 'pending' and "expires_at" > ${request.consumedAt}
-          and not exists (select 1 from existing)
-        returning *
-      ), allocated as (
-        insert into "run_event_sequences" ("run_id", "next_sequence")
-        select ${request.runId}, 2 from mutated
-        on conflict ("run_id") do update
-          set "next_sequence" = "run_event_sequences"."next_sequence" + 1
-        returning "next_sequence" - 1 as "sequence"
-      ), inserted as (
-        insert into "domain_events"
-          ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
-        select ${request.runId}, ${event.eventId}, ${event.fingerprint}, "sequence", ${event.type}, ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
-        from allocated returning *
-      ), entity as (
-        select * from mutated
-        union all
-        select a.* from existing e join "approvals" a on a."run_id" = e."run_id"
-          and a."id" = ${request.approvalId}
-      ), selected_event as (
-        select * from existing union all select * from inserted
-      )
-      select
-        a."id", a."run_id" as "runId", a."scope", a."fingerprint", a."status",
-        to_char(a."created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
-        to_char(a."expires_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expiresAt",
-        to_char(a."consumed_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "consumedAt",
-        e."fingerprint" as "eventFingerprint", e."type" as "eventType", e."payload" as "eventPayload"
-      from entity a cross join selected_event e limit 1
-    `);
-    const [row] = executionRows(result);
-    if (row === undefined) return undefined;
-    assertEventReplayMatches(row, event);
-    return mapApprovalRow(withoutEventMetadata(row));
+    try {
+      const result = await this.database.execute<Record<string, unknown>>(sql`
+        select
+          "id", "run_id" as "runId", "scope", "fingerprint", "status",
+          to_char("created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
+          to_char("expires_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expiresAt",
+          to_char("consumed_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "consumedAt"
+        from "agentos_consume_approval_with_event"(
+          ${request.approvalId}, ${request.runId}, ${request.scope}, ${request.fingerprint},
+          ${request.consumedAt}, ${event.eventId}, ${event.fingerprint}, ${event.type},
+          ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
+        )
+      `);
+      const [row] = executionRows(result);
+      return row === undefined ? undefined : mapApprovalRow(row);
+    } catch (error) {
+      if (hasDatabaseError(error, 'agentos_event_conflict')) {
+        throw new EventFingerprintConflictError(event.runId, event.eventId);
+      }
+      throw error;
+    }
   }
 
   async replyInboxMessageWithEvent(
     request: ReplyInboxMessageRequest,
     event: DomainEventDraft,
   ): Promise<InboxMessage> {
-    const result = await this.database.execute<Record<string, unknown>>(sql`
-      with existing as (
-        select * from "domain_events"
-        where "run_id" = ${event.runId} and "event_id" = ${event.eventId}
-      ), mutated as (
-        update "inbox_messages" set
-          "status" = 'replied', "reply" = ${jsonbValue(request.reply)}, "replied_at" = ${request.repliedAt}
-        where "id" = ${request.messageId} and "run_id" = ${event.runId}
-          and "status" = 'pending' and not exists (select 1 from existing)
-        returning *
-      ), allocated as (
-        insert into "run_event_sequences" ("run_id", "next_sequence")
-        select ${event.runId}, 2 from mutated
-        on conflict ("run_id") do update
-          set "next_sequence" = "run_event_sequences"."next_sequence" + 1
-        returning "next_sequence" - 1 as "sequence"
-      ), inserted as (
-        insert into "domain_events"
-          ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
-        select ${event.runId}, ${event.eventId}, ${event.fingerprint}, "sequence", ${event.type}, ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
-        from allocated returning *
-      ), entity as (
-        select * from mutated
-        union all
-        select m.* from existing e join "inbox_messages" m on m."run_id" = e."run_id"
-          and m."id" = ${request.messageId}
-      ), selected_event as (
-        select * from existing union all select * from inserted
-      )
-      select
-        m."id", m."run_id" as "runId", m."step_run_id" as "stepRunId", m."status",
-        m."body", m."reply", (m."reply" is not null) as "replyPresent",
-        to_char(m."created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
-        to_char(m."replied_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "repliedAt",
-        e."fingerprint" as "eventFingerprint", e."type" as "eventType", e."payload" as "eventPayload"
-      from entity m cross join selected_event e limit 1
-    `);
-    const row = one(executionRows(result), 'Inbox reply');
-    assertEventReplayMatches(row, event);
-    const message = mapInboxMessageRow(withoutEventMetadata(row));
-    if (!sameJson(message.reply, request.reply)) {
-      throw new EventFingerprintConflictError(event.runId, event.eventId);
+    try {
+      const result = await this.database.execute<Record<string, unknown>>(sql`
+        select
+          "id", "run_id" as "runId", "step_run_id" as "stepRunId", "status",
+          "body", "reply", ("reply" is not null) as "replyPresent",
+          to_char("created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt",
+          to_char("replied_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "repliedAt"
+        from "agentos_reply_inbox_with_event"(
+          ${request.messageId}, ${event.runId}, ${jsonbValue(request.reply)}, ${request.repliedAt},
+          ${event.eventId}, ${event.fingerprint}, ${event.type},
+          ${nullableJsonbValue(event.payload)}, ${event.occurredAt}
+        )
+      `);
+      return mapInboxMessageRow(one(executionRows(result), 'Inbox reply'));
+    } catch (error) {
+      if (hasDatabaseError(error, 'agentos_event_conflict')) {
+        throw new EventFingerprintConflictError(event.runId, event.eventId);
+      }
+      throw error;
     }
-    return message;
   }
 
   async listEvents(

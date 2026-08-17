@@ -141,19 +141,17 @@ describe('NeonDomainRepository', () => {
       sequence: 1,
     });
     expect(replay.execute).toHaveBeenCalledTimes(1);
-    expect(executedSql(replay.execute)).toMatch(
-      /insert into "domain_events"[\s\S]*on conflict[\s\S]*do update[\s\S]*returning/,
-    );
+    expect(executedSql(replay.execute)).toMatch(/from "agentos_append_event"/);
     expect(executedQuery(replay.execute).params).toContain('null');
 
-    const conflict = repositoryWithRows([
-      {
-        ...event,
-        fingerprint: 'sha256:different',
-        sequence: '1',
-        payloadPresent: true,
-      },
-    ]);
+    const conflictError = Object.assign(new Error('agentos_event_conflict'), {
+      code: 'P0001',
+    });
+    const execute = vi.fn().mockRejectedValue(conflictError);
+    const conflict = {
+      execute,
+      repository: new NeonDomainRepository({ execute } as never),
+    };
     await expect(conflict.repository.appendEvent(event)).rejects.toBeInstanceOf(
       EventFingerprintConflictError,
     );
@@ -170,7 +168,7 @@ describe('NeonDomainRepository', () => {
     await expect(repository.appendEvent(event)).resolves.toEqual(event);
   });
 
-  it('uses one data-modifying CTE for each mutation and its audit event', async () => {
+  it('delegates each serialized mutation to one database function call', async () => {
     const occurredAt = isoTimestamp('2026-08-16T12:01:00.000Z');
     const event = {
       runId,
@@ -206,8 +204,8 @@ describe('NeonDomainRepository', () => {
       event,
     );
     expect(run.execute).toHaveBeenCalledTimes(1);
-    expect(executedSql(run.execute)).toMatch(
-      /with existing[\s\S]*update "workflow_runs"[\s\S]*insert into "domain_events"/,
+    expect(executedSql(run.execute)).toContain(
+      'from "agentos_cancel_run_with_event"',
     );
 
     const approval = repositoryWithRows([
@@ -236,8 +234,8 @@ describe('NeonDomainRepository', () => {
       event,
     );
     expect(approval.execute).toHaveBeenCalledTimes(1);
-    expect(executedSql(approval.execute)).toMatch(
-      /update "approvals"[\s\S]*insert into "domain_events"/,
+    expect(executedSql(approval.execute)).toContain(
+      'from "agentos_consume_approval_with_event"',
     );
 
     const inbox = repositoryWithRows([
@@ -264,8 +262,8 @@ describe('NeonDomainRepository', () => {
       event,
     );
     expect(inbox.execute).toHaveBeenCalledTimes(1);
-    expect(executedSql(inbox.execute)).toMatch(
-      /update "inbox_messages"[\s\S]*insert into "domain_events"/,
+    expect(executedSql(inbox.execute)).toContain(
+      'from "agentos_reply_inbox_with_event"',
     );
   });
 

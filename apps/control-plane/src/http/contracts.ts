@@ -1,7 +1,12 @@
 import { z } from 'zod';
 
 const digest = z.string().trim().min(1).max(256);
-const id = z.string().trim().min(1).max(128);
+const id = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 
 export const createRunSchema = z
   .object({
@@ -105,8 +110,8 @@ export const approvalSchema = z
   .object({
     id,
     runId: id,
-    scope: z.string(),
-    fingerprint: z.string(),
+    scopeHash: z.string(),
+    scopePreview: z.string(),
     status: z.enum(['pending', 'consumed', 'expired']),
     createdAt: z.string(),
     expiresAt: z.string(),

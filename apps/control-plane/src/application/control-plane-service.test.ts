@@ -210,6 +210,48 @@ describe('ControlPlaneService', () => {
     ).resolves.toEqual(first);
   });
 
+  it('projects approval scope as a redacted preview and never returns raw scope', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'approval-redaction-run');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const rawScope =
+      'Deploy {"token":"plain-json-secret"} Authorization: Basic dXNlcjpwYXNz ghp_abcdefghijklmnopqrstuvwxyz1234567890';
+
+    const projected = await createService(repository).createApproval(
+      'redacted-approval-key',
+      {
+        runId,
+        scope: rawScope,
+        expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+      },
+    );
+    const listed = await createService(repository).listPendingApprovals();
+    const serialized = JSON.stringify([projected, listed]);
+
+    expect(projected).toMatchObject({
+      scopeHash: expect.any(String),
+      scopePreview: expect.stringContaining('[REDACTED]'),
+    });
+    expect(projected).not.toHaveProperty('scope');
+    expect(projected).not.toHaveProperty('fingerprint');
+    expect(serialized).not.toContain('plain-json-secret');
+    expect(serialized).not.toContain('dXNlcjpwYXNz');
+    expect(serialized).not.toContain('ghp_');
+  });
+
   it('records a rejected approval as a sanitized domain event', async () => {
     const repository = new InMemoryDomainRepository();
     const runId = persistenceId('run', 'rejected-run');

@@ -22,7 +22,11 @@ function normalizeTimestampDriverValue(value: Date | string): IsoTimestamp {
   const withOffsetMinutes = withSeparator
     .replace(/([+-]\d{2})$/, '$1:00')
     .replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
-  return isoTimestamp(withOffsetMinutes);
+  const withFraction = withOffsetMinutes.replace(
+    /(T\d{2}:\d{2}:\d{2})(?=Z|[+-])/,
+    '$1.000000',
+  );
+  return isoTimestamp(withFraction.replace(/\+00:00$/, 'Z'));
 }
 
 const instantType = customType<{
@@ -120,6 +124,7 @@ export const workflowRuns = pgTable(
       { onDelete: 'restrict' },
     ),
     pipeline: text('pipeline').notNull(),
+    idempotencyFingerprint: text('idempotency_fingerprint'),
     status: runStatus('status').notNull(),
     input: json('input'),
     output: json('output'),

@@ -1,4 +1,4 @@
-import { controlPlaneService } from '../../../src/application/runtime';
+import { loadRunPageModel } from '../../../src/application/run-page-model';
 import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 
@@ -11,16 +11,12 @@ export default async function RunPage({
 }) {
   await requirePageSession();
   const { id } = await params;
-  const run = await controlPlaneService().getRun(id);
+  const run = await loadRunPageModel(id);
   return (
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="run-title">
         <p className="eyebrow">{run.pipeline} run</p>
-        <h1 id="run-title">
-          {String(
-            (run.input as { title?: unknown } | undefined)?.title ?? run.id,
-          )}
-        </h1>
+        <h1 id="run-title">{run.input?.title ?? run.id}</h1>
         <RunStatusBadge status={run.status} />
       </section>
       <dl className="metadata">

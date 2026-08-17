@@ -498,12 +498,18 @@ export function repositoryParityContract(
         await repository.createProject({
           id: persistenceId('project', `${implementation}-page-${id}`),
           name: id,
-          createdAt: isoTimestamp(`2026-08-17T08:00:0${String(index)}.000000Z`),
+          createdAt: isoTimestamp(`2026-08-17T10:00:0${String(index)}.000000Z`),
           updatedAt: at,
         });
       }
 
-      const first = await repository.listProjects({ limit: 2 });
+      const first = await repository.listProjects({
+        limit: 2,
+        after: {
+          at: isoTimestamp('2026-08-17T09:59:59.000000Z'),
+          id: persistenceId('project', 'cursor'),
+        },
+      });
       expect(first.map((project) => project.name)).toEqual(['one', 'two']);
       const last = first.at(-1);
       if (last === undefined) throw new Error('expected first page');
@@ -517,16 +523,23 @@ export function repositoryParityContract(
     it('uses bytewise opaque-ID ordering for tied timestamp cursors', async () => {
       const repository = await createRepository();
       const names = ['Z', 'a', 'é', '😀'] as const;
+      const tiedAt = isoTimestamp('2026-08-17T10:10:00.000000Z');
       for (const name of names) {
         await repository.createProject({
           id: persistenceId('project', `${implementation}-collation-${name}`),
           name,
-          createdAt: at,
+          createdAt: tiedAt,
           updatedAt: at,
         });
       }
 
-      const first = await repository.listProjects({ limit: 2 });
+      const first = await repository.listProjects({
+        limit: 2,
+        after: {
+          at: isoTimestamp('2026-08-17T10:09:59.000000Z'),
+          id: persistenceId('project', 'cursor'),
+        },
+      });
       expect(first.map((project) => project.name)).toEqual(['Z', 'a']);
       const last = first.at(-1);
       if (last === undefined) throw new Error('expected first collation page');

@@ -385,6 +385,10 @@ export interface DomainRepository {
   ): Promise<readonly ConfigSnapshot[]>;
 
   createRun(run: WorkflowRun): Promise<WorkflowRun>;
+  createRunIdempotently(
+    run: WorkflowRun,
+    idempotencyFingerprint: string,
+  ): Promise<WorkflowRun>;
   getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined>;
   listRuns(filter?: RunListFilter): Promise<readonly WorkflowRun[]>;
   updateRun(id: WorkflowRunId, update: WorkflowRunUpdate): Promise<WorkflowRun>;

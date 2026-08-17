@@ -39,13 +39,17 @@ export interface CreateRunInput extends PersistenceDigests {
 }
 
 const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
-  [/\bBearer\s+[^\s,;"']+/gi, 'Bearer [REDACTED]'],
+  [/\b(Basic|Bearer)\s+[^\s,;"']+/gi, '$1 [REDACTED]'],
+  [
+    /(["']?(?:x-)?(?:api[_-]?key|access[_-]?token|token|password|secret|authorization)["']?\s*:\s*)["'][^"']*["']/gi,
+    '$1"[REDACTED]"',
+  ],
   [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED]'],
   [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '[REDACTED]'],
   [/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED]'],
   [/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]'],
   [
-    /\b(api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/gi,
+    /\b((?:x-)?api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/gi,
     '$1=[REDACTED]',
   ],
 ];
@@ -121,6 +125,32 @@ export interface InboxProjection {
   readonly reply?: SafeInboxContent;
   readonly createdAt: IsoTimestamp;
   readonly repliedAt?: IsoTimestamp;
+}
+
+export interface ApprovalProjection {
+  readonly id: string;
+  readonly runId: string;
+  readonly scopeHash: string;
+  readonly scopePreview: string;
+  readonly status: Approval['status'];
+  readonly createdAt: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
+  readonly consumedAt?: IsoTimestamp;
+}
+
+function projectApproval(approval: Approval): ApprovalProjection {
+  return {
+    id: approval.id,
+    runId: approval.runId,
+    scopeHash: approval.fingerprint,
+    scopePreview: redactText(approval.scope).slice(0, 240),
+    status: approval.status,
+    createdAt: approval.createdAt,
+    expiresAt: approval.expiresAt,
+    ...(approval.consumedAt === undefined
+      ? {}
+      : { consumedAt: approval.consumedAt }),
+  };
 }
 
 function projectInboxContent(value: JsonValue | undefined): SafeInboxContent {
@@ -320,32 +350,20 @@ export class ControlPlaneService {
   ): Promise<RunProjection> {
     const id = this.generateId('run', `${pipeline}:${idempotencyKey}`);
     const runInput = inputForRun(idempotencyKey, input);
-    const existing = await this.repository.getRun(id);
-    if (existing) {
-      if (
-        existing.pipeline !== pipeline ||
-        canonical(existing.input) !== canonical(runInput) ||
-        existing.projectId !== input.projectId
-      ) {
-        throw new ServiceError(
-          'idempotency_conflict',
-          'idempotency key was already used with another payload',
-          409,
-        );
-      }
-      return this.project(existing);
-    }
     const now = this.clock();
     try {
-      const created = await this.repository.createRun({
-        id,
-        projectId: persistenceId('project', input.projectId),
-        pipeline,
-        status: 'pending',
-        input: runInput,
-        createdAt: now,
-        updatedAt: now,
-      });
+      const created = await this.repository.createRunIdempotently(
+        {
+          id,
+          projectId: persistenceId('project', input.projectId),
+          pipeline,
+          status: 'pending',
+          input: runInput,
+          createdAt: now,
+          updatedAt: now,
+        },
+        fingerprint({ pipeline, projectId: input.projectId, input: runInput }),
+      );
       return this.project(created);
     } catch (error) {
       if (error instanceof Error && error.name === 'IdempotencyConflictError') {
@@ -398,7 +416,7 @@ export class ControlPlaneService {
   async createApproval(
     idempotencyKey: string,
     input: { runId: string; scope: string; expiresAt: IsoTimestamp },
-  ): Promise<Approval> {
+  ): Promise<ApprovalProjection> {
     const approval: Approval = {
       id: this.generateId('approval', `approval:${idempotencyKey}`),
       runId: persistenceId('run', input.runId),
@@ -422,12 +440,12 @@ export class ControlPlaneService {
           409,
         );
       }
-      return existing;
+      return projectApproval(existing);
     }
-    return this.repository.createApproval(approval);
+    return projectApproval(await this.repository.createApproval(approval));
   }
 
-  async getApproval(id: string): Promise<Approval> {
+  private async getApprovalRecord(id: string): Promise<Approval> {
     const approval = await this.repository.getApproval(
       persistenceId('approval', id),
     );
@@ -440,8 +458,8 @@ export class ControlPlaneService {
     id: string,
     decision: 'approve' | 'reject',
     idempotencyKey: string,
-  ): Promise<Approval> {
-    const approval = await this.getApproval(id);
+  ): Promise<ApprovalProjection> {
+    const approval = await this.getApprovalRecord(id);
     if (approval.status === 'expired') {
       throw new ServiceError('approval_expired', 'approval expired', 409);
     }
@@ -479,7 +497,7 @@ export class ControlPlaneService {
           : 'approval is invalid',
         409,
       );
-    return consumed;
+    return projectApproval(consumed);
   }
 
   async listInbox(limit = 50): Promise<readonly InboxProjection[]> {
@@ -495,14 +513,19 @@ export class ControlPlaneService {
       .map(projectInboxMessage);
   }
 
-  async listPendingApprovals(limit = 50): Promise<readonly Approval[]> {
+  async listPendingApprovals(
+    limit = 50,
+  ): Promise<readonly ApprovalProjection[]> {
     const runs = await this.repository.listRuns({ limit });
     const pages = await Promise.all(
       runs.map((run) =>
         this.repository.listApprovals(run.id, { status: 'pending', limit }),
       ),
     );
-    return pages.flat().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return pages
+      .flat()
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(projectApproval);
   }
 
   async replyInbox(

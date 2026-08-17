@@ -5,6 +5,7 @@ import type { DomainEventDraft } from '@agentos/core';
 
 import {
   EventFingerprintConflictError,
+  IdempotencyConflictError,
   InMemoryDomainRepository,
 } from './in-memory.js';
 
@@ -45,6 +46,31 @@ function event(id: string, type: string, fingerprint = `sha256:${id}`) {
 }
 
 describe('atomic mutation outbox contract', () => {
+  it('atomically replays concurrent run creation and rejects changed payloads', async () => {
+    const repository = await seededRepository();
+    const candidate = {
+      id: persistenceId('run', 'idempotent-run'),
+      projectId: persistenceId('project', 'atomic-project'),
+      pipeline: 'feature',
+      status: 'pending' as const,
+      input: { title: 'same' },
+      createdAt: at,
+      updatedAt: at,
+    };
+
+    const [first, replay] = await Promise.all([
+      repository.createRunIdempotently(candidate, 'sha256:same'),
+      repository.createRunIdempotently(candidate, 'sha256:same'),
+    ]);
+    expect(replay).toEqual(first);
+    await expect(
+      repository.createRunIdempotently(
+        { ...candidate, input: { title: 'changed' } },
+        'sha256:changed',
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
   it('rolls back cancel and its event together, then safely retries', async () => {
     let fail = true;
     const repository = await seededRepository((operation) => {

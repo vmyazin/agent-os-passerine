@@ -113,14 +113,20 @@ export const mapConfigRevisionRow = (row: SqlRow): ConfigRevision =>
   mapRow(row, { requiredJson: ['config'] });
 export const mapConfigSnapshotRow = (row: SqlRow): ConfigSnapshot =>
   mapRow(row, { requiredJson: ['config'] });
-export const mapWorkflowRunRow = (row: SqlRow): WorkflowRun =>
-  mapRow(row, {
-    optionalJson: {
-      input: 'inputPresent',
-      output: 'outputPresent',
-      error: 'errorPresent',
+export const mapWorkflowRunRow = (row: SqlRow): WorkflowRun => {
+  const mapped = mapRow<WorkflowRun & { idempotencyFingerprint?: string }>(
+    row,
+    {
+      optionalJson: {
+        input: 'inputPresent',
+        output: 'outputPresent',
+        error: 'errorPresent',
+      },
     },
-  });
+  );
+  delete mapped.idempotencyFingerprint;
+  return mapped;
+};
 export const mapStepRunRow = (row: SqlRow): StepRun =>
   mapRow(row, {
     optionalJson: {

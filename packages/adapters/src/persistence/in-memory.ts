@@ -156,6 +156,7 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #configRevisionKeys = new Map<string, string>();
   readonly #configSnapshots = new Map<string, ConfigSnapshot>();
   #runs = new Map<string, WorkflowRun>();
+  readonly #runIdempotencyFingerprints = new Map<string, string>();
   readonly #stepRuns = new Map<string, StepRun>();
   readonly #stepKeys = new Map<string, string>();
   readonly #externalSessions = new Map<string, ExternalSession>();
@@ -306,6 +307,32 @@ export class InMemoryDomainRepository implements DomainRepository {
       );
     }
     return insertUnique(this.#runs, run.id, run, 'Run');
+  }
+
+  async createRunIdempotently(
+    run: WorkflowRun,
+    idempotencyFingerprint: string,
+  ): Promise<WorkflowRun> {
+    const existing = this.#runs.get(run.id);
+    if (existing !== undefined) {
+      if (
+        this.#runIdempotencyFingerprints.get(run.id) !== idempotencyFingerprint
+      ) {
+        throw new IdempotencyConflictError('Run', run.id);
+      }
+      return copy(existing);
+    }
+    requireEntry(this.#projects, run.projectId, 'Project');
+    if (run.configRevisionId !== undefined) {
+      requireEntry(
+        this.#configRevisions,
+        run.configRevisionId,
+        'Config revision',
+      );
+    }
+    const created = insertUnique(this.#runs, run.id, run, 'Run');
+    this.#runIdempotencyFingerprints.set(run.id, idempotencyFingerprint);
+    return created;
   }
 
   async getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined> {

@@ -27,20 +27,43 @@ async function parseBody<T>(
 ): Promise<T> {
   const contentLength = Number(request.headers.get('content-length') ?? '0');
   if (contentLength > MAX_BODY_BYTES) {
+    await request.body?.cancel();
     throw new ServiceError(
       'payload_too_large',
       'request body is too large',
       413,
     );
   }
-  const text = await request.text();
-  if (Buffer.byteLength(text) > MAX_BODY_BYTES) {
-    throw new ServiceError(
-      'payload_too_large',
-      'request body is too large',
-      413,
-    );
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  const reader = request.body?.getReader();
+  if (reader !== undefined) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        receivedBytes += value.byteLength;
+        if (receivedBytes > MAX_BODY_BYTES) {
+          await reader.cancel();
+          throw new ServiceError(
+            'payload_too_large',
+            'request body is too large',
+            413,
+          );
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
+  const bytes = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   let value: unknown;
   try {
     value = JSON.parse(text);
