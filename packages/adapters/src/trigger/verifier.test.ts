@@ -2,8 +2,45 @@ import { describe, expect, it } from 'vitest';
 
 import { createTrustedWorkflowVerifier } from './verifier.js';
 
+const digest = 'a'.repeat(64);
+const workflow = {
+  version: 'feature-workflow-input-v1' as const,
+  runId: 'run-1',
+  projectId: 'project-1',
+  feature: { title: 'Status', description: 'Add it' },
+  source: { repositorySha: 'b'.repeat(40), sourceSnapshotDigest: digest },
+  digests: {
+    config: digest,
+    model: digest,
+    prompt: digest,
+    environment: digest,
+    policy: digest,
+  },
+};
+const executor = {
+  execute: async (input: {
+    workflow: typeof workflow;
+    stepId: string;
+    command: string;
+    changeSetDigest: string;
+  }) => ({
+    runId: input.workflow.runId,
+    stepId: input.stepId,
+    command: input.command,
+    exitCode: 0,
+    startedAt: '2026-08-17T12:00:00.000Z',
+    completedAt: '2026-08-17T12:00:01.000Z',
+    repositorySha: input.workflow.source.repositorySha,
+    sourceSnapshotDigest: input.workflow.source.sourceSnapshotDigest,
+    changeSetDigest: input.changeSetDigest,
+    configDigest: input.workflow.digests.config,
+  }),
+};
+
 const base = {
   runId: 'run-1',
+  workflow,
+  producingStepId: 'implementation',
   definitionOfDone: {
     version: 'definition-of-done-v1',
     criteria: [
@@ -21,7 +58,7 @@ const base = {
 
 describe('trusted workflow verifier', () => {
   it('produces deterministic evidence for a bounded allowed change set', async () => {
-    const verifier = createTrustedWorkflowVerifier();
+    const verifier = createTrustedWorkflowVerifier({ executor });
     const input = {
       ...base,
       changeSet: {
@@ -46,7 +83,7 @@ describe('trusted workflow verifier', () => {
   });
 
   it('fails protected paths before publication', async () => {
-    const result = await createTrustedWorkflowVerifier().verify({
+    const result = await createTrustedWorkflowVerifier({ executor }).verify({
       ...base,
       changeSet: {
         version: 'change-set-v1',

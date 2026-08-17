@@ -1,4 +1,9 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 
 import type {
   Clock,
@@ -39,6 +44,7 @@ const OWNER_KEY = 'agentos.owner';
 const SESSION_CAPABILITY_HASH = 'agentos.session_capability_hash';
 const RUN_ID = 'agentos.run_id';
 const STEP_ID = 'agentos.step_id';
+const IDEMPOTENCY_KEY_HASH = 'agentos.idempotency_key_hash';
 const MANAGED_AGENTS_BETA = 'managed-agents-2026-04-01' as const;
 const WEB_EGRESS_TOOLS = new Set(['web_fetch', 'web_search']);
 const BUILT_IN_TOOLS = new Set([
@@ -91,6 +97,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   readonly #limits: RequiredLimits;
   readonly #allowUnrestrictedNetworking: boolean;
   readonly #allowBuiltInWebEgress: boolean;
+  readonly #ownershipSecret: string;
   readonly #agents = new Map<string, ResolvedAgent>();
   readonly #environments = new Map<string, ResolvedEnvironment>();
   readonly #cleanedSessions = new Set<string>();
@@ -103,12 +110,14 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     limits: RequiredLimits,
     allowUnrestrictedNetworking: boolean,
     allowBuiltInWebEgress: boolean,
+    ownershipSecret: string,
   ) {
     this.#client = client;
     this.#clock = clock;
     this.#limits = limits;
     this.#allowUnrestrictedNetworking = allowUnrestrictedNetworking;
     this.#allowBuiltInWebEgress = allowBuiltInWebEgress;
+    this.#ownershipSecret = ownershipSecret;
   }
 
   async syncAgent(agent: RuntimeAgent): Promise<void> {
@@ -310,7 +319,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       throw new ManagedAgentsLimitError('Session resource limit exceeded');
     }
     const resources = (managed.resources ?? []).map(mapResource);
-    const ownershipCapability = randomToken();
+    const ownershipCapability = this.#sessionCapability(request);
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.create({
         agent: { type: 'agent', id: agent.id, version: agent.version },
@@ -324,6 +333,11 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           'agentos.agent_digest': agent.digest,
           'agentos.environment_digest': environment.digest,
           [SESSION_CAPABILITY_HASH]: hashCapability(ownershipCapability),
+          ...(request.idempotencyKey === undefined
+            ? {}
+            : {
+                [IDEMPOTENCY_KEY_HASH]: hashCapability(request.idempotencyKey),
+              }),
         },
         initial_events: [userMessage(input)],
         resources,
@@ -338,6 +352,65 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       stepId: request.stepId,
       ownershipCapability,
     };
+  }
+
+  async reconcileStart(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle | undefined> {
+    if (request.idempotencyKey === undefined)
+      throw new ManagedAgentsConfigurationError(
+        'idempotencyKey is required to reconcile a session start',
+      );
+    const list = this.#client.beta.sessions.list;
+    if (list === undefined)
+      throw new ManagedAgentsConfigurationError(
+        'Managed Agents session listing is required for start reconciliation',
+      );
+    const capability = this.#sessionCapability(request);
+    const expectedKeyHash = hashCapability(request.idempotencyKey);
+    const matches: ManagedAgentsRemoteSession[] = [];
+    const sessions = await this.#wrap(() =>
+      list.call(this.#client.beta.sessions, {}),
+    );
+    for await (const session of sessions) {
+      if (
+        session.metadata[RUN_ID] === request.runId &&
+        session.metadata[STEP_ID] === request.stepId &&
+        session.metadata[IDEMPOTENCY_KEY_HASH] === expectedKeyHash
+      )
+        matches.push(session);
+    }
+    if (matches.length > 1)
+      throw new ManagedAgentsConflictError(
+        'Multiple sessions match one idempotent runtime start',
+      );
+    const session = matches[0];
+    if (session === undefined) return undefined;
+    const handle: ManagedAgentsRuntimeHandle = {
+      id: session.id,
+      agentId: session.agent.id,
+      agentVersion: session.agent.version,
+      environmentId: session.environment_id,
+      runId: request.runId,
+      stepId: request.stepId,
+      ownershipCapability: capability,
+    };
+    assertSessionOwnership(handle, session.metadata);
+    return handle;
+  }
+
+  #sessionCapability(request: ManagedAgentsStartRequest): string {
+    if (request.idempotencyKey === undefined) return randomToken();
+    return createHmac('sha256', this.#ownershipSecret)
+      .update(
+        canonicalJson({
+          version: 'managed-session-capability-v1',
+          runId: request.runId,
+          stepId: request.stepId,
+          idempotencyKey: request.idempotencyKey,
+        }),
+      )
+      .digest('base64url');
   }
 
   async *events(handle: RuntimeHandle): AsyncIterable<RuntimeEvent> {
@@ -657,6 +730,7 @@ export async function createManagedAgentsRuntimeProviderWithDependencies(
     validated.limits,
     options.allowUnrestrictedNetworking === true,
     options.allowBuiltInWebEgress === true,
+    options.ownershipSecret ?? options.apiKey,
   );
 }
 

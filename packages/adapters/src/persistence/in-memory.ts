@@ -30,16 +30,19 @@ import type {
   ExternalSession,
   ExternalSessionId,
   ExternalSessionListFilter,
+  ExternalSessionUpdate,
   GoalCriterion,
   GoalProgress,
   GoalProgressId,
   InboxMessage,
   InboxMessageId,
+  IsoTimestamp,
   ListPage,
   Project,
   ProjectId,
   ReplyInboxMessageRequest,
   RunListFilter,
+  RunStatus,
   StepRun,
   StepRunId,
   StepRunListCursor,
@@ -472,7 +475,12 @@ export class InMemoryDomainRepository implements DomainRepository {
         'Config revision',
       );
     }
-    return insertUnique(this.#runs, run.id, run, 'Run');
+    return insertUnique(
+      this.#runs,
+      run.id,
+      { ...run, stateVersion: run.stateVersion ?? 0 },
+      'Run',
+    );
   }
 
   async createRunIdempotently(
@@ -496,7 +504,12 @@ export class InMemoryDomainRepository implements DomainRepository {
         'Config revision',
       );
     }
-    const created = insertUnique(this.#runs, run.id, run, 'Run');
+    const created = insertUnique(
+      this.#runs,
+      run.id,
+      { ...run, stateVersion: run.stateVersion ?? 0 },
+      'Run',
+    );
     this.#runIdempotencyFingerprints.set(run.id, idempotencyFingerprint);
     return created;
   }
@@ -534,7 +547,34 @@ export class InMemoryDomainRepository implements DomainRepository {
   ): Promise<WorkflowRun> {
     assertPersistenceTimestamps(update);
     const current = requireEntry(this.#runs, id, 'Run');
-    const updated = copy({ ...current, ...update });
+    const updated = copy({
+      ...current,
+      ...update,
+      stateVersion: (current.stateVersion ?? 0) + 1,
+    });
+    this.#runs.set(id, updated);
+    return copy(updated);
+  }
+
+  async transitionRun(
+    id: WorkflowRunId,
+    expectedStatuses: readonly RunStatus[],
+    update: WorkflowRunUpdate,
+    expectedVersion?: number,
+  ): Promise<WorkflowRun | undefined> {
+    assertPersistenceTimestamps(update);
+    const current = requireEntry(this.#runs, id, 'Run');
+    if (
+      !expectedStatuses.includes(current.status) ||
+      (expectedVersion !== undefined &&
+        (current.stateVersion ?? 0) !== expectedVersion)
+    )
+      return undefined;
+    const updated = copy({
+      ...current,
+      ...update,
+      stateVersion: (current.stateVersion ?? 0) + 1,
+    });
     this.#runs.set(id, updated);
     return copy(updated);
   }
@@ -651,6 +691,20 @@ export class InMemoryDomainRepository implements DomainRepository {
     );
   }
 
+  async updateExternalSession(
+    id: ExternalSessionId,
+    update: ExternalSessionUpdate,
+  ): Promise<ExternalSession> {
+    const current = requireEntry(
+      this.#externalSessions,
+      id,
+      'External session',
+    );
+    const updated = copy({ ...current, ...update });
+    this.#externalSessions.set(id, updated);
+    return copy(updated);
+  }
+
   async createApproval(approval: Approval): Promise<Approval> {
     requireEntry(this.#runs, approval.runId, 'Run');
     return insertUnique(this.#approvals, approval.id, approval, 'Approval');
@@ -709,6 +763,30 @@ export class InMemoryDomainRepository implements DomainRepository {
     };
     this.#approvals.set(approval.id, consumed);
     return copy(consumed);
+  }
+
+  async expireApproval(
+    id: ApprovalId,
+    binding: {
+      readonly runId: WorkflowRunId;
+      readonly scope: string;
+      readonly fingerprint: string;
+      readonly at: IsoTimestamp;
+    },
+  ): Promise<Approval | undefined> {
+    const approval = this.#approvals.get(id);
+    if (
+      approval === undefined ||
+      approval.status !== 'pending' ||
+      approval.runId !== binding.runId ||
+      approval.scope !== binding.scope ||
+      approval.fingerprint !== binding.fingerprint ||
+      approval.expiresAt > binding.at
+    )
+      return undefined;
+    const expired = { ...approval, status: 'expired' as const };
+    this.#approvals.set(id, expired);
+    return copy(expired);
   }
 
   async createInboxMessage(message: InboxMessage): Promise<InboxMessage> {

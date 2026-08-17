@@ -1,10 +1,14 @@
-import type {
-  DomainRepository,
-  JsonValue,
-  TimestampListCursor,
-  WorkflowRunId,
-} from '@agentos/core';
+import { createHash } from 'node:crypto';
 
+import {
+  isoTimestamp,
+  persistenceId,
+  type ApprovalId,
+  type DomainRepository,
+  type JsonValue,
+  type TimestampListCursor,
+  type WorkflowRunId,
+} from '@agentos/core';
 import type { WorkflowDispatchOutbox } from './control-plane-service';
 
 function isObject(value: JsonValue | undefined): value is {
@@ -16,6 +20,7 @@ function isObject(value: JsonValue | undefined): value is {
 export async function reconcileWorkflowOutbox(
   repository: DomainRepository,
   outbox: WorkflowDispatchOutbox,
+  clock: () => string = () => new Date().toISOString(),
 ): Promise<{ scannedRuns: number; delivered: number; failed: number }> {
   let scannedRuns = 0;
   let delivered = 0;
@@ -28,7 +33,7 @@ export async function reconcileWorkflowOutbox(
       ...(after === undefined ? {} : { after }),
     });
     if (runs.length === 0) break;
-    for (const run of runs) {
+    for (const listedRun of runs) {
       scannedRuns += 1;
       const deliver = async (operation: () => Promise<void>) => {
         try {
@@ -38,7 +43,116 @@ export async function reconcileWorkflowOutbox(
           failed += 1;
         }
       };
+      let run = listedRun;
+      const now = clock();
+      if (
+        run.pipeline === 'feature' &&
+        ['pending', 'running', 'waiting'].includes(run.status) &&
+        Date.parse(now) >= Date.parse(run.createdAt) + 60 * 60_000
+      ) {
+        const failed = await repository.transitionRun(
+          run.id,
+          ['pending', 'running', 'waiting'],
+          {
+            status: 'failed',
+            output: {
+              status: 'failed',
+              reason: 'workflow_deadline_exceeded',
+            },
+            error: { code: 'workflow_deadline_exceeded' },
+            updatedAt: isoTimestamp(now),
+            completedAt: isoTimestamp(now),
+            cleanupAt: isoTimestamp(
+              new Date(Date.parse(now) + 24 * 60 * 60_000).toISOString(),
+            ),
+          },
+          run.stateVersion ?? 0,
+        );
+        if (failed !== undefined) {
+          run = failed;
+          let approvalAfter: TimestampListCursor<ApprovalId> | undefined;
+          for (let approvalPage = 0; approvalPage < 10; approvalPage += 1) {
+            const approvals = await repository.listApprovals(run.id, {
+              status: 'pending',
+              limit: 100,
+              ...(approvalAfter === undefined ? {} : { after: approvalAfter }),
+            });
+            for (const approval of approvals) {
+              await repository.expireApproval(approval.id, {
+                runId: run.id,
+                scope: approval.scope,
+                fingerprint: approval.fingerprint,
+                at: isoTimestamp(now),
+              });
+            }
+            if (approvals.length < 100) break;
+            const lastApproval = approvals.at(-1)!;
+            approvalAfter = {
+              at: lastApproval.createdAt,
+              id: lastApproval.id,
+            };
+          }
+        }
+      }
+      if (
+        run.status === 'failed' &&
+        isObject(run.error) &&
+        run.error.code === 'workflow_deadline_exceeded'
+      ) {
+        if (outbox.requestCancel !== undefined) {
+          await deliver(() =>
+            outbox.requestCancel!({
+              idempotencyKey: `workflow-cancel:${run.id}`,
+              runId: run.id,
+            }),
+          );
+        }
+        if (outbox.requestCleanup !== undefined) {
+          await deliver(() =>
+            outbox.requestCleanup!({
+              idempotencyKey: `workflow-cleanup:${run.id}`,
+              runId: run.id,
+            }),
+          );
+        }
+        continue;
+      }
       if (run.pipeline === 'feature' && run.status === 'pending') {
+        let snapshots = await repository.listConfigSnapshots(run.id, {
+          limit: 2,
+        });
+        if (snapshots.length === 0 && run.configRevisionId !== undefined) {
+          const revision = await repository.getConfigRevision(
+            run.configRevisionId,
+          );
+          if (revision !== undefined) {
+            await deliver(async () => {
+              await repository.createConfigSnapshot({
+                id: persistenceId(
+                  'configSnapshot',
+                  `config_snapshot_${createHash('sha256').update(`feature:${run.id}`).digest('hex').slice(0, 32)}`,
+                ),
+                runId: run.id,
+                configRevisionId: revision.id,
+                config: revision.config,
+                configDigest: revision.configDigest,
+                modelDigest: revision.modelDigest,
+                promptDigest: revision.promptDigest,
+                environmentDigest: revision.environmentDigest,
+                policyDigest: revision.policyDigest,
+                repositorySha: revision.repositorySha,
+                createdAt: run.createdAt,
+              });
+            });
+            snapshots = await repository.listConfigSnapshots(run.id, {
+              limit: 2,
+            });
+          }
+        }
+        if (snapshots.length !== 1) {
+          failed += 1;
+          continue;
+        }
         await deliver(() =>
           outbox.requestStart({
             idempotencyKey: `workflow-start:${run.id}`,
@@ -55,6 +169,18 @@ export async function reconcileWorkflowOutbox(
             }),
           );
         }
+      }
+      if (
+        run.pipeline === 'feature' &&
+        ['succeeded', 'failed', 'cancelled'].includes(run.status) &&
+        outbox.requestCleanup !== undefined
+      ) {
+        await deliver(() =>
+          outbox.requestCleanup!({
+            idempotencyKey: `workflow-cleanup:${run.id}`,
+            runId: run.id,
+          }),
+        );
       }
       const events = await repository.listEvents(run.id, { limit: 1_000 });
       for (const event of events) {

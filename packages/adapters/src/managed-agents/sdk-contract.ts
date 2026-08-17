@@ -86,6 +86,7 @@ interface ManagedAgentsEnvironmentsResource {
 }
 
 interface ManagedAgentsSessionsResource {
+  list?(params?: unknown): Promise<AsyncIterable<ManagedAgentsRemoteSession>>;
   create(params: unknown): Promise<ManagedAgentsRemoteSession>;
   retrieve(id: string): Promise<ManagedAgentsRemoteSession>;
   archive(id: string): Promise<ManagedAgentsRemoteSession>;

@@ -60,7 +60,7 @@ describe('Trigger SDK boundary', () => {
     await expect(
       waiter.create({
         idempotencyKey: 'wait-key',
-        timeout: '2026-08-17T13:00:00.000Z',
+        timeout: '3600s',
         tags: ['run:run-1'],
       }),
     ).resolves.toEqual({ id: 'waitpoint-safe-ref' });
@@ -68,6 +68,10 @@ describe('Trigger SDK boundary', () => {
       status: 'completed',
     });
     await waiter.wake('waitpoint-safe-ref');
+    expect(calls[0]).toEqual({
+      method: 'createWaitpoint',
+      args: [expect.objectContaining({ timeout: '3600s' })],
+    });
     expect(JSON.stringify(calls)).not.toMatch(
       /approved|rejected|publicAccessToken|callback/i,
     );

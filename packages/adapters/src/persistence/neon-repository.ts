@@ -34,17 +34,20 @@ import type {
   ExternalSession,
   ExternalSessionId,
   ExternalSessionListFilter,
+  ExternalSessionUpdate,
   GoalCriterion,
   GoalProgress,
   GoalProgressId,
   InboxMessage,
   InboxMessageId,
+  IsoTimestamp,
   JsonValue,
   ListPage,
   Project,
   ProjectId,
   ReplyInboxMessageRequest,
   RunListFilter,
+  RunStatus,
   StepRun,
   StepRunId,
   StepRunListCursor,
@@ -57,7 +60,18 @@ import type {
   WorkflowRunId,
   WorkflowRunUpdate,
 } from '@agentos/core';
-import { and, asc, desc, eq, gt, isNull, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
 
@@ -672,6 +686,7 @@ export class NeonDomainRepository implements DomainRepository {
         .update(workflowRuns)
         .set({
           ...update,
+          stateVersion: sql`${workflowRuns.stateVersion} + 1`,
           output: optionalJsonbValue(update.output),
           error: optionalJsonbValue(update.error),
         })
@@ -680,6 +695,34 @@ export class NeonDomainRepository implements DomainRepository {
       `Run ${id}`,
       mapWorkflowRunRow,
     );
+  }
+
+  async transitionRun(
+    id: WorkflowRunId,
+    expectedStatuses: readonly RunStatus[],
+    update: WorkflowRunUpdate,
+    expectedVersion?: number,
+  ): Promise<WorkflowRun | undefined> {
+    if (expectedStatuses.length === 0) return undefined;
+    const [row] = await this.database
+      .update(workflowRuns)
+      .set({
+        ...update,
+        stateVersion: sql`${workflowRuns.stateVersion} + 1`,
+        output: optionalJsonbValue(update.output),
+        error: optionalJsonbValue(update.error),
+      })
+      .where(
+        and(
+          eq(workflowRuns.id, id),
+          inArray(workflowRuns.status, [...expectedStatuses]),
+          expectedVersion === undefined
+            ? undefined
+            : eq(workflowRuns.stateVersion, expectedVersion),
+        ),
+      )
+      .returning(workflowRunSelection);
+    return row === undefined ? undefined : mapWorkflowRunRow(row);
   }
 
   async upsertStepRun(step: StepRun): Promise<StepRun> {
@@ -801,6 +844,21 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
+  async updateExternalSession(
+    id: ExternalSessionId,
+    update: ExternalSessionUpdate,
+  ): Promise<ExternalSession> {
+    return mappedOne(
+      await this.database
+        .update(externalSessions)
+        .set({ ...update, state: optionalJsonbValue(update.state) })
+        .where(eq(externalSessions.id, id))
+        .returning(externalSessionSelection),
+      `External session ${id}`,
+      mapExternalSessionRow,
+    );
+  }
+
   async createApproval(approval: Approval): Promise<Approval> {
     return mappedOne(
       await this.database
@@ -863,6 +921,32 @@ export class NeonDomainRepository implements DomainRepository {
       .returning(approvalSelection);
     const row = rows[0];
     return row === undefined ? undefined : mapApprovalRow(row);
+  }
+
+  async expireApproval(
+    id: ApprovalId,
+    binding: {
+      readonly runId: WorkflowRunId;
+      readonly scope: string;
+      readonly fingerprint: string;
+      readonly at: IsoTimestamp;
+    },
+  ): Promise<Approval | undefined> {
+    const rows = await this.database
+      .update(approvals)
+      .set({ status: 'expired' })
+      .where(
+        and(
+          eq(approvals.id, id),
+          eq(approvals.runId, binding.runId),
+          eq(approvals.scope, binding.scope),
+          eq(approvals.fingerprint, binding.fingerprint),
+          eq(approvals.status, 'pending'),
+          lte(approvals.expiresAt, binding.at),
+        ),
+      )
+      .returning(approvalSelection);
+    return rows[0] === undefined ? undefined : mapApprovalRow(rows[0]);
   }
 
   async createInboxMessage(message: InboxMessage): Promise<InboxMessage> {

@@ -152,6 +152,31 @@ describe('atomic mutation outbox contract', () => {
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
+  it('allows only one same-version run transition to win', async () => {
+    const repository = await seededRepository();
+
+    const [first, second] = await Promise.all([
+      repository.transitionRun(
+        runId,
+        ['waiting'],
+        { status: 'running', updatedAt: later },
+        0,
+      ),
+      repository.transitionRun(
+        runId,
+        ['waiting'],
+        { status: 'running', updatedAt: later },
+        0,
+      ),
+    ]);
+
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'running',
+      stateVersion: 1,
+    });
+  });
+
   it('rolls back cancel and its event together, then safely retries', async () => {
     let fail = true;
     const repository = await seededRepository((operation) => {

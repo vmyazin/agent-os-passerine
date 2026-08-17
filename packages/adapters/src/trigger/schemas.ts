@@ -23,6 +23,7 @@ export const featureWorkflowInputSchema = z
       .object({
         repositorySha: z.string().regex(/^[0-9a-f]{40}$/),
         sourceSnapshotDigest: digest,
+        sourceArtifactKey: z.string().min(1).max(2048).optional(),
       })
       .strict(),
     digests: z
@@ -114,13 +115,7 @@ export const definitionOfDoneSchema = z
           .object({
             id: identifier,
             description: z.string().min(1).max(2_000),
-            verifier: z.enum([
-              'command-result',
-              'required-artifact',
-              'test-report',
-              'pr-state',
-              'human-check',
-            ]),
+            verifier: z.literal('test-report'),
           })
           .strict(),
       )

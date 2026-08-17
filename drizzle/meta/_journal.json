@@ -85,6 +85,20 @@
       "when": 1786981669293,
       "tag": "0011_nifty_hellcat",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786985058593,
+      "tag": "0012_narrow_dagger",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786986876353,
+      "tag": "0013_sloppy_gressill",
+      "breakpoints": true
     }
   ]
 }

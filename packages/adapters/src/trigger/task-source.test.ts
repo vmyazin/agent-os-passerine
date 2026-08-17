@@ -20,6 +20,7 @@ describe('Trigger task registration', () => {
     expect(taskSource).toContain('featureTaskPayloadSchema.safeParse');
     expect(taskSource).toContain('AbortTaskRunError');
     expect(taskSource).toContain('FeatureWorkflowTaskTransientError');
+    expect(taskSource).toContain('context.ctx.deployment?.version');
     expect(configSource).toContain('defineConfig');
     expect(configSource).toContain("runtime: 'node-22'");
     expect(configSource).toContain("dirs: ['./packages/adapters/src/trigger']");

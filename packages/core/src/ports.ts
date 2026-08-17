@@ -29,6 +29,8 @@ export interface RuntimeStartRequest {
   readonly environmentId: Identifier;
   readonly input: unknown;
   readonly timeoutMs?: number;
+  readonly idempotencyKey?: string;
+  readonly maxCostMicrodollars?: number;
 }
 
 export interface RuntimeEvent {
@@ -56,6 +58,9 @@ export interface RuntimeProvider {
   syncAgent(agent: RuntimeAgent): Promise<void>;
   syncEnvironment(environment: RuntimeEnvironment): Promise<void>;
   start(request: RuntimeStartRequest): Promise<RuntimeHandle>;
+  reconcileStart?(
+    request: RuntimeStartRequest,
+  ): Promise<RuntimeHandle | undefined>;
   events(handle: RuntimeHandle): AsyncIterable<RuntimeEvent>;
   send(handle: RuntimeHandle, message: unknown): Promise<void>;
   resume(handle: RuntimeHandle, input?: unknown): Promise<void>;

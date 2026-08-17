@@ -109,21 +109,35 @@ describePostgres('PostgreSQL persistence integration', () => {
       createdAt: at,
       updatedAt: at,
     };
-    await expect(store.claimEffect(effect)).resolves.toMatchObject({
+    const claimed = await store.claimEffect(effect, {
+      ownerId: 'integration-owner',
+      now: at,
+      leaseExpiresAt: isoTimestamp('2026-08-17T12:05:00.000Z'),
+    });
+    await expect(Promise.resolve(claimed)).resolves.toMatchObject({
       status: 'pending',
     });
-    await store.markEffectStarted(effect.key, at);
-    await store.attachExternalRef(effect.key, 'session-safe-ref', at);
+    const lease = {
+      key: effect.key,
+      ownerId: 'integration-owner',
+      leaseVersion: claimed.leaseVersion,
+    };
+    await store.markEffectStarted(lease, at);
+    await store.attachExternalRef(lease, 'session-safe-ref', at);
     await expect(
-      store.completeEffect(effect.key, { ok: true }, at),
+      store.completeEffect(lease, { ok: true }, at),
     ).resolves.toMatchObject({
       status: 'succeeded',
       externalRef: 'session-safe-ref',
     });
+    const reservationKey = `reservation:${runId}:specification`;
     await expect(
       store.admitSession({
+        reservationKey,
+        projectId,
         runId,
         stepKey: 'specification',
+        estimatedMicrodollars: 100_000,
         workflowSpentMicrodollars: 0,
         dailySpentMicrodollars: 0,
         workflowLimitMicrodollars: 2_000_000,
@@ -134,6 +148,57 @@ describePostgres('PostgreSQL persistence integration', () => {
         leaseExpiresAt: isoTimestamp('2026-08-17T12:21:00.000Z'),
       }),
     ).resolves.toEqual({ admitted: true });
+    await expect(
+      store.settleSession({
+        reservationKey,
+        runId,
+        stepKey: 'specification',
+        actualMicrodollars: 0,
+        workflowSpentMicrodollars: 0,
+        dailySpentMicrodollars: 0,
+        workflowLimitMicrodollars: 2_000_000,
+        dailyLimitMicrodollars: 5_000_000,
+        now: at,
+      }),
+    ).resolves.toEqual({ settled: true });
+
+    const fencedDraft = {
+      ...effect,
+      key: `publisher:${suffix}`,
+      kind: 'trusted-draft-publication',
+    };
+    const ownerOne = await store.claimEffect(fencedDraft, {
+      ownerId: 'owner-one',
+      now: at,
+      leaseExpiresAt: isoTimestamp('2026-08-17T12:05:00.000Z'),
+    });
+    await expect(
+      store.claimEffect(fencedDraft, {
+        ownerId: 'owner-two',
+        now: isoTimestamp('2026-08-17T12:01:00.000Z'),
+        leaseExpiresAt: isoTimestamp('2026-08-17T12:06:00.000Z'),
+      }),
+    ).resolves.toMatchObject({ ownerId: 'owner-one' });
+    await expect(
+      store.claimEffect(fencedDraft, {
+        ownerId: 'owner-two',
+        now: isoTimestamp('2026-08-17T12:05:00.001Z'),
+        leaseExpiresAt: isoTimestamp('2026-08-17T12:10:00.000Z'),
+      }),
+    ).resolves.toMatchObject({
+      ownerId: 'owner-two',
+      leaseVersion: ownerOne.leaseVersion + 1,
+    });
+    await expect(
+      store.markEffectStarted(
+        {
+          key: fencedDraft.key,
+          ownerId: 'owner-one',
+          leaseVersion: ownerOne.leaseVersion,
+        },
+        at,
+      ),
+    ).rejects.toThrow('fencing lease');
   });
 
   it('allows exactly one concurrent configuration apply for an expected active revision', async () => {
@@ -347,6 +412,30 @@ describePostgres('PostgreSQL persistence integration', () => {
         'sha256:changed-run',
       ),
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
+  it('fences concurrent run transitions with the persisted state version', async () => {
+    const { runId, at } = await seed(`run-cas-${randomUUID()}`);
+    const transitions = await Promise.all([
+      repository.transitionRun(
+        runId,
+        ['pending'],
+        { status: 'running', updatedAt: at },
+        0,
+      ),
+      repository.transitionRun(
+        runId,
+        ['pending'],
+        { status: 'running', updatedAt: at },
+        0,
+      ),
+    ]);
+
+    expect(transitions.filter(Boolean)).toHaveLength(1);
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'running',
+      stateVersion: 1,
+    });
   });
 
   it('replays concurrent serialized cancel, approval, and inbox mutations', async () => {

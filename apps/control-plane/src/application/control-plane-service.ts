@@ -20,7 +20,9 @@ import {
   canonicalConfigHash,
   canonicalConfigJson,
   canonicalJsonValue,
+  canonicalPublicationPolicyDigest,
   loadAgentOsConfig,
+  normalizePublicationPolicySnapshot,
   persistenceId,
 } from '@agentos/core';
 
@@ -60,6 +62,10 @@ export interface WorkflowDispatchOutbox {
     readonly scopeHash: string;
   }): Promise<void>;
   requestCancel?(request: {
+    readonly idempotencyKey: string;
+    readonly runId: string;
+  }): Promise<void>;
+  requestCleanup?(request: {
     readonly idempotencyKey: string;
     readonly runId: string;
   }): Promise<void>;
@@ -168,7 +174,19 @@ function configurationDigests(
       ),
     ),
     environmentDigest: fingerprint(config.environments),
-    policyDigest: fingerprint(config.policies),
+    policyDigest: canonicalPublicationPolicyDigest(
+      normalizePublicationPolicySnapshot({
+        version: 'publication-policy-v1',
+        protectedPaths: config.policies.protectedPaths,
+        maxFiles: 100,
+        maxFileBytes: config.policies.maxFileBytes,
+        maxTotalBytes: 5_000_000,
+        allowBinary: config.policies.allowBinary,
+        allowSymlinks: config.policies.allowSymlinks,
+        allowDeletes: true,
+        allowedModes: ['100644', '100755'],
+      }),
+    ),
     repositorySha: '0'.repeat(40),
   };
 }
@@ -517,12 +535,39 @@ export class ControlPlaneService {
     const id = this.generateId('run', `${pipeline}:${idempotencyKey}`);
     const runInput = inputForRun(idempotencyKey, input);
     const now = this.clock();
+    let configRevision: ConfigRevision | undefined;
+    if (pipeline === 'feature' && this.workflowDispatch !== undefined) {
+      const revisions = await this.repository.listConfigRevisions(
+        persistenceId('project', input.projectId),
+        { limit: 100 },
+      );
+      configRevision = [...revisions]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.configDigest === input.configDigest &&
+            candidate.modelDigest === input.modelDigest &&
+            candidate.promptDigest === input.promptDigest &&
+            candidate.environmentDigest === input.environmentDigest &&
+            candidate.policyDigest === input.policyDigest &&
+            candidate.repositorySha === input.repositorySha,
+        );
+      if (configRevision === undefined)
+        throw new ServiceError(
+          'config_snapshot_required',
+          'feature provenance does not match an applied configuration revision',
+          409,
+        );
+    }
     try {
       const created = await this.repository.createRunIdempotently(
         {
           id,
           projectId: persistenceId('project', input.projectId),
           pipeline,
+          ...(configRevision === undefined
+            ? {}
+            : { configRevisionId: configRevision.id }),
           status: 'pending',
           input: runInput,
           createdAt: now,
@@ -531,6 +576,36 @@ export class ControlPlaneService {
         fingerprint({ pipeline, projectId: input.projectId, input: runInput }),
       );
       if (pipeline === 'feature') {
+        if (configRevision !== undefined) {
+          const snapshots = await this.repository.listConfigSnapshots(
+            created.id,
+            { limit: 2 },
+          );
+          if (snapshots.length === 0) {
+            await this.repository.createConfigSnapshot({
+              id: this.generateId('configSnapshot', `feature:${created.id}`),
+              runId: created.id,
+              configRevisionId: configRevision.id,
+              config: configRevision.config,
+              configDigest: configRevision.configDigest,
+              modelDigest: configRevision.modelDigest,
+              promptDigest: configRevision.promptDigest,
+              environmentDigest: configRevision.environmentDigest,
+              policyDigest: configRevision.policyDigest,
+              repositorySha: configRevision.repositorySha,
+              createdAt: now,
+            });
+          } else if (
+            snapshots.length !== 1 ||
+            snapshots[0]!.configRevisionId !== configRevision.id
+          ) {
+            throw new ServiceError(
+              'config_snapshot_conflict',
+              'feature run config snapshot conflicts with its provenance',
+              409,
+            );
+          }
+        }
         try {
           await this.workflowDispatch?.requestStart({
             idempotencyKey: `workflow-start:${created.id}`,

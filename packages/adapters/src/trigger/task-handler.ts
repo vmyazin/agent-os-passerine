@@ -1,5 +1,14 @@
-import type { DomainRepository } from '@agentos/core';
-import { persistenceId } from '@agentos/core';
+import { createHash } from 'node:crypto';
+
+import type { ConfigSnapshot, DomainRepository } from '@agentos/core';
+import {
+  canonicalConfigHash,
+  canonicalJsonValue,
+  canonicalPublicationPolicyDigest,
+  normalizePublicationPolicySnapshot,
+  parseAgentOsConfig,
+  persistenceId,
+} from '@agentos/core';
 import { z } from 'zod';
 
 import { featureWorkflowInputSchema } from './schemas.js';
@@ -28,7 +37,9 @@ export interface SourceSnapshotResolver {
     readonly projectId: string;
     readonly runId: string;
     readonly repositorySha: string;
-  }): Promise<string>;
+  }): Promise<
+    string | { readonly digest: string; readonly artifactKey: string }
+  >;
 }
 
 export interface DurableFeatureWorkflowRunner {
@@ -37,20 +48,35 @@ export interface DurableFeatureWorkflowRunner {
 
 export interface FeatureWorkflowTaskHandlerOptions {
   readonly repository: DomainRepository;
-  readonly workflow: DurableFeatureWorkflowRunner;
+  readonly workflow?: DurableFeatureWorkflowRunner;
+  readonly workflowForSnapshot?: (
+    snapshot: ConfigSnapshot,
+    execution?: {
+      readonly taskVersion: string;
+      readonly deploymentVersion: string;
+      readonly triggerRunId?: string;
+    },
+  ) => Promise<DurableFeatureWorkflowRunner> | DurableFeatureWorkflowRunner;
   readonly sourceSnapshot: SourceSnapshotResolver;
 }
 
 export function createFeatureWorkflowTaskHandler(
   options: FeatureWorkflowTaskHandlerOptions,
 ): {
-  run(payload: {
-    readonly version: 'feature-task-payload-v1';
-    readonly runId: string;
-  }): Promise<FeatureWorkflowResult>;
+  run(
+    payload: {
+      readonly version: 'feature-task-payload-v1';
+      readonly runId: string;
+    },
+    execution?: {
+      readonly taskVersion: string;
+      readonly deploymentVersion: string;
+      readonly triggerRunId?: string;
+    },
+  ): Promise<FeatureWorkflowResult>;
 } {
   return Object.freeze({
-    async run(payload) {
+    async run(payload, execution) {
       const run = await options.repository.getRun(
         persistenceId('run', payload.runId),
       );
@@ -59,7 +85,51 @@ export function createFeatureWorkflowTaskHandler(
       const stored = runInputSchema.safeParse(run.input);
       if (!stored.success)
         throw new Error('authoritative feature run input is invalid');
-      const sourceSnapshotDigest = await options.sourceSnapshot.resolve({
+      const snapshots = await options.repository.listConfigSnapshots(run.id, {
+        limit: 2,
+      });
+      if (snapshots.length !== 1)
+        throw new Error('feature run must have exactly one config snapshot');
+      const snapshot = snapshots[0]!;
+      const config = parseAgentOsConfig(snapshot.config);
+      const componentHash = (value: unknown) =>
+        createHash('sha256').update(canonicalJsonValue(value)).digest('hex');
+      const expectedPolicyDigest = canonicalPublicationPolicyDigest(
+        normalizePublicationPolicySnapshot({
+          version: 'publication-policy-v1',
+          protectedPaths: config.policies.protectedPaths,
+          maxFiles: 100,
+          maxFileBytes: config.policies.maxFileBytes,
+          maxTotalBytes: 5_000_000,
+          allowBinary: config.policies.allowBinary,
+          allowSymlinks: config.policies.allowSymlinks,
+          allowDeletes: true,
+          allowedModes: ['100644', '100755'],
+        }),
+      );
+      if (
+        canonicalConfigHash(config) !== snapshot.configDigest ||
+        componentHash(config.models) !== snapshot.modelDigest ||
+        componentHash(
+          Object.fromEntries(
+            Object.entries(config.agents).map(([name, agent]) => [
+              name,
+              agent.prompt ?? '',
+            ]),
+          ),
+        ) !== snapshot.promptDigest ||
+        componentHash(config.environments) !== snapshot.environmentDigest ||
+        expectedPolicyDigest !== snapshot.policyDigest ||
+        snapshot.repositorySha !== stored.data.provenance.repositorySha ||
+        snapshot.configDigest !== stored.data.provenance.configDigest ||
+        snapshot.modelDigest !== stored.data.provenance.modelDigest ||
+        snapshot.promptDigest !== stored.data.provenance.promptDigest ||
+        snapshot.environmentDigest !==
+          stored.data.provenance.environmentDigest ||
+        snapshot.policyDigest !== stored.data.provenance.policyDigest
+      )
+        throw new Error('feature run config snapshot provenance mismatch');
+      const sourceSnapshot = await options.sourceSnapshot.resolve({
         projectId: run.projectId,
         runId: run.id,
         repositorySha: stored.data.provenance.repositorySha,
@@ -74,7 +144,13 @@ export function createFeatureWorkflowTaskHandler(
         },
         source: {
           repositorySha: stored.data.provenance.repositorySha,
-          sourceSnapshotDigest,
+          sourceSnapshotDigest:
+            typeof sourceSnapshot === 'string'
+              ? sourceSnapshot
+              : sourceSnapshot.digest,
+          ...(typeof sourceSnapshot === 'string'
+            ? {}
+            : { sourceArtifactKey: sourceSnapshot.artifactKey }),
         },
         digests: {
           config: stored.data.provenance.configDigest,
@@ -84,7 +160,12 @@ export function createFeatureWorkflowTaskHandler(
           policy: stored.data.provenance.policyDigest,
         },
       });
-      return options.workflow.run(workflowInput);
+      const runner = options.workflowForSnapshot
+        ? await options.workflowForSnapshot(snapshot, execution)
+        : options.workflow;
+      if (runner === undefined)
+        throw new Error('feature workflow runner is not configured');
+      return runner.run(workflowInput);
     },
   });
 }

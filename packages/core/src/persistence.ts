@@ -189,6 +189,7 @@ export interface WorkflowRun {
   readonly startedAt?: IsoTimestamp;
   readonly completedAt?: IsoTimestamp;
   readonly cleanupAt?: IsoTimestamp;
+  readonly stateVersion?: number;
 }
 
 export interface WorkflowRunUpdate {
@@ -264,6 +265,10 @@ export interface ExternalSession {
   readonly updatedAt?: IsoTimestamp;
   readonly cleanupAt?: IsoTimestamp;
 }
+
+export type ExternalSessionUpdate = Partial<
+  Pick<ExternalSession, 'status' | 'state' | 'updatedAt' | 'cleanupAt'>
+>;
 
 export interface Approval {
   readonly id: ApprovalId;
@@ -470,6 +475,12 @@ export interface DomainRepository {
   getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined>;
   listRuns(filter?: RunListFilter): Promise<readonly WorkflowRun[]>;
   updateRun(id: WorkflowRunId, update: WorkflowRunUpdate): Promise<WorkflowRun>;
+  transitionRun(
+    id: WorkflowRunId,
+    expectedStatuses: readonly RunStatus[],
+    update: WorkflowRunUpdate,
+    expectedVersion?: number,
+  ): Promise<WorkflowRun | undefined>;
 
   upsertStepRun(step: StepRun): Promise<StepRun>;
   getStepRun(id: StepRunId): Promise<StepRun | undefined>;
@@ -486,6 +497,10 @@ export interface DomainRepository {
     runId: WorkflowRunId,
     filter?: ExternalSessionListFilter,
   ): Promise<readonly ExternalSession[]>;
+  updateExternalSession(
+    id: ExternalSessionId,
+    update: ExternalSessionUpdate,
+  ): Promise<ExternalSession>;
 
   createApproval(approval: Approval): Promise<Approval>;
   getApproval(id: ApprovalId): Promise<Approval | undefined>;
@@ -495,6 +510,15 @@ export interface DomainRepository {
   ): Promise<readonly Approval[]>;
   consumeApproval(
     request: ConsumeApprovalRequest,
+  ): Promise<Approval | undefined>;
+  expireApproval(
+    id: ApprovalId,
+    binding: {
+      readonly runId: WorkflowRunId;
+      readonly scope: string;
+      readonly fingerprint: string;
+      readonly at: IsoTimestamp;
+    },
   ): Promise<Approval | undefined>;
 
   createInboxMessage(message: InboxMessage): Promise<InboxMessage>;

@@ -11,6 +11,33 @@ const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const ids = (kind: string, key: string) =>
   persistenceId(kind as never, `${kind}-${key}`);
 
+async function seedRevision(
+  repository: InMemoryDomainRepository,
+  input: {
+    projectId: string;
+    repositorySha: string;
+    configDigest: string;
+    modelDigest: string;
+    promptDigest: string;
+    environmentDigest: string;
+    policyDigest: string;
+  },
+) {
+  await repository.createConfigRevision({
+    id: persistenceId('configRevision', `revision-${input.projectId}`),
+    projectId: persistenceId('project', input.projectId),
+    revision: 1,
+    config: {},
+    repositorySha: input.repositorySha,
+    configDigest: input.configDigest,
+    modelDigest: input.modelDigest,
+    promptDigest: input.promptDigest,
+    environmentDigest: input.environmentDigest,
+    policyDigest: input.policyDigest,
+    createdAt: now,
+  });
+}
+
 class FakeOutbox implements WorkflowDispatchOutbox {
   readonly starts = new Map<string, unknown>();
   readonly resumes = new Map<string, unknown>();
@@ -48,6 +75,7 @@ describe('control-plane workflow dispatch outbox', () => {
       environmentDigest: 'environment',
       policyDigest: 'policy',
     };
+    await seedRevision(repository, input);
     const first = await service.createFeatureRun('request-1', input);
     await service.createFeatureRun('request-1', input);
     expect(
@@ -118,18 +146,20 @@ describe('control-plane workflow dispatch outbox', () => {
         throw new Error('Trigger unavailable');
       },
     });
+    const input = {
+      projectId: 'project-1',
+      title: 'Status',
+      description: 'Add it.',
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'config',
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+    };
+    await seedRevision(repository, input);
     await expect(
-      service.createFeatureRun('request-1', {
-        projectId: 'project-1',
-        title: 'Status',
-        description: 'Add it.',
-        repositorySha: 'a'.repeat(40),
-        configDigest: 'config',
-        modelDigest: 'model',
-        promptDigest: 'prompt',
-        environmentDigest: 'environment',
-        policyDigest: 'policy',
-      }),
+      service.createFeatureRun('request-1', input),
     ).resolves.toMatchObject({ status: 'pending' });
     await expect(
       repository.listRuns({ status: 'pending' }),

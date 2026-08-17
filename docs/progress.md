@@ -18,9 +18,10 @@ Last reviewed: 2026-08-17
    bounded full-file changes, protected paths, stale-base protection,
    idempotent Git Data publication, and draft-only PR creation.
 5. **Durable feature coordination:** Trigger.dev v4 task/wait integration,
-   Postgres side-effect checkpoints and admission leases, scoped spec/DoD
-   approval, separate role sessions, deterministic verification, one review/fix
-   pass, trusted publication, cancellation intent, and reconciliation.
+   fenced Postgres side-effect delivery, reserved/settled spend, sealed runtime
+   handles, scoped spec/DoD approval, separate role sessions, provider start
+   reconciliation, trusted command verification, one review/fix/final-review
+   pass, trusted publication, cancellation, and cleanup reconciliation.
 
 ## Verification boundary
 
@@ -31,11 +32,12 @@ opt-in. No Trigger deployment, model session, R2 write, GitHub branch, or pull
 request has been created by the implementation session.
 
 The durable workflow task is fully testable through stable local interfaces.
-A live deployment still needs the operator-owned composition root that loads
-the selected repository/config revision and injects real Managed Agents, R2,
-verification, publication authorization, and GitHub publisher instances before
-registering the task handler. This is intentionally fail-closed rather than
-guessing credentials or permissions.
+The repo-owned task registers its fail-closed concrete composition at module
+load; runtime initialization resolves Neon, R2/source bundles, Managed Agents,
+trusted test execution, and the composite GitHub publisher from server-only
+environment variables. No Trigger deployment, R2 source bundle, paid model
+session, or GitHub publication was exercised in this build. PostgreSQL
+integration also remains unexecuted when `TEST_DATABASE_URL` is absent.
 
 ## Remaining product stages
 

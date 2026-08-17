@@ -17,6 +17,20 @@ describe('workflow outbox reconciliation', () => {
       createdAt: now,
       updatedAt: now,
     });
+    const revisionId = persistenceId('configRevision', 'revision-1');
+    await repository.createConfigRevision({
+      id: revisionId,
+      projectId,
+      revision: 1,
+      config: {},
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'config',
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      createdAt: now,
+    });
     for (const [id, status] of [
       ['pending-run', 'pending'],
       ['cancelled-run', 'cancelled'],
@@ -27,6 +41,7 @@ describe('workflow outbox reconciliation', () => {
         projectId,
         pipeline: 'feature',
         status,
+        ...(status === 'pending' ? { configRevisionId: revisionId } : {}),
         createdAt: now,
         updatedAt: now,
       });
@@ -70,15 +85,76 @@ describe('workflow outbox reconciliation', () => {
         seen.push(idempotencyKey);
       },
     };
-    await expect(reconcileWorkflowOutbox(repository, outbox)).resolves.toEqual({
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({
       scannedRuns: 3,
-      delivered: 3,
+      delivered: 4,
       failed: 0,
     });
     expect(seen.sort()).toEqual([
       'workflow-cancel:cancelled-run',
       'workflow-resume:approval-1:approve',
       'workflow-start:pending-run',
+    ]);
+  });
+
+  it('fails an over-deadline active run and durably requests cancel and cleanup', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'deadline-project');
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z');
+    await repository.createProject({
+      id: projectId,
+      name: 'Deadline',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const runId = persistenceId('run', 'deadline-run');
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const approvalId = persistenceId('approval', 'deadline-approval');
+    await repository.createApproval({
+      id: approvalId,
+      runId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'deadline-scope',
+      status: 'pending',
+      createdAt,
+      expiresAt: isoTimestamp('2026-08-17T11:00:00.000Z'),
+    });
+    const seen: string[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async ({ idempotencyKey }) => {
+        seen.push(idempotencyKey);
+      },
+      requestCleanup: async ({ idempotencyKey }) => {
+        seen.push(idempotencyKey);
+      },
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({ scannedRuns: 1, delivered: 2, failed: 0 });
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'failed',
+      output: { status: 'failed', reason: 'workflow_deadline_exceeded' },
+      error: { code: 'workflow_deadline_exceeded' },
+      stateVersion: 1,
+    });
+    await expect(repository.getApproval(approvalId)).resolves.toMatchObject({
+      status: 'expired',
+    });
+    expect(seen).toEqual([
+      'workflow-cancel:deadline-run',
+      'workflow-cleanup:deadline-run',
     ]);
   });
 });

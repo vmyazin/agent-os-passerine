@@ -75,14 +75,17 @@ async function seededRepository(): Promise<InMemoryDomainRepository> {
 describe('InMemoryDomainRepository', () => {
   it('creates, gets, lists, and updates runs using defensive copies', async () => {
     const repository = await seededRepository();
+    const persistedRun = { ...run, stateVersion: 0 };
 
     const fetched = await repository.getRun(run.id);
-    expect(fetched).toEqual(run);
+    expect(fetched).toEqual(persistedRun);
     if (fetched === undefined) throw new Error('missing run fixture');
     (fetched.input as { issue: number }).issue = 999;
 
     expect((await repository.getRun(run.id))?.input).toEqual({ issue: 42 });
-    expect(await repository.listRuns({ projectId: project.id })).toEqual([run]);
+    expect(await repository.listRuns({ projectId: project.id })).toEqual([
+      persistedRun,
+    ]);
 
     const updated = await repository.updateRun(run.id, {
       status: 'running',

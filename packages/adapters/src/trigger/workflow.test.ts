@@ -13,10 +13,11 @@ import {
   type RuntimeOutput,
   type RuntimeProvider,
 } from '@agentos/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   InMemoryWorkflowCheckpointStore,
+  FeatureWorkflowTaskTransientError,
   WorkflowTransientError,
   createDurableFeatureWorkflow,
   type FeatureWorkflowRoles,
@@ -38,6 +39,7 @@ class FakeRuntime implements RuntimeProvider {
   readonly agents: RuntimeAgent[] = [];
   readonly environments: RuntimeEnvironment[] = [];
   #outputs: RuntimeOutput[];
+  reconciled: RuntimeHandle | undefined;
 
   constructor(outputs: RuntimeOutput[]) {
     this.#outputs = [...outputs];
@@ -52,6 +54,9 @@ class FakeRuntime implements RuntimeProvider {
     const handle = { id: `session-${String(this.starts.length + 1)}` };
     this.starts.push({ request, handle });
     return handle;
+  }
+  async reconcileStart() {
+    return this.reconciled;
   }
   async *events() {
     yield {
@@ -248,8 +253,10 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
       },
     },
   ]);
+  const waitpointCreates: unknown[] = [];
   const waiter: WorkflowApprovalWaiter = {
-    async create() {
+    async create(request) {
+      waitpointCreates.push(request);
       return { id: 'waitpoint-safe-ref' };
     },
     async wait() {
@@ -278,7 +285,7 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
       return { status: 'completed' };
     },
   };
-  return { repository, artifacts, runtime, waiter };
+  return { repository, artifacts, runtime, waiter, waitpointCreates };
 }
 
 const input = {
@@ -300,6 +307,87 @@ const input = {
 };
 
 describe('durable feature workflow', () => {
+  it('surfaces a busy global session as a Trigger-retryable error without failing the run', async () => {
+    const f = await fixture();
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    await checkpoints.admitSession({
+      reservationKey: 'reservation:other-run:implementation',
+      projectId: 'project-1',
+      runId: 'other-run',
+      stepKey: 'implementation',
+      estimatedMicrodollars: 100_000,
+      workflowSpentMicrodollars: 0,
+      dailySpentMicrodollars: 0,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      admissionNumerator: 80,
+      admissionDenominator: 100,
+      now,
+      leaseExpiresAt: '2026-08-17T12:21:00.000Z',
+    });
+    const workflow = createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints,
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      verifier: {
+        verify: async () => ({ passed: true, evidenceDigest: digest('ok') }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    });
+    await expect(workflow.run(input)).rejects.toBeInstanceOf(
+      FeatureWorkflowTaskTransientError,
+    );
+    await expect(
+      f.repository.getRun(persistenceId('run', 'run-1')),
+    ).resolves.toMatchObject({ status: 'running' });
+    expect(f.runtime.starts).toHaveLength(0);
+  });
+
+  it('replays a terminal failed run without starting or publishing anything', async () => {
+    const f = await fixture();
+    await f.repository.transitionRun(
+      persistenceId('run', 'run-1'),
+      ['pending'],
+      {
+        status: 'failed',
+        output: { status: 'failed', reason: 'prior_failure' },
+        updatedAt: now,
+        completedAt: now,
+      },
+    );
+    const publish = vi.fn();
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      verifier: {
+        verify: async () => ({ passed: true, evidenceDigest: digest('ok') }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: { publish },
+    }).run(input);
+    expect(result).toEqual({ status: 'failed', reason: 'prior_failure' });
+    expect(f.runtime.starts).toHaveLength(0);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it('runs separate least-privilege role sessions through trusted draft publication', async () => {
     const f = await fixture();
     const published: unknown[] = [];
@@ -364,6 +452,9 @@ describe('durable feature workflow', () => {
       /github|private.?key|installation.?token/i,
     );
     expect(published).toHaveLength(1);
+    expect(f.waitpointCreates).toEqual([
+      expect.objectContaining({ timeout: '3600s' }),
+    ]);
     expect(f.runtime.cleaned).toHaveLength(4);
   });
 
@@ -417,12 +508,17 @@ describe('durable feature workflow', () => {
       },
       publicationAuthority: { authorize: async () => ({}) },
       publisher: {
-        publish: async () => {
-          throw new Error('unexpected');
-        },
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/ambiguous',
+        }),
       },
     }).run(input);
     expect(result.status).toBe('expired');
+    await expect(
+      f.repository.listApprovals(persistenceId('run', 'run-1')),
+    ).resolves.toEqual([expect.objectContaining({ status: 'expired' })]);
     expect(f.runtime.starts).toHaveLength(1);
   });
 
@@ -622,10 +718,15 @@ describe('durable feature workflow', () => {
       artifacts: f.artifacts,
       runtime: f.runtime,
       approval: f.waiter,
-      roles,
+      roles: Object.fromEntries(
+        Object.entries(roles).map(([key, value]) => [
+          key,
+          { ...value, maxReservationMicrodollars: 100_000 },
+        ]),
+      ) as FeatureWorkflowRoles,
       clock: () => now,
-      priceUsage: () => 1_200_001,
-      dailyUsageMicrodollars: async () => 3_900_000,
+      priceUsage: () => 1_600_001,
+      dailyUsageMicrodollars: async () => 3_500_000,
       verifier: {
         verify: async () => ({
           passed: true,
@@ -634,9 +735,11 @@ describe('durable feature workflow', () => {
       },
       publicationAuthority: { authorize: async () => ({}) },
       publisher: {
-        publish: async () => {
-          throw new Error('unexpected');
-        },
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/ambiguous',
+        }),
       },
     }).run(input);
     expect(result).toEqual({
@@ -745,19 +848,80 @@ describe('durable feature workflow', () => {
     });
   });
 
-  it('dead-letters an ambiguous publisher call instead of risking a duplicate PR', async () => {
+  it('retries a classified transient publisher failure idempotently', async () => {
+    const f = await fixture();
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    let calls = 0;
+    const workflow = createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints,
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: digest('verified'),
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({ authorized: true }) },
+      publisher: {
+        publish: async () => {
+          calls += 1;
+          if (calls === 1) {
+            throw Object.assign(new Error('temporary GitHub outage'), {
+              code: 'github_unavailable',
+            });
+          }
+          return {
+            status: 'succeeded',
+            draft: true,
+            pullRequestUrl: 'https://github.test/pr/retried',
+          } as const;
+        },
+      },
+    });
+
+    await expect(workflow.run(input)).rejects.toBeInstanceOf(
+      FeatureWorkflowTaskTransientError,
+    );
+    await expect(workflow.run(input)).resolves.toEqual({
+      status: 'succeeded',
+      draftPullRequestUrl: 'https://github.test/pr/retried',
+    });
+    expect(calls).toBe(2);
+  });
+
+  it('reconciles an ambiguous publisher call through trusted idempotent publication', async () => {
     const f = await fixture();
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const effectKey = 'publisher:run-1';
-    await checkpoints.claimEffect({
-      key: effectKey,
-      runId: 'run-1',
-      kind: 'trusted-draft-publication',
-      inputFingerprint: workflowHash({ authorized: true }),
-      createdAt: now,
-      updatedAt: now,
-    });
-    await checkpoints.markEffectStarted(effectKey, now);
+    const seeded = await checkpoints.claimEffect(
+      {
+        key: effectKey,
+        runId: 'run-1',
+        kind: 'trusted-draft-publication',
+        inputFingerprint: workflowHash({ authorized: true }),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        ownerId: 'crashed-owner',
+        now: '2026-08-17T11:00:00.000Z',
+        leaseExpiresAt: '2026-08-17T11:01:00.000Z',
+      },
+    );
+    await checkpoints.markEffectStarted(
+      {
+        key: effectKey,
+        ownerId: 'crashed-owner',
+        leaseVersion: seeded.leaseVersion,
+      },
+      '2026-08-17T11:00:00.000Z',
+    );
     let published = false;
     const result = await createDurableFeatureWorkflow({
       repository: f.repository,
@@ -778,21 +942,22 @@ describe('durable feature workflow', () => {
       publisher: {
         publish: async () => {
           published = true;
-          throw new Error('unexpected');
+          return {
+            status: 'succeeded',
+            draft: true,
+            pullRequestUrl: 'https://github.test/pr/1',
+          };
         },
       },
     }).run(input);
-    expect(result).toMatchObject({
-      status: 'failed',
-      reason: expect.stringMatching(/ambiguous publisher/),
-    });
-    expect(published).toBe(false);
+    expect(result).toMatchObject({ status: 'succeeded' });
+    expect(published).toBe(true);
     await expect(checkpoints.getEffect(effectKey)).resolves.toMatchObject({
-      status: 'dead_letter',
+      status: 'succeeded',
     });
   });
 
-  it('dead-letters an ambiguous runtime start after a crash instead of duplicating it', async () => {
+  it('reconciles an ambiguous runtime start without duplicating the paid session', async () => {
     const f = await fixture();
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const request = {
@@ -803,23 +968,43 @@ describe('durable feature workflow', () => {
       outputContract: 'specification-output-v1',
     };
     const effectKey = 'runtime:run-1:specification:1';
-    await checkpoints.claimEffect({
-      key: effectKey,
-      runId: 'run-1',
-      kind: 'runtime-session',
-      inputFingerprint: workflowHash({
-        stepKey: 'specification',
-        attempt: 1,
-        inputFingerprint: workflowHash(request),
-        agentId: 'spec-agent',
-        environmentId: 'spec-env',
-        digests: input.digests,
-        repositorySha: input.source.repositorySha,
-      }),
-      createdAt: now,
-      updatedAt: now,
-    });
-    await checkpoints.markEffectStarted(effectKey, now);
+    const seeded = await checkpoints.claimEffect(
+      {
+        key: effectKey,
+        runId: 'run-1',
+        kind: 'runtime-session',
+        inputFingerprint: workflowHash({
+          stepKey: 'specification',
+          attempt: 1,
+          inputFingerprint: workflowHash(request),
+          agentId: 'spec-agent',
+          environmentId: 'spec-env',
+          digests: input.digests,
+          repositorySha: input.source.repositorySha,
+          sourceSnapshotDigest: input.source.sourceSnapshotDigest,
+          execution: {
+            taskVersion: 'agentos-feature-workflow-v1',
+            deploymentVersion: 'test-or-unknown',
+          },
+        }),
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        ownerId: 'crashed-owner',
+        now: '2026-08-17T11:00:00.000Z',
+        leaseExpiresAt: '2026-08-17T11:01:00.000Z',
+      },
+    );
+    await checkpoints.markEffectStarted(
+      {
+        key: effectKey,
+        ownerId: 'crashed-owner',
+        leaseVersion: seeded.leaseVersion,
+      },
+      '2026-08-17T11:00:00.000Z',
+    );
+    f.runtime.reconciled = { id: 'session-reconciled' };
     const result = await createDurableFeatureWorkflow({
       repository: f.repository,
       checkpoints,
@@ -837,18 +1022,63 @@ describe('durable feature workflow', () => {
       },
       publicationAuthority: { authorize: async () => ({}) },
       publisher: {
-        publish: async () => {
-          throw new Error('unexpected');
-        },
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/ambiguous',
+        }),
       },
     }).run(input);
-    expect(result).toMatchObject({
-      status: 'failed',
-      reason: expect.stringMatching(/ambiguous runtime start/),
-    });
-    expect(f.runtime.starts).toHaveLength(0);
+    expect(result).toMatchObject({ status: 'succeeded' });
+    expect(f.runtime.starts).toHaveLength(3);
     await expect(checkpoints.getEffect(effectKey)).resolves.toMatchObject({
-      status: 'dead_letter',
+      status: 'succeeded',
+      externalRef: 'session-reconciled',
     });
+  });
+
+  it('reconciles a timed-out runtime create response before starting another session', async () => {
+    const f = await fixture();
+    const originalStart = f.runtime.start.bind(f.runtime);
+    let first = true;
+    f.runtime.start = async (request: unknown) => {
+      const handle = await originalStart(request);
+      if (first) {
+        first = false;
+        f.runtime.reconciled = handle;
+        throw Object.assign(new Error('create response timed out'), {
+          code: 'ETIMEDOUT',
+        });
+      }
+      return handle;
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: digest('verified'),
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/reconciled-create',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    expect(f.runtime.starts).toHaveLength(4);
   });
 });

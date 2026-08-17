@@ -2,6 +2,7 @@ import { AbortTaskRunError, task } from '@trigger.dev/sdk';
 import { z } from 'zod';
 
 import { FeatureWorkflowTaskTransientError } from './types.js';
+import { createLazyProductionFeatureWorkflowTaskHandler } from './production-composition.js';
 
 export const featureTaskPayloadSchema = z
   .object({
@@ -13,17 +14,23 @@ export const featureTaskPayloadSchema = z
 export type FeatureTaskPayload = z.infer<typeof featureTaskPayloadSchema>;
 
 export interface FeatureWorkflowTaskHandler {
-  run(payload: FeatureTaskPayload): Promise<unknown>;
+  run(
+    payload: FeatureTaskPayload,
+    execution?: {
+      readonly taskVersion: string;
+      readonly deploymentVersion: string;
+      readonly triggerRunId?: string;
+    },
+  ): Promise<unknown>;
 }
 
-let handler: FeatureWorkflowTaskHandler | undefined;
+let handler: FeatureWorkflowTaskHandler =
+  createLazyProductionFeatureWorkflowTaskHandler();
 
-/** Called by the deployment bootstrap after constructing trusted adapters. */
+/** Test/development override; production defaults to the repo-owned composition. */
 export function registerFeatureWorkflowTaskHandler(
   value: FeatureWorkflowTaskHandler,
 ): void {
-  if (handler !== undefined)
-    throw new Error('feature workflow task handler is already registered');
   handler = value;
 }
 
@@ -38,16 +45,21 @@ export const featureWorkflowTask = task({
     randomize: true,
   },
   maxDuration: 3_600,
-  run: async (rawPayload: unknown) => {
+  run: async (rawPayload: unknown, context) => {
     const parsed = featureTaskPayloadSchema.safeParse(rawPayload);
     if (!parsed.success)
       throw new AbortTaskRunError('invalid feature workflow task payload');
-    if (handler === undefined)
-      throw new AbortTaskRunError(
-        'feature workflow task handler was not registered',
-      );
     try {
-      return await handler.run(parsed.data);
+      return await handler.run(parsed.data, {
+        taskVersion: 'agentos-feature-workflow-v1',
+        deploymentVersion:
+          context.ctx.deployment?.version ??
+          process.env.TRIGGER_VERSION ??
+          'development-unversioned',
+        ...(context?.ctx?.run?.id === undefined
+          ? {}
+          : { triggerRunId: context.ctx.run.id }),
+      });
     } catch (error) {
       if (error instanceof FeatureWorkflowTaskTransientError) throw error;
       throw new AbortTaskRunError('permanent feature workflow task failure');

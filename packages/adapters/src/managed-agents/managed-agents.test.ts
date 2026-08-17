@@ -147,6 +147,7 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
       },
     },
     sessions: {
+      list: async () => this.iterate([...this.sessions.values()]),
       create: async (params: unknown) => {
         this.throwIfConfigured();
         this.sessionCreates.push(params);
@@ -480,7 +481,7 @@ describe('declarative resource sync', () => {
       }),
     );
     const duplicateProvider = await createManagedAgentsRuntimeProvider({
-      apiKey: 'key',
+      apiKey: 'test-key',
       client: duplicateClient,
     });
     await expect(duplicateProvider.syncAgent(agent)).rejects.toBeInstanceOf(
@@ -704,6 +705,27 @@ describe('declarative resource sync', () => {
 });
 
 describe('sessions and controls', () => {
+  it('reconciles an idempotent start across provider replicas', async () => {
+    const { client, provider } = await syncedProvider();
+    const request = {
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: { task: 'Implement it' },
+      idempotencyKey: 'runtime:run-1:step-1:1',
+    };
+    const started = await provider.start(request);
+    const replica = await createManagedAgentsRuntimeProvider({
+      apiKey: 'test-key',
+      client,
+    });
+    await replica.syncAgent(agent);
+    await replica.syncEnvironment(environment);
+    await expect(replica.reconcileStart(request)).resolves.toEqual(started);
+    expect(client.sessionCreates).toHaveLength(1);
+  });
+
   it('pins exact agent/environment IDs and sends metadata, input, and resources', async () => {
     const { client, provider } = await syncedProvider();
     const handle = await provider.start({

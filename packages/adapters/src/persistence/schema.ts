@@ -143,6 +143,7 @@ export const workflowRuns = pgTable(
     startedAt: instant('started_at'),
     completedAt: instant('completed_at'),
     cleanupAt: instant('cleanup_at'),
+    stateVersion: integer('state_version').notNull().default(0),
   },
   (table) => [
     index('workflow_runs_status_idx').on(
@@ -181,6 +182,9 @@ export const workflowEffects = pgTable(
     externalRef: text('external_ref'),
     output: json('output'),
     error: text('error'),
+    ownerId: text('owner_id'),
+    leaseVersion: integer('lease_version').notNull().default(0),
+    leaseExpiresAt: instant('lease_expires_at'),
     createdAt: instant('created_at').notNull(),
     updatedAt: instant('updated_at').notNull(),
   },
@@ -203,6 +207,32 @@ export const workflowSessionLeases = pgTable('workflow_session_leases', {
   expiresAt: instant('expires_at').notNull(),
   updatedAt: instant('updated_at').notNull(),
 });
+
+export const workflowBudgetReservations = pgTable(
+  'workflow_budget_reservations',
+  {
+    reservationKey: text('reservation_key').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    stepKey: text('step_key').notNull(),
+    estimatedMicrodollars: bigint('estimated_microdollars', {
+      mode: 'number',
+    }).notNull(),
+    expiresAt: instant('expires_at').notNull(),
+    createdAt: instant('created_at').notNull(),
+  },
+  (table) => [
+    index('workflow_budget_reservations_run_idx').on(
+      table.runId,
+      table.expiresAt,
+      bytewise(table.reservationKey),
+    ),
+  ],
+);
 
 export const configSnapshots = pgTable(
   'config_snapshots',

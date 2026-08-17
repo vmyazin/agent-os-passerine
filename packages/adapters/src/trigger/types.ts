@@ -6,6 +6,7 @@ import type {
   RuntimeAgent,
   RuntimeEnvironment,
   RuntimeProvider,
+  RuntimeHandle,
   RuntimeUsage,
 } from '@agentos/core';
 
@@ -20,6 +21,7 @@ export const FEATURE_WORKFLOW_DEFAULTS = Object.freeze({
   dailyMicrodollars: 5_000_000,
   admissionNumerator: 80,
   admissionDenominator: 100,
+  defaultSessionReservationMicrodollars: 700_000,
 });
 
 /** Explicitly opts a task-bootstrap failure into Trigger's single retry. */
@@ -36,6 +38,7 @@ export type FeatureRole =
 export interface FeatureRoleDefinition {
   readonly agent: RuntimeAgent;
   readonly environment: RuntimeEnvironment;
+  readonly maxReservationMicrodollars?: number;
 }
 
 export type FeatureWorkflowRoles = Readonly<
@@ -50,6 +53,7 @@ export interface FeatureWorkflowInput {
   readonly source: {
     readonly repositorySha: string;
     readonly sourceSnapshotDigest: string;
+    readonly sourceArtifactKey?: string | undefined;
   };
   readonly digests: {
     readonly config: string;
@@ -94,11 +98,47 @@ export interface WorkflowVerificationResult {
 export interface WorkflowVerifier {
   verify(input: {
     readonly runId: string;
+    readonly workflow: FeatureWorkflowInput;
+    readonly producingStepId: string;
     readonly definitionOfDone: JsonValue;
     readonly changeSet: JsonValue;
     readonly testEvidence: JsonValue;
     readonly review: JsonValue;
   }): Promise<WorkflowVerificationResult>;
+}
+
+export interface TrustedCommandObservation {
+  readonly runId: string;
+  readonly stepId: string;
+  readonly command: string;
+  readonly exitCode: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly repositorySha: string;
+  readonly sourceSnapshotDigest: string;
+  readonly changeSetDigest: string;
+  readonly configDigest: string;
+}
+
+export interface TrustedCommandExecutor {
+  execute(input: {
+    readonly workflow: FeatureWorkflowInput;
+    readonly stepId: string;
+    readonly command: string;
+    readonly changeSet: JsonValue;
+    readonly changeSetDigest: string;
+  }): Promise<TrustedCommandObservation>;
+}
+
+export interface WorkflowHandleSealer {
+  seal(handle: RuntimeHandle, aad: JsonValue): Promise<string>;
+  open(sealed: string, aad: JsonValue): Promise<RuntimeHandle>;
+}
+
+export interface RuntimeHandleVault {
+  load(externalId: string, runId: string): Promise<RuntimeHandle>;
+  markCancelled(externalId: string, at: string): Promise<void>;
+  markCleaned(externalId: string, at: string): Promise<void>;
 }
 
 export interface WorkflowPublicationAuthority {
@@ -131,11 +171,28 @@ export interface WorkflowEffect {
   readonly externalRef?: string;
   readonly output?: JsonValue;
   readonly error?: string;
+  readonly ownerId?: string;
+  readonly leaseVersion: number;
+  readonly leaseExpiresAt?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
+export interface WorkflowEffectLease {
+  readonly key: string;
+  readonly ownerId: string;
+  readonly leaseVersion: number;
+}
+
+export interface WorkflowEffectClaim {
+  readonly ownerId: string;
+  readonly now: string;
+  readonly leaseExpiresAt: string;
+}
+
 export interface WorkflowSessionAdmission {
+  readonly reservationKey: string;
+  readonly projectId: string;
   readonly runId: string;
   readonly stepKey: string;
   readonly workflowSpentMicrodollars: number;
@@ -146,26 +203,62 @@ export interface WorkflowSessionAdmission {
   readonly admissionDenominator: number;
   readonly now: string;
   readonly leaseExpiresAt: string;
+  readonly estimatedMicrodollars: number;
+}
+
+export interface WorkflowSessionSettlement {
+  readonly reservationKey: string;
+  readonly runId: string;
+  readonly stepKey: string;
+  readonly actualMicrodollars: number;
+  readonly workflowSpentMicrodollars: number;
+  readonly dailySpentMicrodollars: number;
+  readonly workflowLimitMicrodollars: number;
+  readonly dailyLimitMicrodollars: number;
+  readonly now: string;
+}
+
+export interface WorkflowBudgetReservation {
+  readonly reservationKey: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly stepKey: string;
+  readonly estimatedMicrodollars: number;
+  readonly expiresAt: string;
 }
 
 export interface WorkflowCheckpointStore {
-  claimEffect(effect: Omit<WorkflowEffect, 'status'>): Promise<WorkflowEffect>;
-  markEffectStarted(key: string, now: string): Promise<WorkflowEffect>;
+  claimEffect(
+    effect: Omit<
+      WorkflowEffect,
+      'status' | 'ownerId' | 'leaseVersion' | 'leaseExpiresAt'
+    >,
+    claim: WorkflowEffectClaim,
+  ): Promise<WorkflowEffect>;
+  markEffectStarted(
+    lease: WorkflowEffectLease,
+    now: string,
+  ): Promise<WorkflowEffect>;
   attachExternalRef(
-    key: string,
+    lease: WorkflowEffectLease,
     externalRef: string,
     now: string,
   ): Promise<WorkflowEffect>;
   completeEffect(
-    key: string,
+    lease: WorkflowEffectLease,
     output: JsonValue,
     now: string,
   ): Promise<WorkflowEffect>;
   failEffect(
-    key: string,
+    lease: WorkflowEffectLease,
     error: string,
     deadLetter: boolean,
     now: string,
+  ): Promise<WorkflowEffect>;
+  renewEffect(
+    lease: WorkflowEffectLease,
+    now: string,
+    leaseExpiresAt: string,
   ): Promise<WorkflowEffect>;
   getEffect(key: string): Promise<WorkflowEffect | undefined>;
   listEffects(runId: string): Promise<readonly WorkflowEffect[]>;
@@ -177,6 +270,17 @@ export interface WorkflowCheckpointStore {
       }
   >;
   releaseSession(runId: string, stepKey: string): Promise<void>;
+  settleSession(request: WorkflowSessionSettlement): Promise<
+    | { readonly settled: true }
+    | {
+        readonly settled: false;
+        readonly reason: 'workflow_budget' | 'daily_budget';
+      }
+  >;
+  listExpiredReservations(
+    runId: string,
+    now: string,
+  ): Promise<readonly WorkflowBudgetReservation[]>;
 }
 
 export interface DurableFeatureWorkflowDependencies {
@@ -195,4 +299,9 @@ export interface DurableFeatureWorkflowDependencies {
   readonly verifier: WorkflowVerifier;
   readonly publicationAuthority: WorkflowPublicationAuthority;
   readonly publisher: WorkflowPublisher;
+  readonly execution?: {
+    readonly taskVersion: string;
+    readonly deploymentVersion: string;
+  };
+  readonly handleSealer?: WorkflowHandleSealer;
 }

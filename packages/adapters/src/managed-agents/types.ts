@@ -24,6 +24,8 @@ export interface ManagedAgentsRuntimeProviderOptions {
   readonly allowBuiltInWebEgress?: boolean;
   readonly limits?: ManagedAgentsLimits;
   readonly transport?: typeof fetch;
+  /** Stable secret used to derive restart-safe, non-exported session capabilities. */
+  readonly ownershipSecret?: string;
 }
 
 export interface ManagedAgentsLimitedNetworking {
@@ -111,6 +113,9 @@ export interface ManagedAgentsProvider extends RuntimeProvider {
   start(
     request: ManagedAgentsStartRequest,
   ): Promise<ManagedAgentsRuntimeHandle>;
+  reconcileStart(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle | undefined>;
   syncEnvironment(environment: ManagedAgentsRuntimeEnvironment): Promise<void>;
   listEvents(handle: RuntimeHandle): Promise<readonly RuntimeEvent[]>;
   status(handle: RuntimeHandle): Promise<ManagedAgentsStatus>;
