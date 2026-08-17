@@ -26,6 +26,10 @@ The GitHub App credential boundary, immutable Git Data publication sequence,
 and crash recovery rules are documented in
 [trusted-github-publisher.md](./trusted-github-publisher.md).
 
+Trigger.dev task coordination, the Postgres outbox/checkpoint model, approval
+wake semantics, budgets, and local operations are documented in
+[durable-feature-workflow.md](./durable-feature-workflow.md).
+
 Dependencies point inward: delivery apps and adapters can depend on core, while
 core stays portable. Apps do not import one another, and provider-specific types
 must not leak through public core APIs.

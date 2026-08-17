@@ -68,6 +68,13 @@ export const goalStatus = pgEnum('goal_status', [
   'satisfied',
   'failed',
 ]);
+export const workflowEffectStatus = pgEnum('workflow_effect_status', [
+  'pending',
+  'started',
+  'succeeded',
+  'failed',
+  'dead_letter',
+]);
 
 export const projects = pgTable(
   'projects',
@@ -160,6 +167,42 @@ export const workflowRuns = pgTable(
     ),
   ],
 );
+
+export const workflowEffects = pgTable(
+  'workflow_effects',
+  {
+    key: text('effect_key').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    inputFingerprint: text('input_fingerprint').notNull(),
+    status: workflowEffectStatus('status').notNull(),
+    externalRef: text('external_ref'),
+    output: json('output'),
+    error: text('error'),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    index('workflow_effects_run_status_idx').on(
+      table.runId,
+      table.status,
+      table.createdAt,
+      bytewise(table.key),
+    ),
+  ],
+);
+
+export const workflowSessionLeases = pgTable('workflow_session_leases', {
+  leaseKey: text('lease_key').primaryKey(),
+  runId: text('run_id')
+    .notNull()
+    .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+  stepKey: text('step_key').notNull(),
+  expiresAt: instant('expires_at').notNull(),
+  updatedAt: instant('updated_at').notNull(),
+});
 
 export const configSnapshots = pgTable(
   'config_snapshots',

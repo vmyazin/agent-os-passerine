@@ -25,7 +25,9 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@neondatabase/serverless": "1.1.0",
     "@octokit/auth-app": "8.3.0",
-    "drizzle-orm": "0.45.2"
+    "@trigger.dev/sdk": "4.5.11",
+    "drizzle-orm": "0.45.2",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "postgres": "3.4.7"

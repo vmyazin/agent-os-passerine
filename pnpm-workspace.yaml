@@ -3,4 +3,5 @@ packages:
   - packages/*
 
 allowBuilds:
+  '@depot/cli': false
   esbuild: true

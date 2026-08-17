@@ -18,6 +18,7 @@ import {
 } from './errors.js';
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createPostgresPublicationStoreForTest } from '../github/postgres-store.js';
+import { createPostgresWorkflowCheckpointStoreForTest } from '../trigger/postgres-checkpoint-store.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
 import * as schema from './schema.js';
@@ -72,6 +73,68 @@ describePostgres('PostgreSQL persistence integration', () => {
   });
 
   repositoryParityContract('postgresql', () => repository);
+
+  it('atomically checkpoints effects and enforces durable workflow admission', async () => {
+    const suffix = randomUUID();
+    const at = isoTimestamp('2026-08-17T12:00:00.000Z');
+    const projectId = persistenceId('project', `workflow-project-${suffix}`);
+    const runId = persistenceId('run', `workflow-run-${suffix}`);
+    await repository.createProject({
+      id: projectId,
+      name: 'Workflow integration',
+      createdAt: at,
+      updatedAt: at,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const store = createPostgresWorkflowCheckpointStoreForTest({
+      execute: async (query, parameters) =>
+        (await client.unsafe(query, [
+          ...parameters,
+        ] as never[])) as unknown as readonly Readonly<
+          Record<string, unknown>
+        >[],
+    });
+    const effect = {
+      key: `runtime:${suffix}`,
+      runId,
+      kind: 'runtime-session',
+      inputFingerprint: 'a'.repeat(64),
+      createdAt: at,
+      updatedAt: at,
+    };
+    await expect(store.claimEffect(effect)).resolves.toMatchObject({
+      status: 'pending',
+    });
+    await store.markEffectStarted(effect.key, at);
+    await store.attachExternalRef(effect.key, 'session-safe-ref', at);
+    await expect(
+      store.completeEffect(effect.key, { ok: true }, at),
+    ).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'session-safe-ref',
+    });
+    await expect(
+      store.admitSession({
+        runId,
+        stepKey: 'specification',
+        workflowSpentMicrodollars: 0,
+        dailySpentMicrodollars: 0,
+        workflowLimitMicrodollars: 2_000_000,
+        dailyLimitMicrodollars: 5_000_000,
+        admissionNumerator: 80,
+        admissionDenominator: 100,
+        now: at,
+        leaseExpiresAt: isoTimestamp('2026-08-17T12:21:00.000Z'),
+      }),
+    ).resolves.toEqual({ admitted: true });
+  });
 
   it('allows exactly one concurrent configuration apply for an expected active revision', async () => {
     const suffix = randomUUID();

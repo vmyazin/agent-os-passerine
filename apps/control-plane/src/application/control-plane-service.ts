@@ -46,6 +46,25 @@ export interface CreateRunInput extends PersistenceDigests {
   readonly description: string;
 }
 
+/** Durable intents live in the run/approval event rows; this port delivers them. */
+export interface WorkflowDispatchOutbox {
+  requestStart(request: {
+    readonly idempotencyKey: string;
+    readonly runId: string;
+  }): Promise<void>;
+  requestApprovalResume(request: {
+    readonly idempotencyKey: string;
+    readonly runId: string;
+    readonly approvalId: string;
+    readonly decision: 'approve' | 'reject';
+    readonly scopeHash: string;
+  }): Promise<void>;
+  requestCancel?(request: {
+    readonly idempotencyKey: string;
+    readonly runId: string;
+  }): Promise<void>;
+}
+
 export interface ConfigurationInput {
   readonly canonicalConfig: string;
   readonly digest: string;
@@ -379,6 +398,7 @@ export class ControlPlaneService {
     private readonly repository: DomainRepository,
     private readonly clock: () => IsoTimestamp,
     private readonly generateId: IdGenerator,
+    private readonly workflowDispatch?: WorkflowDispatchOutbox,
   ) {}
 
   async getConfiguration(includeCanonical = true): Promise<{
@@ -510,6 +530,16 @@ export class ControlPlaneService {
         },
         fingerprint({ pipeline, projectId: input.projectId, input: runInput }),
       );
+      if (pipeline === 'feature') {
+        try {
+          await this.workflowDispatch?.requestStart({
+            idempotencyKey: `workflow-start:${created.id}`,
+            runId: created.id,
+          });
+        } catch {
+          // The pending run is the durable outbox intent; reconciliation retries it.
+        }
+      }
       return this.project(created);
     } catch (error) {
       if (error instanceof Error && error.name === 'IdempotencyConflictError') {
@@ -555,6 +585,14 @@ export class ControlPlaneService {
       );
     } catch (error) {
       this.rethrowEventConflict(error);
+    }
+    try {
+      await this.workflowDispatch?.requestCancel?.({
+        idempotencyKey: `workflow-cancel:${runId}`,
+        runId,
+      });
+    } catch {
+      // The atomic run.cancelled event is the durable outbox intent.
     }
     return this.getRun(id);
   }
@@ -654,6 +692,17 @@ export class ControlPlaneService {
           : 'approval is invalid',
         409,
       );
+    try {
+      await this.workflowDispatch?.requestApprovalResume({
+        idempotencyKey: `workflow-resume:${consumed.id}:${decision}`,
+        runId: consumed.runId,
+        approvalId: consumed.id,
+        decision,
+        scopeHash: consumed.fingerprint,
+      });
+    } catch {
+      // The atomic approval event is the durable outbox intent.
+    }
     return projectApproval(consumed);
   }
 

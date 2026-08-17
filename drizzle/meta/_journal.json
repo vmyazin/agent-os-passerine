@@ -78,6 +78,13 @@
       "when": 1786977273788,
       "tag": "0010_yielding_anthem",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786981669293,
+      "tag": "0011_nifty_hellcat",
+      "breakpoints": true
     }
   ]
 }

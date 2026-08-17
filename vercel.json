@@ -3,6 +3,10 @@
     {
       "path": "/api/internal/artifacts/cleanup",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/internal/workflows/reconcile",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

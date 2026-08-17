@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
 
+import {
+  createDurableTriggerOutbox,
+  createNeonWorkflowCheckpointStore,
+  createTriggerApprovalWaiter,
+  createTriggerWorkflowDispatcher,
+} from '@agentos/adapters';
 import { isoTimestamp, persistenceId } from '@agentos/core';
 
 import { ControlPlaneService, type IdGenerator } from './control-plane-service';
@@ -13,11 +19,29 @@ const deterministicId: IdGenerator = (kind, idempotencyKey) =>
 
 let service: ControlPlaneService | undefined;
 
+export function workflowDispatchFromEnv() {
+  const triggerSecret = process.env.TRIGGER_SECRET_KEY;
+  const databaseUrl = process.env.DATABASE_URL;
+  if (triggerSecret === undefined) return undefined;
+  if (databaseUrl === undefined) {
+    throw new Error(
+      'DATABASE_URL is required when TRIGGER_SECRET_KEY enables workflow dispatch',
+    );
+  }
+  return createDurableTriggerOutbox({
+    checkpoints: createNeonWorkflowCheckpointStore(process.env),
+    trigger: createTriggerWorkflowDispatcher(),
+    approval: createTriggerApprovalWaiter(),
+    clock: () => new Date().toISOString(),
+  });
+}
+
 export function controlPlaneService(): ControlPlaneService {
   service ??= new ControlPlaneService(
     repositoryFromEnv(),
     () => isoTimestamp(new Date().toISOString()),
     deterministicId,
+    workflowDispatchFromEnv(),
   );
   return service;
 }
