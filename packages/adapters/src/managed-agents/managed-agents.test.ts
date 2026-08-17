@@ -747,8 +747,6 @@ describe('sessions and controls', () => {
           'agentos.session_capability_hash': expect.stringMatching(
             /^sha256:[a-f0-9]{64}$/,
           ),
-          'agentos.provider_instance_id':
-            expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
         }),
         initial_events: [
           {
@@ -771,6 +769,10 @@ describe('sessions and controls', () => {
     expect(JSON.stringify(client.sessionCreates[0])).not.toContain(
       handle.ownershipCapability,
     );
+    expect(
+      (client.sessionCreates[0] as { metadata: Record<string, string> })
+        .metadata,
+    ).not.toHaveProperty('agentos.provider_instance_id');
   });
 
   it('always creates separate sessions, including distinct roles', async () => {
@@ -895,6 +897,49 @@ describe('sessions and controls', () => {
     expect(client.sentEvents).toEqual([]);
     expect(client.archived).toEqual([]);
     expect(client.deleted).toEqual([]);
+  });
+
+  it('preserves capability ownership across process restarts and replicas', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-durable',
+      stepId: 'step-durable',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    client.sessions.get(handle.id)!.status = 'running';
+
+    const restartedProvider = await createManagedAgentsRuntimeProvider({
+      apiKey: 'key',
+      client,
+      clock: new FakeClock(),
+    });
+    const forgedHandle = {
+      ...handle,
+      ownershipCapability: 'A'.repeat(43),
+    };
+    await expect(restartedProvider.cancel(forgedHandle)).rejects.toBeInstanceOf(
+      ManagedAgentsConflictError,
+    );
+    await expect(restartedProvider.cancel(handle)).resolves.toBeUndefined();
+    expect(client.sentEvents).toHaveLength(1);
+
+    const replicaProvider = await createManagedAgentsRuntimeProvider({
+      apiKey: 'key',
+      client,
+      clock: new FakeClock(),
+    });
+    const wrongBinding = { ...handle, stepId: 'wrong-step' };
+    await expect(replicaProvider.cleanup(wrongBinding)).rejects.toBeInstanceOf(
+      ManagedAgentsConflictError,
+    );
+    expect(client.archived).toEqual([]);
+    expect(client.deleted).toEqual([]);
+
+    await expect(replicaProvider.cleanup(handle)).resolves.toBeUndefined();
+    expect(client.archived).toEqual([handle.id]);
+    expect(client.deleted).toEqual([handle.id]);
   });
 
   it('rejects unbounded session resource collections before a live call', async () => {

@@ -46,12 +46,13 @@ toolUseId, result: 'allow' | 'deny' })`; the adapter never auto-approves tools
 added later by an MCP server.
 
 Every session handle contains a high-entropy ownership capability. Only its
-hash, the provider-instance ID, and run/step bindings are stored in remote
-metadata. Interrupt, archive, and delete validate that binding before acting;
-the capability is never included in provider errors. Output artifacts come
-only from bounded Files API metadata listed with the session ID and Managed
-Agents beta, not from the session's input mount resources. File content is not
-downloaded by `collectOutput`.
+hash and run/step bindings are stored in remote metadata, so the durable handle
+continues to work after a process restart or from another replica. Interrupt,
+archive, and delete validate that binding before acting; the capability is
+never included in provider errors. Output artifacts come only from bounded
+Files API metadata listed with the session ID and Managed Agents beta, not from
+the session's input mount resources. File content is not downloaded by
+`collectOutput`.
 
 The opt-in smoke command requires both `ANTHROPIC_API_KEY` and
 `AGENTOS_LIVE_TESTS=1`:

@@ -37,7 +37,6 @@ const LOCAL_ID = 'agentos.local_id';
 const CONFIG_DIGEST = 'agentos.config_digest';
 const OWNER_KEY = 'agentos.owner';
 const SESSION_CAPABILITY_HASH = 'agentos.session_capability_hash';
-const PROVIDER_INSTANCE_ID = 'agentos.provider_instance_id';
 const RUN_ID = 'agentos.run_id';
 const STEP_ID = 'agentos.step_id';
 const MANAGED_AGENTS_BETA = 'managed-agents-2026-04-01' as const;
@@ -92,7 +91,6 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   readonly #limits: RequiredLimits;
   readonly #allowUnrestrictedNetworking: boolean;
   readonly #allowBuiltInWebEgress: boolean;
-  readonly #providerInstanceId = randomToken();
   readonly #agents = new Map<string, ResolvedAgent>();
   readonly #environments = new Map<string, ResolvedEnvironment>();
   readonly #cleanedSessions = new Set<string>();
@@ -326,7 +324,6 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           'agentos.agent_digest': agent.digest,
           'agentos.environment_digest': environment.digest,
           [SESSION_CAPABILITY_HASH]: hashCapability(ownershipCapability),
-          [PROVIDER_INSTANCE_ID]: this.#providerInstanceId,
         },
         initial_events: [userMessage(input)],
         resources,
@@ -586,7 +583,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.retrieve(handle.id),
     );
-    assertSessionOwnership(handle, session.metadata, this.#providerInstanceId);
+    assertSessionOwnership(handle, session.metadata);
     return session;
   }
 
@@ -863,7 +860,6 @@ function assertOwnership(metadata: Record<string, string>): void {
 function assertSessionOwnership(
   handle: RuntimeHandle,
   metadata: Record<string, string>,
-  providerInstanceId: string,
 ): asserts handle is ManagedAgentsRuntimeHandle {
   const candidate = handle as Partial<ManagedAgentsRuntimeHandle>;
   const suppliedHash = hashCapability(
@@ -886,8 +882,7 @@ function assertSessionOwnership(
     typeof candidate.runId !== 'string' ||
     typeof candidate.stepId !== 'string' ||
     metadata[RUN_ID] !== candidate.runId ||
-    metadata[STEP_ID] !== candidate.stepId ||
-    metadata[PROVIDER_INSTANCE_ID] !== providerInstanceId
+    metadata[STEP_ID] !== candidate.stepId
   ) {
     throw new ManagedAgentsConflictError('Session ownership validation failed');
   }
