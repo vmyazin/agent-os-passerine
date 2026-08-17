@@ -86,6 +86,7 @@ export interface PullRequest {
   readonly head: string;
   readonly headSha: string;
   readonly base: string;
+  readonly baseSha: string;
   readonly headRepositoryId: number;
   readonly baseRepositoryId: number;
   readonly body: string;

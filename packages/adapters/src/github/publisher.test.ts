@@ -131,6 +131,7 @@ class FakeGitHub implements GitHubInstallationClient {
         head: string;
         headSha: string;
         base: string;
+        baseSha: string;
         headRepositoryId: number;
         baseRepositoryId: number;
         body: string;
@@ -252,11 +253,13 @@ class FakeGitHub implements GitHubInstallationClient {
       head: input.head,
       headSha: this.ref!.sha,
       base: input.base,
+      baseSha: this.baseSha,
       headRepositoryId: this.repositoryId,
       baseRepositoryId: this.repositoryId,
       body: input.body,
     };
     await this.afterCreatePullRequest?.();
+    this.pr = { ...this.pr, baseSha: this.baseSha };
     this.record('createDraftPullRequest', input);
     return this.pr;
   }
@@ -349,6 +352,7 @@ describe('trusted GitHub publisher', () => {
       'getReference',
       'getReference',
       'createDraftPullRequest',
+      'getReference',
       'getReference',
       'getReference',
       'getReference',
@@ -544,6 +548,15 @@ describe('trusted GitHub publisher', () => {
     await expect(state.publisher.publish(request())).rejects.toMatchObject({
       code: 'publication_collision',
     });
+
+    state.client.pr = {
+      ...state.client.pr!,
+      headSha: state.client.commitSha!,
+      baseSha: '9'.repeat(40),
+    };
+    await expect(state.publisher.publish(request())).rejects.toMatchObject({
+      code: 'publication_collision',
+    });
   });
 
   it('rejects ref races before and after draft PR creation without checkpointing ownership', async () => {
@@ -572,6 +585,36 @@ describe('trusted GitHub publisher', () => {
     expect(
       (await after.store.listEvents()).map(({ phase }) => phase),
     ).not.toContain('pr_created');
+  });
+
+  it('rejects a PR created against an advanced base and never accepts it on replay', async () => {
+    const state = fixture();
+    const advancedBase = '9'.repeat(40);
+    state.client.afterCreatePullRequest = () => {
+      state.client.baseSha = advancedBase;
+    };
+
+    await expect(state.publisher.publish(request())).rejects.toMatchObject({
+      code: 'publication_rejected',
+    });
+    expect(state.client.pr).toMatchObject({ baseSha: advancedBase });
+    expect(
+      (await state.store.listEvents()).map(({ phase }) => phase),
+    ).not.toEqual(expect.arrayContaining(['pr_created', 'succeeded']));
+
+    state.client.afterCreatePullRequest = undefined;
+    state.client.baseSha = BASE;
+    await expect(state.publisher.publish(request())).rejects.toMatchObject({
+      code: 'publication_collision',
+    });
+    expect(
+      state.client.calls.filter(
+        ({ operation }) => operation === 'createDraftPullRequest',
+      ),
+    ).toHaveLength(1);
+    expect(
+      (await state.store.listEvents()).map(({ phase }) => phase),
+    ).not.toEqual(expect.arrayContaining(['pr_created', 'succeeded']));
   });
 
   it.each([
@@ -815,6 +858,7 @@ describe('trusted GitHub publisher', () => {
       head: prState.publisher.branchFor(request()),
       headSha: '8'.repeat(40),
       base: 'main',
+      baseSha: BASE,
       headRepositoryId: 999,
       baseRepositoryId: 314159,
       body: 'foreign',
@@ -839,6 +883,7 @@ describe('trusted GitHub publisher', () => {
       head: branch,
       headSha: '9'.repeat(40),
       base: 'main',
+      baseSha: BASE,
       headRepositoryId: 314159,
       baseRepositoryId: 314159,
       body: `<!-- agentos:run=run-1;manifest=${digest};base=${BASE} -->\n\nAutomated draft. Review and merge manually.`,

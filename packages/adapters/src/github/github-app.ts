@@ -148,6 +148,7 @@ function parsePullRequest(value: unknown): PullRequest {
   const headRef = string(head?.ref);
   const headSha = sha(head?.sha);
   const baseRef = string(base?.ref);
+  const baseSha = sha(base?.sha);
   if (
     number === undefined ||
     url === undefined ||
@@ -159,6 +160,7 @@ function parsePullRequest(value: unknown): PullRequest {
     headRef === undefined ||
     headSha === undefined ||
     baseRef === undefined ||
+    baseSha === undefined ||
     headRepositoryId === undefined ||
     baseRepositoryId === undefined
   ) {
@@ -173,6 +175,7 @@ function parsePullRequest(value: unknown): PullRequest {
     head: headRef,
     headSha,
     base: baseRef,
+    baseSha,
     headRepositoryId,
     baseRepositoryId,
     body,

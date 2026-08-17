@@ -231,7 +231,7 @@ describe('GitHub App installation client factory', () => {
               sha: headSha,
               repo: { id: 314159 },
             },
-            base: { ref: 'main', repo: { id: 314159 } },
+            base: { ref: 'main', sha: 'b'.repeat(40), repo: { id: 314159 } },
           },
         ]),
       ),
@@ -252,9 +252,41 @@ describe('GitHub App installation client factory', () => {
         head: 'agentos/run-1',
         headSha,
         base: 'main',
+        baseSha: 'b'.repeat(40),
         headRepositoryId: 314159,
         baseRepositoryId: 314159,
       },
     ]);
+  });
+
+  it('rejects an open draft PR without an immutable base SHA', async () => {
+    const factory = createGitHubAppClientFactoryForTest({
+      auth: vi.fn(async () => authResult()),
+      fetch: vi.fn(async () =>
+        Response.json([
+          {
+            number: 7,
+            html_url: 'https://github.com/team-zork/passerine/pull/7',
+            draft: true,
+            state: 'open',
+            title: 'Agent OS: run-1',
+            body: 'trusted body',
+            head: {
+              ref: 'agentos/run-1',
+              sha: 'a'.repeat(40),
+              repo: { id: 314159 },
+            },
+            base: { ref: 'main', repo: { id: 314159 } },
+          },
+        ]),
+      ),
+      now: () => new Date('2026-08-17T12:00:00.000Z'),
+    });
+
+    await expect(
+      factory.withClient(scope, (client) =>
+        client.listOpenPullRequests({ head: 'agentos/run-1', base: 'main' }),
+      ),
+    ).rejects.toMatchObject({ code: 'github_unavailable' });
   });
 });

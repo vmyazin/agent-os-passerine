@@ -266,6 +266,7 @@ function ownedPullRequest(
   expected: {
     branch: string;
     base: string;
+    baseSha: string;
     repositoryId: number;
     commitSha: string;
     title: string;
@@ -280,6 +281,7 @@ function ownedPullRequest(
     pullRequest.head === expected.branch &&
     pullRequest.headSha === expected.commitSha &&
     pullRequest.base === expected.base &&
+    pullRequest.baseSha === expected.baseSha &&
     pullRequest.headRepositoryId === expected.repositoryId &&
     pullRequest.baseRepositoryId === expected.repositoryId &&
     pullRequest.body === expected.body &&
@@ -528,6 +530,7 @@ export function createTrustedGitHubPublisher(
             !ownedPullRequest(pullRequests[0], {
               branch,
               base: manifest.expectedBase.branch,
+              baseSha: manifest.expectedBase.sha,
               repositoryId: manifest.repository.repositoryId,
               commitSha: record.commitSha,
               title,
@@ -787,6 +790,13 @@ export function createTrustedGitHubPublisher(
             if (pullRequest === undefined) throw error;
           }
         }
+        if (!phaseAtLeast(record.phase, 'pr_created')) {
+          const baseAfterPullRequest = await github.getReference(
+            manifest.expectedBase.branch,
+          );
+          if (baseAfterPullRequest?.sha !== manifest.expectedBase.sha)
+            rejected('Publication base changed after pull request response');
+        }
         const refAfterPullRequest = await github.getReference(branch);
         if (refAfterPullRequest?.sha !== commitSha)
           collision('Publication branch changed after pull request response');
@@ -794,6 +804,7 @@ export function createTrustedGitHubPublisher(
           !ownedPullRequest(pullRequest, {
             branch,
             base: manifest.expectedBase.branch,
+            baseSha: manifest.expectedBase.sha,
             repositoryId: manifest.repository.repositoryId,
             commitSha,
             title,
