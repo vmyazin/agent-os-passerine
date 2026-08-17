@@ -27,10 +27,6 @@ export function POST(request: Request): Promise<Response> {
           ...(criterion.required === undefined
             ? {}
             : { required: criterion.required }),
-          ...(criterion.cwd === undefined ? {} : { cwd: criterion.cwd }),
-          ...(criterion.timeoutMs === undefined
-            ? {}
-            : { timeoutMs: criterion.timeoutMs }),
         })),
       });
     },

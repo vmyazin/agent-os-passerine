@@ -12,6 +12,7 @@ import {
   reduceGoalWorkflow,
   verifyCriterion,
   type CommandCriterion,
+  type EvidenceSubmission,
   type ConfigSnapshot,
   type GoalCriterion,
   type GoalProgress,
@@ -36,8 +37,6 @@ const commandCriterionSchema = z
     description: z.string().min(1).max(1_000),
     required: z.boolean().optional(),
     command: z.string().min(1).max(10_000),
-    cwd: z.string().min(1).max(1_024).optional(),
-    timeoutMs: z.number().int().positive().max(3_600_000).optional(),
   })
   .strict();
 const goalRunInputSchema = z
@@ -149,6 +148,19 @@ export function deterministicGoalChildRunId(
   return persistenceId('run', `goal-child-${binding}`);
 }
 
+export function deterministicGoalCriterionId(
+  runId: string,
+  ordinal: number,
+): ReturnType<typeof persistenceId<'goalCriterion'>> {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal > 19)
+    throw new Error('goal criterion ordinal must be between 0 and 19');
+  const binding = createHash('sha256')
+    .update(`goalCriterion:goal:${runId}:criterion:${String(ordinal)}`)
+    .digest('hex')
+    .slice(0, 32);
+  return persistenceId('goalCriterion', `goalCriterion_${binding}`);
+}
+
 function componentHash(value: unknown): string {
   return createHash('sha256').update(canonicalJsonValue(value)).digest('hex');
 }
@@ -216,10 +228,6 @@ function validateCriteria(
       description: parsed.description,
       command: parsed.command,
       ...(parsed.required === undefined ? {} : { required: parsed.required }),
-      ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
-      ...(parsed.timeoutMs === undefined
-        ? {}
-        : { timeoutMs: parsed.timeoutMs }),
     };
     if (
       record.ordinal !== ordinal ||
@@ -558,12 +566,26 @@ async function finishParent(
   throw new Error('goal parent transition conflicted');
 }
 
+function boundEvidencePayload(
+  submission: EvidenceSubmission,
+  parentRunId: string,
+  childRunId: string,
+): boolean {
+  const payload = submission.payload;
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload))
+    return false;
+  const bound = payload as { parentRunId?: unknown; childRunId?: unknown };
+  return bound.parentRunId === parentRunId && bound.childRunId === childRunId;
+}
+
 function stepResults(
   dependencies: DurableGoalWorkflowDependencies,
   stepResult: GoalStepResult,
   definitions: readonly CommandCriterion[],
   existing: ReadonlyMap<string, VerificationResult>,
   step: number,
+  parentRunId: string,
+  childRunId: string,
 ): Promise<readonly VerificationResult[]> {
   const evidence = new Map(
     stepResult.evidence.map((item) => [item.criterionId, item]),
@@ -593,6 +615,12 @@ function stepResults(
           definition.id,
           'evidence_missing',
           'Feature child did not produce trusted criterion evidence',
+        );
+      if (!boundEvidencePayload(submission, parentRunId, childRunId))
+        return failedResult(
+          definition.id,
+          'evidence_binding_mismatch',
+          'Criterion evidence is not bound to this goal step child',
         );
       return verifyCriterion(
         dependencies.verifierRegistry,
@@ -746,6 +774,8 @@ export function createDurableGoalWorkflow(
           definitions,
           criterionResults,
           step,
+          runId,
+          childRunId,
         );
         for (const [ordinal, verification] of results.entries()) {
           const record = records[ordinal]!;

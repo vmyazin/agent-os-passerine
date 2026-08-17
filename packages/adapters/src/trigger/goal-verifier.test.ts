@@ -45,6 +45,10 @@ interface FixtureMutation {
   readonly claimsRunId?: string;
   readonly evidenceRunId?: string;
   readonly payloadChildRunId?: string;
+  readonly testEvidence?: Readonly<
+    Partial<{ command: string; passed: boolean; exitCode: number }>
+  >;
+  readonly omitTestEvidence?: boolean;
   readonly observation?: Readonly<
     Partial<{
       runId: string;
@@ -75,6 +79,17 @@ async function fixture(mutation: FixtureMutation = {}) {
   const reportEvidence = {
     version: 'workflow-verification-v3',
     runId: mutation.evidenceRunId ?? childRunId,
+    ...(mutation.omitTestEvidence
+      ? {}
+      : {
+          testEvidence: {
+            version: 'test-evidence-v1',
+            passed: true,
+            command: criterion.command,
+            exitCode: 0,
+            ...mutation.testEvidence,
+          },
+        }),
     trustedCommandObservation: observation,
   };
   const evidenceDigest = createHash('sha256')
@@ -159,7 +174,9 @@ describe('trusted goal command verifier', () => {
     ['wrong report subject', { subject: 'wrong-subject' }],
     ['wrong evidence digest', { claimsDigest: '0'.repeat(64) }],
     ['wrong claims run', { claimsRunId: 'other-child' }],
-    ['wrong command', { observation: { command: 'pnpm lint' } }],
+    ['wrong command key', { testEvidence: { command: 'pnpm lint' } }],
+    ['missing test evidence', { omitTestEvidence: true }],
+    ['failed test evidence', { testEvidence: { passed: false } }],
     ['nonzero exit', { observation: { exitCode: 1 } }],
     [
       'reversed timestamps',

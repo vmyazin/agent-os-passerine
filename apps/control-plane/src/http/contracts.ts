@@ -32,8 +32,6 @@ export const goalCommandCriterionSchema = z
     description: z.string().trim().min(1).max(1_000),
     required: z.boolean().optional(),
     command: z.string().trim().min(1).max(10_000),
-    cwd: z.string().trim().min(1).max(1_024).optional(),
-    timeoutMs: z.number().int().positive().max(3_600_000).optional(),
   })
   .strict();
 

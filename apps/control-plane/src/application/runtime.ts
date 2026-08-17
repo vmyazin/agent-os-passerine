@@ -34,6 +34,22 @@ const deterministicId: IdGenerator = (kind, idempotencyKey) =>
 
 let service: ControlPlaneService | undefined;
 
+/** Goal creation stays fail-closed when the trusted allowlist is absent. */
+function trustedGoalCommandsFromEnv(): ReadonlySet<string> | undefined {
+  const raw = process.env.AGENTOS_TRUSTED_TEST_COMMANDS_JSON;
+  if (raw === undefined || raw.trim() === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    return undefined;
+  const keys = Object.keys(parsed).filter((key) => key.trim().length > 0);
+  return keys.length > 0 ? new Set(keys) : undefined;
+}
+
 function requiredRuntime(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.trim() === '')
@@ -261,6 +277,7 @@ export function controlPlaneService(): ControlPlaneService {
       deterministicId,
       dispatch,
       repositoryHead,
+      trustedGoalCommandsFromEnv(),
     );
   }
   return service;

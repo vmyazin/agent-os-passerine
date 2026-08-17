@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { deterministicGoalCriterionId } from '@agentos/adapters';
+
 import type {
   Approval,
   AgentOsConfig,
@@ -499,6 +501,7 @@ export class ControlPlaneService {
     private readonly repositoryHead?: {
       resolve(config: AgentOsConfig): Promise<string>;
     },
+    private readonly trustedGoalCommands?: ReadonlySet<string>,
   ) {}
 
   async getConfiguration(includeCanonical = true): Promise<{
@@ -648,7 +651,21 @@ export class ControlPlaneService {
     return this.createRun('feature', idempotencyKey, input);
   }
 
-  createGoalRun(idempotencyKey: string, input: CreateGoalRunInput) {
+  async createGoalRun(idempotencyKey: string, input: CreateGoalRunInput) {
+    if (this.trustedGoalCommands === undefined)
+      throw new ServiceError(
+        'goal_commands_unavailable',
+        'the trusted goal command allowlist is not configured',
+        503,
+      );
+    for (const criterion of input.criteria) {
+      if (!this.trustedGoalCommands.has(criterion.command))
+        throw new ServiceError(
+          'invalid_goal_criteria',
+          'goal criterion commands must name trusted test commands',
+          422,
+        );
+    }
     return this.createRun('goal', idempotencyKey, input);
   }
 
@@ -751,10 +768,7 @@ export class ControlPlaneService {
         for (const [ordinal, definition] of definitions.entries()) {
           const source = goalInput.criteria[ordinal]!;
           await this.repository.createGoalCriterionIdempotently({
-            id: this.generateId(
-              'goalCriterion',
-              `goal:${created.id}:criterion:${String(ordinal)}`,
-            ),
+            id: deterministicGoalCriterionId(created.id, ordinal),
             runId: created.id,
             ordinal,
             description: source.description,

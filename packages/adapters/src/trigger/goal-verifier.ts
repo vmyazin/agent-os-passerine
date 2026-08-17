@@ -62,10 +62,19 @@ const observationSchema = z
     configDigest: digest,
   })
   .strict();
+const reportTestEvidenceSchema = z
+  .object({
+    version: z.literal('test-evidence-v1'),
+    passed: z.literal(true),
+    command: z.string().min(1).max(2_000),
+    exitCode: z.literal(0),
+  })
+  .strict();
 const reportEvidenceSchema = z
   .object({
     version: z.literal('workflow-verification-v3'),
     runId: z.string().min(1).max(128),
+    testEvidence: reportTestEvidenceSchema,
     trustedCommandObservation: observationSchema,
   })
   .passthrough();
@@ -262,10 +271,10 @@ export function createTrustedGoalCommandVerifier(
             'Trusted test report child run binding is invalid',
           );
         const observation = reportEvidence.trustedCommandObservation;
-        if (observation.command !== criterion.command)
+        if (reportEvidence.testEvidence.command !== criterion.command)
           fail(
             'report_command_mismatch',
-            'Trusted test report command does not match the criterion',
+            'Trusted test report command key does not match the criterion',
           );
         const startedAt = Date.parse(observation.startedAt);
         const completedAt = Date.parse(observation.completedAt);

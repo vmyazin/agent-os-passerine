@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  deterministicGoalCriterionId,
   parseGoalRunInput,
   validateDurableGoalInputs,
 } from '@agentos/adapters';
@@ -377,13 +378,7 @@ export async function reconcileWorkflowOutbox(
             }
             const repaired = await deliver(async () => {
               await repository.createGoalCriterionIdempotently({
-                id: persistenceId(
-                  'goalCriterion',
-                  `goal_criterion_${createHash('sha256')
-                    .update(`${run.id}\u0000${String(ordinal)}`)
-                    .digest('hex')
-                    .slice(0, 32)}`,
-                ),
+                id: deterministicGoalCriterionId(run.id, ordinal),
                 runId: run.id,
                 ordinal,
                 description: definition.description,

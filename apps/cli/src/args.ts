@@ -174,15 +174,7 @@ function parseGoalCriteria(value: string): readonly GoalCommandCriterion[] {
   }
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 20)
     return invalid();
-  const allowed = new Set([
-    'id',
-    'type',
-    'description',
-    'required',
-    'command',
-    'cwd',
-    'timeoutMs',
-  ]);
+  const allowed = new Set(['id', 'type', 'description', 'required', 'command']);
   const ids = new Set<string>();
   return parsed.map((candidate): GoalCommandCriterion => {
     if (
@@ -205,16 +197,7 @@ function parseGoalCriteria(value: string): readonly GoalCommandCriterion[] {
       typeof source.command !== 'string' ||
       source.command.trim().length < 1 ||
       source.command.length > 10_000 ||
-      (source.required !== undefined && typeof source.required !== 'boolean') ||
-      (source.cwd !== undefined &&
-        (typeof source.cwd !== 'string' ||
-          source.cwd.trim().length < 1 ||
-          source.cwd.length > 1_024)) ||
-      (source.timeoutMs !== undefined &&
-        (typeof source.timeoutMs !== 'number' ||
-          !Number.isSafeInteger(source.timeoutMs) ||
-          source.timeoutMs < 1 ||
-          source.timeoutMs > 3_600_000))
+      (source.required !== undefined && typeof source.required !== 'boolean')
     )
       return invalid();
     ids.add(source.id);
@@ -226,10 +209,6 @@ function parseGoalCriteria(value: string): readonly GoalCommandCriterion[] {
       ...(source.required === undefined
         ? {}
         : { required: source.required as boolean }),
-      ...(source.cwd === undefined ? {} : { cwd: source.cwd as string }),
-      ...(source.timeoutMs === undefined
-        ? {}
-        : { timeoutMs: source.timeoutMs as number }),
     };
   });
 }

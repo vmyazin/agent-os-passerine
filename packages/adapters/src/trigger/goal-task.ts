@@ -65,7 +65,11 @@ export const goalWorkflowTask = task({
       });
     } catch (error) {
       if (error instanceof GoalWorkflowTaskTransientError) throw error;
-      throw new AbortTaskRunError('permanent goal workflow task failure');
+      const detail =
+        error instanceof Error ? `: ${error.message.slice(0, 200)}` : '';
+      throw new AbortTaskRunError(
+        `permanent goal workflow task failure${detail}`,
+      );
     }
   },
 });

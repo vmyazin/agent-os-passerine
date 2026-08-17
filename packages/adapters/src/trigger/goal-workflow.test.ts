@@ -184,6 +184,12 @@ async function signedEvidence(
   const reportEvidence = {
     version: 'workflow-verification-v3',
     runId: input.childRunId,
+    testEvidence: {
+      version: 'test-evidence-v1',
+      passed: true,
+      command: input.criterion.command,
+      exitCode: 0,
+    },
     trustedCommandObservation: observation,
   };
   const evidenceDigest = createHash('sha256')

@@ -27,10 +27,12 @@ criteria, or transitioning a terminal state fails closed.
 ## Immutable provenance and durable records
 
 `POST /api/goals` accepts one to twenty strict command criteria with unique
-IDs. Commands are keys into the existing trusted test-command allowlist, never
-shell strings executed by the coordinator. Goal creation fails closed unless
-every supplied provenance digest and the repository SHA match one applied
-configuration revision; it persists the same immutable configuration snapshot
+IDs. Commands are keys into the existing trusted test-command allowlist
+(`AGENTOS_TRUSTED_TEST_COMMANDS_JSON`), never shell strings executed by the
+coordinator: creation rejects any criterion whose command is not an allowlist
+key and fails closed when the allowlist itself is not configured. Goal
+creation also fails closed unless every supplied provenance digest and the
+repository SHA match one applied configuration revision; it persists the same immutable configuration snapshot
 used by feature runs, stores the criteria inside the immutable run input, and
 creates deterministic `goal_criteria` records holding each canonical
 definition. `goal_progress` rows carry a step ordinal that a database check
@@ -49,8 +51,11 @@ The feature workflow already stores one `trusted-test-report` artifact whose
 evidence is covered by an HMAC attestation. `createTrustedGoalCommandVerifier`
 loads exactly one report from the child run's verification scope, recomputes
 the canonical evidence digest, and verifies the attestation kind, subject, run
-binding, and digest. It then requires the observed command to match the goal
-criterion, a zero exit code, and orderly timestamps before issuing a separate
+binding, and digest. The criterion's command must equal the signed report's
+test-evidence command key — the same allowlist key the feature workflow
+resolved into the exact sandbox invocation it then observed — and the
+observation must show a zero exit code with orderly timestamps before the
+verifier issues a separate
 domain-separated `definition-of-done-verification` attestation consumed by the
 core `verifyCriterion` function. Both authorities reuse the rotating
 `AGENTOS_TEST_REPORT_KEYS_JSON` secrets; HMAC kind separation prevents a raw

@@ -23,8 +23,6 @@ export interface GoalCommandCriterion {
   readonly description: string;
   readonly required?: boolean;
   readonly command: string;
-  readonly cwd?: string;
-  readonly timeoutMs?: number;
 }
 
 export type Command =
