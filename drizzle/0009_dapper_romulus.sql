@@ -191,8 +191,13 @@ BEGIN
 			WHEN 'blobs_created' THEN p_phase IN ('tree_created', 'failed', 'cancelled')
 			WHEN 'tree_created' THEN p_phase IN ('commit_created', 'failed', 'cancelled')
 			WHEN 'commit_created' THEN p_phase IN ('ref_created', 'failed', 'cancelled')
-			WHEN 'ref_created' THEN p_phase IN ('pr_created', 'failed')
-			WHEN 'pr_created' THEN p_phase IN ('succeeded', 'failed')
+			WHEN 'ref_created' THEN p_phase IN ('pr_created', 'failed', 'cancelled')
+			WHEN 'pr_created' THEN p_phase IN ('succeeded', 'failed', 'cancelled')
+			WHEN 'cancelled' THEN p_phase = 'cancelled'
+				AND "pull_request_number" IS NULL
+				AND p_patch ? 'pullRequestNumber'
+				AND p_patch ? 'pullRequestUrl'
+				AND p_patch->>'draft' = 'true'
 			ELSE false
 		END
 	RETURNING * INTO stored;

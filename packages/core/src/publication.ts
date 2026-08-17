@@ -18,6 +18,58 @@ export const PUBLICATION_MAX_FILE_BYTES = 1_000_000;
 export const PUBLICATION_MAX_TOTAL_BYTES = 5_000_000;
 export const PUBLICATION_AUTHORIZATION_MAX_TTL_MS = 15 * 60 * 1_000;
 
+const publicationPolicyPathSchema = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine(
+    (value) =>
+      /^[\x20-\x7e]+$/.test(value) &&
+      !value.startsWith('/') &&
+      !value.includes('\\') &&
+      !value.includes('%') &&
+      !value.split('/').some((part) => part === '..' || part === '.'),
+    'invalid protected path glob',
+  );
+
+export const publicationPolicySnapshotSchema = z
+  .object({
+    version: z.literal('publication-policy-v1'),
+    protectedPaths: z.array(publicationPolicyPathSchema).max(256),
+    maxFiles: z.number().int().positive().max(PUBLICATION_MAX_FILES),
+    maxFileBytes: z.number().int().positive().max(PUBLICATION_MAX_FILE_BYTES),
+    maxTotalBytes: z.number().int().positive().max(PUBLICATION_MAX_TOTAL_BYTES),
+    allowBinary: z.literal(false),
+    allowSymlinks: z.literal(false),
+    allowDeletes: z.boolean(),
+    allowedModes: z
+      .array(z.enum(['100644', '100755']))
+      .min(1)
+      .max(2),
+  })
+  .strict();
+
+export type PublicationPolicySnapshot = z.infer<
+  typeof publicationPolicySnapshotSchema
+>;
+
+export const DEFAULT_PUBLICATION_POLICY: PublicationPolicySnapshot =
+  Object.freeze({
+    version: 'publication-policy-v1',
+    protectedPaths: Object.freeze([
+      ...DEFAULT_PROTECTED_PATHS,
+    ]) as unknown as string[],
+    maxFiles: PUBLICATION_MAX_FILES,
+    maxFileBytes: PUBLICATION_MAX_FILE_BYTES,
+    maxTotalBytes: PUBLICATION_MAX_TOTAL_BYTES,
+    allowBinary: false,
+    allowSymlinks: false,
+    allowDeletes: true,
+    allowedModes: Object.freeze(['100644', '100755']) as unknown as (
+      '100644' | '100755'
+    )[],
+  });
+
 const digestSchema = z
   .string()
   .regex(SHA256, 'must be a lowercase SHA-256 digest');
@@ -177,6 +229,64 @@ function globPatternToRegex(pattern: string): RegExp {
     }
   }
   return new RegExp(`${source}$`, 'iu');
+}
+
+export function normalizePublicationPolicySnapshot(
+  input: unknown,
+): PublicationPolicySnapshot {
+  const parsed = publicationPolicySnapshotSchema.parse(input);
+  const folded = new Set(
+    parsed.protectedPaths.map((path) => path.toLocaleLowerCase('en-US')),
+  );
+  for (const required of DEFAULT_PROTECTED_PATHS) {
+    if (!folded.has(required.toLocaleLowerCase('en-US')))
+      throw new Error(`Default protected path is not removable: ${required}`);
+  }
+  return Object.freeze({
+    ...parsed,
+    protectedPaths: [...new Set(parsed.protectedPaths)].sort(compareCodeUnits),
+    allowedModes: [...new Set(parsed.allowedModes)].sort(compareCodeUnits),
+  });
+}
+
+export function canonicalPublicationPolicyDigest(input: unknown): string {
+  return createHash('sha256')
+    .update(
+      canonicalJsonValue(normalizePublicationPolicySnapshot(input)),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+export function evaluatePublicationPolicy(
+  changes: readonly PublicationChange[],
+  input: unknown,
+): PublicationPolicySnapshot {
+  const policy = normalizePublicationPolicySnapshot(input);
+  if (changes.length > policy.maxFiles)
+    throw new Error('Publication policy file count exceeded');
+  const matchers = policy.protectedPaths.map(globPatternToRegex);
+  let totalBytes = 0;
+  for (const change of changes) {
+    const path = normalizeRepositoryPathSyntax(change.path);
+    if (matchers.some((matcher) => matcher.test(path)))
+      throw new Error(`Publication policy denied path: ${path}`);
+    if (change.operation === 'delete') {
+      if (!policy.allowDeletes)
+        throw new Error(`Publication policy denied delete: ${path}`);
+      continue;
+    }
+    if (!policy.allowedModes.includes(change.mode))
+      throw new Error(`Publication policy denied mode: ${path}`);
+    assertWellFormedText(change.content, path);
+    const size = Buffer.byteLength(change.content, 'utf8');
+    if (size > policy.maxFileBytes)
+      throw new Error(`Publication policy file size exceeded: ${path}`);
+    totalBytes += size;
+    if (totalBytes > policy.maxTotalBytes)
+      throw new Error('Publication policy aggregate size exceeded');
+  }
+  return policy;
 }
 
 const protectedMatchers = [...DEFAULT_PROTECTED_PATHS, '.git/**'].map(

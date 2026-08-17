@@ -14,8 +14,8 @@ const transitions: Readonly<
   blobs_created: ['tree_created', 'failed', 'cancelled'],
   tree_created: ['commit_created', 'failed', 'cancelled'],
   commit_created: ['ref_created', 'failed', 'cancelled'],
-  ref_created: ['pr_created', 'failed'],
-  pr_created: ['succeeded', 'failed'],
+  ref_created: ['pr_created', 'failed', 'cancelled'],
+  pr_created: ['succeeded', 'failed', 'cancelled'],
   succeeded: [],
   cancelled: [],
 };
@@ -80,10 +80,18 @@ export class InMemoryPublicationStore implements PublicationStore {
       );
     }
     const existing = this.#records.get(key);
+    const cancellationEnrichment =
+      existing?.phase === 'cancelled' &&
+      patch.phase === 'cancelled' &&
+      existing.pullRequestNumber === undefined &&
+      patch.pullRequestNumber !== undefined &&
+      patch.pullRequestUrl !== undefined &&
+      patch.draft === true;
     if (
       existing === undefined ||
       existing.revision !== expectedRevision ||
-      !transitions[existing.phase].includes(patch.phase)
+      (!transitions[existing.phase].includes(patch.phase) &&
+        !cancellationEnrichment)
     ) {
       throw new GitHubPublisherError(
         'publication_store_conflict',

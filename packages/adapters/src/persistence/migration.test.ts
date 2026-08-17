@@ -153,6 +153,13 @@ describe('domain persistence migration', () => {
     expect(migration).toContain(
       `when 'claimed' then p_phase in ('blobs_created', 'failed', 'cancelled')`,
     );
+    expect(migration).toContain(
+      `when 'ref_created' then p_phase in ('pr_created', 'failed', 'cancelled')`,
+    );
+    expect(migration).toContain(
+      `when 'pr_created' then p_phase in ('succeeded', 'failed', 'cancelled')`,
+    );
+    expect(migration).toContain(`when 'cancelled' then p_phase = 'cancelled'`);
     expect(migration).toContain('publication_records_phase_checkpoint_shape');
     expect(migration).toContain(`p_phase = 'blobs_created'`);
   });

@@ -144,15 +144,20 @@ function parsePullRequest(value: unknown): PullRequest {
   const number = positiveInteger(response?.number);
   const url = string(response?.html_url);
   const body = string(response?.body);
+  const title = string(response?.title);
   const headRef = string(head?.ref);
+  const headSha = sha(head?.sha);
   const baseRef = string(base?.ref);
   if (
     number === undefined ||
     url === undefined ||
     !url.startsWith('https://github.com/') ||
     response?.draft !== true ||
+    response?.state !== 'open' ||
     body === undefined ||
+    title === undefined ||
     headRef === undefined ||
+    headSha === undefined ||
     baseRef === undefined ||
     headRepositoryId === undefined ||
     baseRepositoryId === undefined
@@ -163,7 +168,10 @@ function parsePullRequest(value: unknown): PullRequest {
     number,
     url,
     draft: true,
+    state: 'open',
+    title,
     head: headRef,
+    headSha,
     base: baseRef,
     headRepositoryId,
     baseRepositoryId,

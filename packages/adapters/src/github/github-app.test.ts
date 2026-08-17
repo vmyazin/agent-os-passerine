@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createGitHubAppClientFactory,
-  type InstallationClientScope,
-} from './index.js';
-import { createGitHubAppClientFactoryForTest } from './github-app.js';
+  createGitHubAppClientFactoryForTest,
+} from './github-app.js';
+import type { InstallationClientScope } from './types.js';
 
 const scope: InstallationClientScope = {
   owner: 'team-zork',
@@ -211,5 +211,50 @@ describe('GitHub App installation client factory', () => {
         client.listOpenPullRequests({ head: 'agentos/run', base: 'main' }),
       ),
     ).rejects.toMatchObject({ code: 'github_unavailable' });
+  });
+
+  it('parses only an open draft PR with immutable repository IDs and head SHA', async () => {
+    const headSha = 'a'.repeat(40);
+    const factory = createGitHubAppClientFactoryForTest({
+      auth: vi.fn(async () => authResult()),
+      fetch: vi.fn(async () =>
+        Response.json([
+          {
+            number: 7,
+            html_url: 'https://github.com/team-zork/passerine/pull/7',
+            draft: true,
+            state: 'open',
+            title: 'Agent OS: run-1',
+            body: 'trusted body',
+            head: {
+              ref: 'agentos/run-1',
+              sha: headSha,
+              repo: { id: 314159 },
+            },
+            base: { ref: 'main', repo: { id: 314159 } },
+          },
+        ]),
+      ),
+      now: () => new Date('2026-08-17T12:00:00.000Z'),
+    });
+    await expect(
+      factory.withClient(scope, (client) =>
+        client.listOpenPullRequests({ head: 'agentos/run-1', base: 'main' }),
+      ),
+    ).resolves.toEqual([
+      {
+        number: 7,
+        url: 'https://github.com/team-zork/passerine/pull/7',
+        draft: true,
+        state: 'open',
+        title: 'Agent OS: run-1',
+        body: 'trusted body',
+        head: 'agentos/run-1',
+        headSha,
+        base: 'main',
+        headRepositoryId: 314159,
+        baseRepositoryId: 314159,
+      },
+    ]);
   });
 });

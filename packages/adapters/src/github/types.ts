@@ -1,4 +1,11 @@
 import type { PublicationManifestBody } from '@agentos/core';
+import type { PublicationPhase } from './public-types.js';
+
+export type {
+  PublicationPhase,
+  PublicationResult,
+  PublicationStatusResult,
+} from './public-types.js';
 
 export interface GitRepository {
   readonly id: number;
@@ -74,7 +81,10 @@ export interface PullRequest {
   readonly number: number;
   readonly url: string;
   readonly draft: boolean;
+  readonly state: 'open' | 'closed';
+  readonly title: string;
   readonly head: string;
+  readonly headSha: string;
   readonly base: string;
   readonly headRepositoryId: number;
   readonly baseRepositoryId: number;
@@ -95,26 +105,6 @@ export interface GitHubInstallationClientFactory {
     operation: (client: GitHubInstallationClient) => Promise<T>,
   ): Promise<T>;
 }
-
-export interface PublicationResult {
-  readonly status: 'succeeded';
-  readonly branch: string;
-  readonly commitSha: string;
-  readonly pullRequestNumber: number;
-  readonly pullRequestUrl: string;
-  readonly draft: true;
-}
-
-export type PublicationPhase =
-  | 'claimed'
-  | 'blobs_created'
-  | 'tree_created'
-  | 'commit_created'
-  | 'ref_created'
-  | 'pr_created'
-  | 'succeeded'
-  | 'cancelled'
-  | 'failed';
 
 export interface PublicationRecord {
   readonly key: string;

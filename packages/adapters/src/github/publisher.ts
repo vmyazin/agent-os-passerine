@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 
 import {
+  canonicalPublicationPolicyDigest,
+  evaluatePublicationPolicy,
   normalizeRepositoryPathSyntax,
+  normalizePublicationPolicySnapshot,
   parsePublicationManifest,
   validatePublicationAuthorization,
   type AttestationVerifier,
   type PublicationAuthorizationClaims,
   type PublicationChange,
   type PublicationManifestBody,
+  type PublicationPolicySnapshot,
 } from '@agentos/core';
 
 import { collision, GitHubPublisherError, rejected } from './errors.js';
@@ -18,7 +22,9 @@ import type {
   InstallationClientScope,
   PublicationEvent,
   PublicationPhase,
+  PublicationRecord,
   PublicationResult,
+  PublicationStatusResult,
   PublicationStore,
   PullRequest,
 } from './types.js';
@@ -41,6 +47,12 @@ export interface TrustedGitHubPublisherOptions {
   readonly store: PublicationStore;
   readonly authorizationVerifier: AttestationVerifier<PublicationAuthorizationClaims>;
   readonly selectedRepositories: readonly PublicationManifestBody['repository'][];
+  readonly policyResolver: (input: {
+    readonly projectId: string;
+    readonly runId: string;
+    readonly configDigest: string;
+    readonly policyDigest: string;
+  }) => Promise<unknown>;
   readonly now?: () => Date;
   readonly isCancelled?: (projectId: string, runId: string) => Promise<boolean>;
   readonly beforeReference?: () => void | Promise<void>;
@@ -73,6 +85,14 @@ function prMarker(
   baseSha: string,
 ): string {
   return `<!-- agentos:run=${runId};manifest=${manifestDigest};base=${baseSha} -->`;
+}
+
+function prTitle(runId: string): string {
+  return `Agent OS: ${runId}`;
+}
+
+function prBody(marker: string): string {
+  return `${marker}\n\nAutomated draft. Review and merge manually.`;
 }
 
 function publicationKey(
@@ -190,6 +210,7 @@ function treeIndex(
 function validateChangesAgainstTree(
   changes: readonly PublicationChange[],
   entries: readonly GitTreeEntry[],
+  policy: PublicationPolicySnapshot,
 ): Map<string, GitTreeEntry> {
   const index = treeIndex(entries);
   for (const change of changes) {
@@ -219,6 +240,11 @@ function validateChangesAgainstTree(
     ) {
       rejected(`Change target is not a regular file: ${change.path}`);
     }
+    if (
+      change.operation === 'modify' &&
+      !policy.allowedModes.includes(existing.mode)
+    )
+      rejected(`Existing file mode is denied by policy: ${change.path}`);
   }
   return index;
 }
@@ -241,16 +267,23 @@ function ownedPullRequest(
     branch: string;
     base: string;
     repositoryId: number;
+    commitSha: string;
+    title: string;
+    body: string;
     marker: string;
   },
 ): boolean {
   return (
     pullRequest.draft === true &&
+    pullRequest.state === 'open' &&
+    pullRequest.title === expected.title &&
     pullRequest.head === expected.branch &&
+    pullRequest.headSha === expected.commitSha &&
     pullRequest.base === expected.base &&
     pullRequest.headRepositoryId === expected.repositoryId &&
     pullRequest.baseRepositoryId === expected.repositoryId &&
-    pullRequest.body.includes(expected.marker)
+    pullRequest.body === expected.body &&
+    pullRequest.body.startsWith(expected.marker)
   );
 }
 
@@ -261,6 +294,24 @@ function event(
   details: PublicationEvent['details'] = {},
 ): PublicationEvent {
   return { publicationKey: key, phase, at, details };
+}
+
+function redactedStatus(
+  record: PublicationRecord | undefined,
+): PublicationStatusResult {
+  if (record === undefined) return { status: 'not_found' };
+  return {
+    status: record.phase,
+    branch: record.branch,
+    ...(record.commitSha === undefined ? {} : { commitSha: record.commitSha }),
+    ...(record.pullRequestNumber === undefined
+      ? {}
+      : { pullRequestNumber: record.pullRequestNumber }),
+    ...(record.pullRequestUrl === undefined
+      ? {}
+      : { pullRequestUrl: record.pullRequestUrl }),
+    ...(record.draft === true ? { draft: true as const } : {}),
+  };
 }
 
 function verifyAuthorization(
@@ -281,12 +332,7 @@ export function createTrustedGitHubPublisher(
   const now = options.now ?? (() => new Date());
   const inFlight = new Map<string, Promise<PublicationResult>>();
 
-  const branchFor = (input: unknown): string => {
-    const parsed = parsePublicationManifest(input);
-    return branchForRun(parsed.manifest.runId);
-  };
-
-  const execute = async (input: unknown): Promise<PublicationResult> => {
+  const prepare = async (input: unknown) => {
     const parsed = parsePublicationManifest(input);
     const manifest = parsed.manifest;
     const selected = options.selectedRepositories.some((candidate) =>
@@ -294,6 +340,33 @@ export function createTrustedGitHubPublisher(
     );
     if (!selected) rejected('Repository is not selected for publication');
     verifyAuthorization(parsed, options.authorizationVerifier, now());
+    let policy: PublicationPolicySnapshot;
+    try {
+      policy = normalizePublicationPolicySnapshot(
+        await options.policyResolver({
+          projectId: manifest.projectId,
+          runId: manifest.runId,
+          configDigest: manifest.configDigest,
+          policyDigest: manifest.policyDigest,
+        }),
+      );
+      if (canonicalPublicationPolicyDigest(policy) !== manifest.policyDigest)
+        rejected('Resolved publication policy digest does not match');
+      evaluatePublicationPolicy(manifest.changes, policy);
+    } catch (error) {
+      if (error instanceof GitHubPublisherError) throw error;
+      rejected('Resolved publication policy is invalid');
+    }
+    return { parsed, manifest, policy };
+  };
+
+  const branchFor = (input: unknown): string => {
+    const parsed = parsePublicationManifest(input);
+    return branchForRun(parsed.manifest.runId);
+  };
+
+  const execute = async (input: unknown): Promise<PublicationResult> => {
+    const { parsed, manifest, policy } = await prepare(input);
 
     const key = publicationKey(manifest, parsed.manifestDigest);
     const branch = branchForRun(manifest.runId);
@@ -314,6 +387,80 @@ export function createTrustedGitHubPublisher(
         'publication_cancelled',
         'Publication was cancelled',
       );
+
+    const cancelIfRequested = async (
+      pullRequest?: PullRequest,
+    ): Promise<void> => {
+      const current = await options.store.get(key);
+      if (current?.phase === 'cancelled') {
+        if (pullRequest !== undefined) {
+          if (
+            current.pullRequestNumber !== undefined &&
+            (current.pullRequestNumber !== pullRequest.number ||
+              current.pullRequestUrl !== pullRequest.url ||
+              current.draft !== true)
+          )
+            collision('Cancelled publication PR binding changed');
+          if (current.pullRequestNumber === undefined) {
+            const reconciledAt = now().toISOString();
+            record = await options.store.save(
+              key,
+              current.revision,
+              {
+                phase: 'cancelled',
+                pullRequestNumber: pullRequest.number,
+                pullRequestUrl: pullRequest.url,
+                draft: true,
+                updatedAt: reconciledAt,
+              },
+              event(key, 'cancelled', reconciledAt, {
+                pullRequestNumber: pullRequest.number,
+                draft: true,
+                reconciled: true,
+              }),
+            );
+          }
+        }
+        throw new GitHubPublisherError(
+          'publication_cancelled',
+          'Publication was cancelled',
+        );
+      }
+      if (!(await options.isCancelled?.(manifest.projectId, manifest.runId)))
+        return;
+      if (current?.phase === 'succeeded')
+        collision('Completed publication cannot be cancelled');
+      record = current ?? record;
+      const cancelledAt = now().toISOString();
+      record = await options.store.save(
+        key,
+        record.revision,
+        {
+          phase: 'cancelled',
+          ...(pullRequest === undefined
+            ? {}
+            : {
+                pullRequestNumber: pullRequest.number,
+                pullRequestUrl: pullRequest.url,
+                draft: true as const,
+              }),
+          updatedAt: cancelledAt,
+        },
+        event(key, 'cancelled', cancelledAt, {
+          branch,
+          ...(record.commitSha === undefined
+            ? {}
+            : { commitSha: record.commitSha }),
+          ...(pullRequest === undefined
+            ? {}
+            : { pullRequestNumber: pullRequest.number, draft: true }),
+        }),
+      );
+      throw new GitHubPublisherError(
+        'publication_cancelled',
+        'Publication was cancelled',
+      );
+    };
 
     const scope: InstallationClientScope = {
       ...manifest.repository,
@@ -366,11 +513,15 @@ export function createTrustedGitHubPublisher(
             parsed.manifestDigest,
             manifest.expectedBase.sha,
           );
+          const title = prTitle(manifest.runId);
+          const body = prBody(marker);
           const pullRequests = await github.listOpenPullRequests({
             head: branch,
             base: manifest.expectedBase.branch,
           });
+          const refAfterPullRequest = await github.getReference(branch);
           if (
+            refAfterPullRequest?.sha !== record.commitSha ||
             pullRequests.length !== 1 ||
             pullRequests[0]?.number !== record.pullRequestNumber ||
             pullRequests[0]?.url !== record.pullRequestUrl ||
@@ -378,6 +529,9 @@ export function createTrustedGitHubPublisher(
               branch,
               base: manifest.expectedBase.branch,
               repositoryId: manifest.repository.repositoryId,
+              commitSha: record.commitSha,
+              title,
+              body,
               marker,
             })
           )
@@ -391,7 +545,7 @@ export function createTrustedGitHubPublisher(
             draft: true,
           };
         }
-        if (!phaseAtLeast(record.phase, 'commit_created') && !baseIsExact)
+        if (!phaseAtLeast(record.phase, 'pr_created') && !baseIsExact)
           rejected('Publication base SHA is stale');
 
         let existingEntries: Map<string, GitTreeEntry> | undefined;
@@ -407,6 +561,7 @@ export function createTrustedGitHubPublisher(
           existingEntries = validateChangesAgainstTree(
             manifest.changes,
             baseTree.entries,
+            policy,
           );
         }
 
@@ -513,19 +668,7 @@ export function createTrustedGitHubPublisher(
 
         if (!phaseAtLeast(record.phase, 'ref_created')) {
           await options.beforeReference?.();
-          if (await options.isCancelled?.(manifest.projectId, manifest.runId)) {
-            const cancelledAt = now().toISOString();
-            record = await options.store.save(
-              key,
-              record.revision,
-              { phase: 'cancelled', updatedAt: cancelledAt },
-              event(key, 'cancelled', cancelledAt),
-            );
-            throw new GitHubPublisherError(
-              'publication_cancelled',
-              'Publication was cancelled',
-            );
-          }
+          await cancelIfRequested();
 
           const beforeRefRepository = await github.getRepository();
           validateRepository(
@@ -562,11 +705,6 @@ export function createTrustedGitHubPublisher(
             manifest.repository,
             manifest.expectedBase.branch,
           );
-          const afterRefBase = await github.getReference(
-            manifest.expectedBase.branch,
-          );
-          if (afterRefBase?.sha !== manifest.expectedBase.sha && baseIsExact)
-            rejected('Publication base changed after reference creation');
         }
         const afterRef = await github.getReference(branch);
         if (afterRef?.sha !== commitSha)
@@ -589,12 +727,22 @@ export function createTrustedGitHubPublisher(
             event(key, 'ref_created', refAt, { branch, commitSha }),
           );
         }
+        if (!phaseAtLeast(record.phase, 'pr_created')) {
+          const currentBase = await github.getReference(
+            manifest.expectedBase.branch,
+          );
+          if (currentBase?.sha !== manifest.expectedBase.sha)
+            rejected('Publication base changed after reference creation');
+        }
+        await cancelIfRequested();
 
         const marker = prMarker(
           manifest.runId,
           parsed.manifestDigest,
           manifest.expectedBase.sha,
         );
+        const title = prTitle(manifest.runId);
+        const body = prBody(marker);
         const pullRequests = await github.listOpenPullRequests({
           head: branch,
           base: manifest.expectedBase.branch,
@@ -608,13 +756,24 @@ export function createTrustedGitHubPublisher(
         )
           collision('Durable pull request is no longer open');
         if (pullRequest === undefined) {
+          const beforePrBase = await github.getReference(
+            manifest.expectedBase.branch,
+          );
+          if (beforePrBase?.sha !== manifest.expectedBase.sha)
+            rejected('Publication base changed before pull request creation');
+          const beforePrRef = await github.getReference(branch);
+          if (beforePrRef?.sha !== commitSha)
+            collision(
+              'Publication branch changed before pull request creation',
+            );
+          await cancelIfRequested();
           try {
             verifyAuthorization(parsed, options.authorizationVerifier, now());
             pullRequest = await github.createDraftPullRequest({
-              title: `Agent OS: ${manifest.runId}`,
+              title,
               head: branch,
               base: manifest.expectedBase.branch,
-              body: `${marker}\n\nAutomated draft. Review and merge manually.`,
+              body,
               draft: true,
             });
           } catch (error) {
@@ -628,15 +787,22 @@ export function createTrustedGitHubPublisher(
             if (pullRequest === undefined) throw error;
           }
         }
+        const refAfterPullRequest = await github.getReference(branch);
+        if (refAfterPullRequest?.sha !== commitSha)
+          collision('Publication branch changed after pull request response');
         if (
           !ownedPullRequest(pullRequest, {
             branch,
             base: manifest.expectedBase.branch,
             repositoryId: manifest.repository.repositoryId,
+            commitSha,
+            title,
+            body,
             marker,
           })
         )
           collision('Pull request is not owned by this publication');
+        await cancelIfRequested(pullRequest);
         if (phaseAtLeast(record.phase, 'pr_created')) {
           if (
             record.pullRequestNumber !== pullRequest.number ||
@@ -645,6 +811,17 @@ export function createTrustedGitHubPublisher(
           )
             collision('Durable pull request binding changed');
         } else {
+          await cancelIfRequested(pullRequest);
+          const checkpointBase = await github.getReference(
+            manifest.expectedBase.branch,
+          );
+          if (checkpointBase?.sha !== manifest.expectedBase.sha)
+            rejected('Publication base changed before pull request checkpoint');
+          const checkpointRef = await github.getReference(branch);
+          if (checkpointRef?.sha !== commitSha)
+            collision(
+              'Publication branch changed before pull request checkpoint',
+            );
           const prAt = now().toISOString();
           record = await options.store.save(
             key,
@@ -662,6 +839,7 @@ export function createTrustedGitHubPublisher(
             }),
           );
         }
+        await cancelIfRequested(pullRequest);
         const succeededAt = now().toISOString();
         record = await options.store.save(
           key,
@@ -697,5 +875,38 @@ export function createTrustedGitHubPublisher(
     return promise;
   };
 
-  return Object.freeze({ publish, branchFor });
+  const status = async (input: unknown): Promise<PublicationStatusResult> => {
+    const { parsed, manifest } = await prepare(input);
+    return redactedStatus(
+      await options.store.get(publicationKey(manifest, parsed.manifestDigest)),
+    );
+  };
+
+  const cancel = async (input: unknown): Promise<PublicationStatusResult> => {
+    const { parsed, manifest } = await prepare(input);
+    const key = publicationKey(manifest, parsed.manifestDigest);
+    const current = await options.store.get(key);
+    if (current === undefined || current.phase === 'cancelled')
+      return redactedStatus(current);
+    if (current.phase === 'succeeded') return redactedStatus(current);
+    const cancelledAt = now().toISOString();
+    return redactedStatus(
+      await options.store.save(
+        key,
+        current.revision,
+        { phase: 'cancelled', updatedAt: cancelledAt },
+        event(key, 'cancelled', cancelledAt, {
+          branch: current.branch,
+          ...(current.commitSha === undefined
+            ? {}
+            : { commitSha: current.commitSha }),
+          ...(current.pullRequestNumber === undefined
+            ? {}
+            : { pullRequestNumber: current.pullRequestNumber }),
+        }),
+      ),
+    );
+  };
+
+  return Object.freeze({ publish, cancel, status, branchFor });
 }

@@ -5,7 +5,11 @@ import {
   createHmacAttestationVerifier,
 } from './attestation.js';
 import {
+  canonicalPublicationPolicyDigest,
   canonicalPublicationManifestDigest,
+  DEFAULT_PUBLICATION_POLICY,
+  evaluatePublicationPolicy,
+  normalizePublicationPolicySnapshot,
   parsePublicationManifest,
   validatePublicationAuthorization,
   type PublicationAuthorizationClaims,
@@ -91,6 +95,76 @@ function authorize(manifest: PublicationManifestBody) {
 }
 
 describe('publication manifest', () => {
+  it('canonically binds a restrictive policy snapshot without removable defaults', () => {
+    const custom = normalizePublicationPolicySnapshot({
+      ...DEFAULT_PUBLICATION_POLICY,
+      protectedPaths: [
+        ...DEFAULT_PUBLICATION_POLICY.protectedPaths,
+        'secrets/**',
+      ],
+      maxFiles: 3,
+      maxFileBytes: 128,
+      maxTotalBytes: 256,
+      allowDeletes: false,
+    });
+    expect(canonicalPublicationPolicyDigest(custom)).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      canonicalPublicationPolicyDigest({
+        ...custom,
+        protectedPaths: [...custom.protectedPaths].reverse(),
+      }),
+    ).toBe(canonicalPublicationPolicyDigest(custom));
+    expect(() =>
+      normalizePublicationPolicySnapshot({
+        ...DEFAULT_PUBLICATION_POLICY,
+        protectedPaths: [],
+      }),
+    ).toThrow(/default protected/i);
+  });
+
+  it('applies custom deny, mode, size, count, and delete rules to every operation', () => {
+    const policy = normalizePublicationPolicySnapshot({
+      ...DEFAULT_PUBLICATION_POLICY,
+      protectedPaths: [
+        ...DEFAULT_PUBLICATION_POLICY.protectedPaths,
+        'private/**',
+      ],
+      allowedModes: ['100644'],
+      maxFiles: 2,
+      maxFileBytes: 8,
+      maxTotalBytes: 10,
+      allowDeletes: false,
+    });
+    for (const changes of [
+      [
+        {
+          operation: 'add',
+          path: 'private/new.ts',
+          mode: '100644',
+          content: 'safe',
+        },
+      ],
+      [
+        {
+          operation: 'modify',
+          path: 'src/index.ts',
+          mode: '100755',
+          content: 'safe',
+        },
+      ],
+      [{ operation: 'delete', path: 'src/old.ts' }],
+    ] as const) {
+      expect(() =>
+        evaluatePublicationPolicy(
+          body({
+            changes: changes as unknown as PublicationManifestBody['changes'],
+          }).changes,
+          policy,
+        ),
+      ).toThrow(/policy/i);
+    }
+  });
+
   it('parses a strict full-file change set and hashes it canonically', () => {
     const input = body();
     const parsed = parsePublicationManifest({
