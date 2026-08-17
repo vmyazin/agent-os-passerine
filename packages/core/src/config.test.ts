@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   AgentOsConfigSchema,
+  canonicalConfigJson,
   canonicalConfigHash,
   loadAgentOsConfig,
   semanticConfigDiff,
@@ -85,5 +86,77 @@ describe('Agent OS configuration', () => {
     expect(semanticConfigDiff(current, next)).toEqual([
       { kind: 'changed', path: 'budgets.concurrency', before: 2, after: 3 },
     ]);
+  });
+
+  it('sorts canonical keys by code unit without consulting the host locale', () => {
+    const config = loadAgentOsConfig(validYaml);
+    const profile = config.models.standard;
+    if (profile === undefined) throw new Error('fixture profile is missing');
+    const localeCompare = vi
+      .spyOn(String.prototype, 'localeCompare')
+      .mockImplementation(() => {
+        throw new Error('locale-dependent comparator used');
+      });
+
+    try {
+      const json = canonicalConfigJson({
+        ...config,
+        models: { standard: profile, ä: profile, z: profile },
+      });
+      expect(json.indexOf('"z"')).toBeLessThan(json.indexOf('"ä"'));
+    } finally {
+      localeCompare.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      invariant: 'agent model reference',
+      yaml: validYaml.replace('model: standard', 'model: missing'),
+    },
+    {
+      invariant: 'agent environment reference',
+      yaml: validYaml.replace(
+        '    model: standard',
+        '    model: standard\n    environment: missing',
+      ),
+    },
+    {
+      invariant: 'pipeline agent reference',
+      yaml: validYaml.replace(
+        '        agent: implementer',
+        '        agent: missing',
+      ),
+    },
+    {
+      invariant: 'pipeline environment reference',
+      yaml: validYaml.replace(
+        '        agent: implementer',
+        '        agent: implementer\n        environment: missing',
+      ),
+    },
+    {
+      invariant: 'pipeline dependency reference',
+      yaml: validYaml.replace(
+        '        agent: implementer',
+        '        agent: implementer\n        dependsOn: [missing]',
+      ),
+    },
+    {
+      invariant: 'pipeline self dependency',
+      yaml: validYaml.replace(
+        '        agent: implementer',
+        '        agent: implementer\n        dependsOn: [implement]',
+      ),
+    },
+    {
+      invariant: 'pipeline dependency cycle',
+      yaml: validYaml.replace(
+        '      - id: implement\n        agent: implementer',
+        '      - id: implement\n        agent: implementer\n        dependsOn: [review]\n      - id: review\n        agent: implementer\n        dependsOn: [implement]',
+      ),
+    },
+  ])('rejects a broken $invariant', ({ yaml }) => {
+    expect(() => loadAgentOsConfig(yaml)).toThrow();
   });
 });

@@ -125,4 +125,39 @@ describe('feature workflow reducer', () => {
       retryCount: 1,
     });
   });
+
+  it('preserves first-crash recovery metadata across repeated crashes and resumes cleanly', () => {
+    let state = replayFeatureWorkflow([event('1', 'specification_completed')], {
+      maxRetries: 2,
+    });
+    state = reduceFeatureWorkflow(state, {
+      id: 'crash-1',
+      type: 'crashed',
+      reason: 'provider disconnected',
+    });
+    state = reduceFeatureWorkflow(state, {
+      id: 'crash-2',
+      type: 'crashed',
+      reason: 'duplicate disconnect notification',
+    });
+
+    expect(state).toMatchObject({
+      status: 'blocked',
+      phase: 'specification_approval',
+      blockedFromStatus: 'awaiting_approval',
+      failureReason: 'provider disconnected',
+      retryCount: 1,
+    });
+
+    state = reduceFeatureWorkflow(state, event('resume', 'resume'));
+    expect(state).toMatchObject({
+      status: 'awaiting_approval',
+      phase: 'specification_approval',
+    });
+    expect(state).not.toHaveProperty('blockedFromStatus');
+    expect(state).not.toHaveProperty('failureReason');
+
+    state = [...happyPath.slice(1)].reduce(reduceFeatureWorkflow, state);
+    expect(state.status).toBe('succeeded');
+  });
 });

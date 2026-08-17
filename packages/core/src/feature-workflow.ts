@@ -159,6 +159,7 @@ export function reduceFeatureWorkflow(
     });
   }
   if (event.type === 'crashed') {
+    if (state.status === 'blocked') return withProcessed(state, event, {});
     const retryCount = state.retryCount + 1;
     if (retryCount > state.maxRetries) {
       return withProcessed(state, event, {
@@ -180,9 +181,16 @@ export function reduceFeatureWorkflow(
       throw new Error(
         `Illegal feature workflow transition from ${state.status} using resume`,
       );
-    return withProcessed(state, event, {
+    return {
+      phase: state.phase,
       status: state.blockedFromStatus ?? 'running',
-    });
+      maxRetries: state.maxRetries,
+      retryCount: state.retryCount,
+      processedEventIds: [...state.processedEventIds, event.id],
+      ...(state.publication === undefined
+        ? {}
+        : { publication: state.publication }),
+    };
   }
   if (state.status === 'blocked') {
     throw new Error(

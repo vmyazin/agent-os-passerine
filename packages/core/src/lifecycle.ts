@@ -156,6 +156,9 @@ export function reduceApproval(
     throw new Error(
       `Terminal approval state ${state.status} cannot transition`,
     );
+  if (event.occurredAt < state.requestedAt) {
+    throw new Error('Approval decision cannot occur before its request time');
+  }
   if (event.type === 'expire' && event.occurredAt < state.expiresAt) {
     throw new Error('Approval cannot expire before its expiry time');
   }

@@ -125,7 +125,128 @@ export const AgentOsConfigSchema = z
     goals: GoalLimitsSchema,
     runtime: RuntimeRoutingSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    for (const [agentName, agent] of Object.entries(config.agents)) {
+      if (!(agent.model in config.models)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['agents', agentName, 'model'],
+          message: `Unknown model profile: ${agent.model}`,
+        });
+      }
+      if (
+        agent.environment !== undefined &&
+        !(agent.environment in config.environments)
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['agents', agentName, 'environment'],
+          message: `Unknown environment: ${agent.environment}`,
+        });
+      }
+    }
+
+    for (const [pipelineName, pipeline] of Object.entries(config.pipelines)) {
+      const stepIndexes = new Map<string, number>();
+      pipeline.steps.forEach((step, stepIndex) => {
+        if (stepIndexes.has(step.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['pipelines', pipelineName, 'steps', stepIndex, 'id'],
+            message: `Duplicate pipeline step id: ${step.id}`,
+          });
+        } else {
+          stepIndexes.set(step.id, stepIndex);
+        }
+        if (!(step.agent in config.agents)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['pipelines', pipelineName, 'steps', stepIndex, 'agent'],
+            message: `Unknown agent: ${step.agent}`,
+          });
+        }
+        if (
+          step.environment !== undefined &&
+          !(step.environment in config.environments)
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: [
+              'pipelines',
+              pipelineName,
+              'steps',
+              stepIndex,
+              'environment',
+            ],
+            message: `Unknown environment: ${step.environment}`,
+          });
+        }
+      });
+
+      pipeline.steps.forEach((step, stepIndex) => {
+        for (const dependency of step.dependsOn) {
+          if (dependency === step.id) {
+            context.addIssue({
+              code: 'custom',
+              path: [
+                'pipelines',
+                pipelineName,
+                'steps',
+                stepIndex,
+                'dependsOn',
+              ],
+              message: `Pipeline step ${step.id} cannot depend on itself`,
+            });
+          } else if (!stepIndexes.has(dependency)) {
+            context.addIssue({
+              code: 'custom',
+              path: [
+                'pipelines',
+                pipelineName,
+                'steps',
+                stepIndex,
+                'dependsOn',
+              ],
+              message: `Unknown pipeline dependency: ${dependency}`,
+            });
+          }
+        }
+      });
+
+      const visiting = new Set<string>();
+      const visited = new Set<string>();
+      const visit = (stepId: string): boolean => {
+        if (visiting.has(stepId)) return true;
+        if (visited.has(stepId)) return false;
+        visiting.add(stepId);
+        const stepIndex = stepIndexes.get(stepId);
+        const step =
+          stepIndex === undefined ? undefined : pipeline.steps[stepIndex];
+        const cyclic =
+          step?.dependsOn.some(
+            (dependency) =>
+              dependency !== stepId &&
+              stepIndexes.has(dependency) &&
+              visit(dependency),
+          ) ?? false;
+        visiting.delete(stepId);
+        visited.add(stepId);
+        return cyclic;
+      };
+
+      for (const [stepId, stepIndex] of stepIndexes) {
+        if (visit(stepId)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['pipelines', pipelineName, 'steps', stepIndex, 'dependsOn'],
+            message: `Pipeline contains a dependency cycle involving ${stepId}`,
+          });
+          break;
+        }
+      }
+    }
+  });
 
 export type AgentOsConfig = z.infer<typeof AgentOsConfigSchema>;
 
@@ -142,7 +263,7 @@ function canonicalize(value: unknown): unknown {
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
         .map(([key, entry]) => [key, canonicalize(entry)]),
     );
   }

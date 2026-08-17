@@ -63,22 +63,33 @@ function globPatternToRegex(pattern: string): RegExp {
   return new RegExp(`${source}$`);
 }
 
-function isMalformedPath(path: string): boolean {
-  if (
-    path.length === 0 ||
-    path.includes('\0') ||
-    path.includes('\\') ||
-    path.startsWith('/')
-  )
-    return true;
-  let decoded: string;
+function normalizeChangePath(path: string): string | undefined {
+  let normalized = path;
+  let fullyDecoded = false;
   try {
-    decoded = decodeURIComponent(path);
+    for (let pass = 0; pass < 16; pass += 1) {
+      const decoded = decodeURIComponent(normalized);
+      if (decoded === normalized) {
+        fullyDecoded = true;
+        break;
+      }
+      normalized = decoded;
+    }
   } catch {
-    return true;
+    return undefined;
   }
-  const parts = decoded.split('/');
-  return parts.some((part) => part === '' || part === '.' || part === '..');
+  if (!fullyDecoded) return undefined;
+  if (
+    normalized.length === 0 ||
+    normalized.includes('\0') ||
+    normalized.includes('\\') ||
+    normalized.startsWith('/')
+  )
+    return undefined;
+  const parts = normalized.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..'))
+    return undefined;
+  return normalized;
 }
 
 export function evaluatePatchPolicy(
@@ -98,7 +109,8 @@ export function evaluatePatchPolicy(
   }
 
   for (const change of manifest.changes) {
-    if (isMalformedPath(change.path)) {
+    const normalizedPath = normalizeChangePath(change.path);
+    if (normalizedPath === undefined) {
       violations.push({
         code: 'malformed_path',
         path: change.path,
@@ -106,7 +118,7 @@ export function evaluatePatchPolicy(
       });
       continue;
     }
-    if (protectedMatchers.some((matcher) => matcher.test(change.path))) {
+    if (protectedMatchers.some((matcher) => matcher.test(normalizedPath))) {
       violations.push({
         code: 'protected_path',
         path: change.path,

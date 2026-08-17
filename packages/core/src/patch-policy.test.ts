@@ -73,4 +73,22 @@ describe('patch policy', () => {
       ).allowed,
     ).toBe(true);
   });
+
+  it.each(['unsafe%00name', 'dir%5Cfile.txt', '%2e%2e/escape.txt'])(
+    'rejects encoded malformed path %s after decoding',
+    (path) => {
+      expect(evaluate([change(path)]).violations[0]?.code).toBe(
+        'malformed_path',
+      );
+    },
+  );
+
+  it.each([
+    '%2eenv',
+    '.github%2Fworkflows/release.yml',
+    'agentos%2Fexample.yaml',
+    '%25252525252eenv',
+  ])('matches protected path %s after decoding', (path) => {
+    expect(evaluate([change(path)]).violations[0]?.code).toBe('protected_path');
+  });
 });

@@ -95,4 +95,27 @@ describe('approval state machine', () => {
       }),
     ).toBe(expired);
   });
+
+  it('rejects approval before it was requested', () => {
+    expect(() =>
+      reduceApproval(approval(), {
+        id: 'early-approve',
+        type: 'approve',
+        actorId: 'operator',
+        occurredAt: new Date('2025-12-31T23:59:59Z'),
+      }),
+    ).toThrow(/before.*request/i);
+  });
+
+  it('rejects rejection before approval was requested', () => {
+    expect(() =>
+      reduceApproval(approval(), {
+        id: 'early-reject',
+        type: 'reject',
+        actorId: 'operator',
+        reason: 'impossible chronology',
+        occurredAt: new Date('2025-12-31T23:59:59Z'),
+      }),
+    ).toThrow(/before.*request/i);
+  });
 });
