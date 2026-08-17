@@ -11,5 +11,8 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@agentos/core": "workspace:*"
   }
 }

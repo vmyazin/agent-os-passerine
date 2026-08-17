@@ -9,6 +9,7 @@ import type {
   ArtifactId,
   ArtifactRecord,
   ConfigRevision,
+  ConfigRevisionDraft,
   ConfigRevisionId,
   ConfigSnapshot,
   ConfigSnapshotId,
@@ -43,7 +44,7 @@ import type {
   WorkflowRunId,
   WorkflowRunUpdate,
 } from '@agentos/core';
-import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, or, sql } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
 
@@ -161,6 +162,34 @@ function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
     isoTimestampEpochMicroseconds(row.recordedAt) ===
       isoTimestampEpochMicroseconds(usage.recordedAt)
   );
+}
+
+function configRevisionMatches(
+  existing: ConfigRevision,
+  requested: ConfigRevisionDraft,
+): boolean {
+  return (
+    existing.id === requested.id &&
+    existing.projectId === requested.projectId &&
+    canonicalJson(existing.config) === canonicalJson(requested.config) &&
+    existing.configDigest === requested.configDigest &&
+    existing.modelDigest === requested.modelDigest &&
+    existing.promptDigest === requested.promptDigest &&
+    existing.environmentDigest === requested.environmentDigest &&
+    existing.policyDigest === requested.policyDigest &&
+    existing.repositorySha === requested.repositorySha
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function databaseSafeInteger(value: unknown, field: string): number {
@@ -284,6 +313,68 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
+  async applyConfigRevision(
+    project: Project,
+    revision: ConfigRevisionDraft,
+  ): Promise<ConfigRevision> {
+    let result: unknown;
+    try {
+      result = await this.database.execute<Record<string, unknown>>(sql`
+        with "configuration_lock" as materialized (
+          select pg_advisory_xact_lock(hashtextextended(${project.id}, 0)) as "held"
+        ),
+        "project_row" as (
+          insert into "projects" ("id", "name", "repository", "created_at", "updated_at")
+          select ${project.id}, ${project.name}, ${project.repository ?? null},
+                 ${project.createdAt}, ${project.updatedAt}
+          from "configuration_lock"
+          on conflict ("id") do update set "id" = excluded."id"
+          returning "id"
+        ),
+        "next_revision" as materialized (
+          select coalesce(max("revision"), 0) + 1 as "revision"
+          from "config_revisions", "project_row"
+          where "project_id" = ${project.id}
+        ),
+        "revision_row" as (
+          insert into "config_revisions" (
+            "id", "project_id", "revision", "config", "config_digest",
+            "model_digest", "prompt_digest", "environment_digest",
+            "policy_digest", "repository_sha", "created_at"
+          )
+          select ${revision.id}, ${revision.projectId}, "next_revision"."revision",
+                 ${jsonbValue(revision.config)}, ${revision.configDigest},
+                 ${revision.modelDigest}, ${revision.promptDigest},
+                 ${revision.environmentDigest}, ${revision.policyDigest},
+                 ${revision.repositorySha}, ${revision.createdAt}
+          from "project_row", "next_revision"
+          on conflict ("id") do update set "id" = excluded."id"
+          returning *
+        )
+        select
+          "id", "project_id" as "projectId", "revision", "config",
+          "config_digest" as "configDigest", "model_digest" as "modelDigest",
+          "prompt_digest" as "promptDigest",
+          "environment_digest" as "environmentDigest",
+          "policy_digest" as "policyDigest", "repository_sha" as "repositorySha",
+          to_char("created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt"
+        from "revision_row"
+      `);
+    } catch (error) {
+      if (hasDatabaseError(error, 'config_revisions_project_revision_unique')) {
+        throw new IdempotencyConflictError('Config revision', revision.id);
+      }
+      throw error;
+    }
+    const created = mapConfigRevisionRow(
+      one(executionRows(result), 'Config revision'),
+    );
+    if (!configRevisionMatches(created, revision)) {
+      throw new IdempotencyConflictError('Config revision', revision.id);
+    }
+    return created;
+  }
+
   async getConfigRevision(
     id: ConfigRevisionId,
   ): Promise<ConfigRevision | undefined> {
@@ -291,6 +382,19 @@ export class NeonDomainRepository implements DomainRepository {
       .select(configRevisionSelection)
       .from(configRevisions)
       .where(eq(configRevisions.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapConfigRevisionRow(row);
+  }
+
+  async getLatestConfigRevision(): Promise<ConfigRevision | undefined> {
+    const [row] = await this.database
+      .select(configRevisionSelection)
+      .from(configRevisions)
+      .orderBy(
+        desc(configRevisions.createdAt),
+        desc(configRevisions.revision),
+        desc(bytewiseText(configRevisions.id)),
+      )
       .limit(1);
     return row === undefined ? undefined : mapConfigRevisionRow(row);
   }

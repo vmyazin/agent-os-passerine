@@ -46,6 +46,43 @@ function event(id: string, type: string, fingerprint = `sha256:${id}`) {
 }
 
 describe('atomic mutation outbox contract', () => {
+  it('atomically records and replays an immutable configuration revision', async () => {
+    const repository = new InMemoryDomainRepository();
+    const project = {
+      id: persistenceId('project', 'configuration-project'),
+      name: 'Configuration Project',
+      createdAt: at,
+      updatedAt: at,
+    };
+    const revision = {
+      id: persistenceId('configRevision', 'configuration-revision'),
+      projectId: project.id,
+      config: { version: 1 },
+      configDigest: 'config',
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      repositorySha: '0'.repeat(40),
+      createdAt: at,
+    } as const;
+
+    const first = await repository.applyConfigRevision(project, revision);
+    const replay = await repository.applyConfigRevision(project, revision);
+
+    expect(replay).toEqual(first);
+    expect(first.revision).toBe(1);
+    await expect(repository.listConfigRevisions(project.id)).resolves.toEqual([
+      first,
+    ]);
+    await expect(
+      repository.applyConfigRevision(project, {
+        ...revision,
+        configDigest: 'changed',
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
   it('atomically replays concurrent run creation and rejects changed payloads', async () => {
     const repository = await seededRepository();
     const candidate = {

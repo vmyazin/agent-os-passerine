@@ -37,7 +37,10 @@ export default async function InboxPage() {
                 <dt>Expires</dt>
                 <dd>{approval.expiresAt}</dd>
               </dl>
-              <ApprovalActions approvalId={approval.id} />
+              <ApprovalActions
+                approvalId={approval.id}
+                scopeHash={approval.scopeHash}
+              />
             </article>
           ))}
           {messages.map((message) => (

@@ -1,0 +1,156 @@
+import {
+  canonicalConfigHash,
+  canonicalConfigJson,
+  loadAgentOsConfig,
+} from '@agentos/core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { GET } from '../../app/api/configuration/route';
+import { POST } from '../../app/api/configuration/apply/route';
+import { GET as getInbox } from '../../app/api/inbox/route';
+import { resetControlPlaneServiceForTests } from '../application/runtime';
+import {
+  repositoryFromEnv,
+  resetRepositoryForTests,
+} from '../persistence/repository-factory';
+
+const config = loadAgentOsConfig(`
+version: 1
+project: { name: Route Test }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+const body = {
+  canonicalConfig: canonicalConfigJson(config),
+  digest: canonicalConfigHash(config),
+};
+
+function request(path: string, options: RequestInit = {}) {
+  return new Request(`https://control.example${path}`, {
+    ...options,
+    headers: {
+      authorization: 'Bearer route-token',
+      'content-type': 'application/json',
+      ...options.headers,
+    },
+  });
+}
+
+describe('configuration API routes', () => {
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('AGENTOS_REPOSITORY', 'memory');
+    vi.stubEnv('AGENTOS_PUBLIC_URL', 'https://control.example');
+    vi.stubEnv('AGENTOS_SESSION_SECRET', 'x'.repeat(32));
+    vi.stubEnv('GITHUB_CLIENT_ID', 'client');
+    vi.stubEnv('GITHUB_CLIENT_SECRET', 'secret');
+    vi.stubEnv('GITHUB_ALLOWED_LOGIN', 'operator');
+    vi.stubEnv('AGENTOS_CLI_TOKEN', 'route-token');
+    resetRepositoryForTests();
+    resetControlPlaneServiceForTests();
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('authenticates GET and returns a safe empty/active projection', async () => {
+    const unauthorized = await GET(
+      new Request('https://control.example/api/configuration'),
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const empty = await GET(request('/api/configuration'));
+    await expect(empty.json()).resolves.toEqual({ active: null });
+
+    const applied = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'route-apply' },
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(applied.status).toBe(201);
+    const projected = await applied.json();
+    expect(projected).toMatchObject({
+      canonicalConfig: body.canonicalConfig,
+      digest: body.digest,
+      projectId: expect.any(String),
+      revision: 1,
+    });
+    expect(projected).not.toHaveProperty('id');
+    expect(projected).not.toHaveProperty('repositorySha');
+
+    const active = await GET(request('/api/configuration'));
+    await expect(active.json()).resolves.toEqual({ active: projected });
+  });
+
+  it('lists messages and pending approvals with their required scope hashes', async () => {
+    const repository = repositoryFromEnv();
+    const now = '2026-08-17T12:00:00.000Z' as never;
+    const projectId = 'project_inbox' as never;
+    const runId = 'run_inbox' as never;
+    await repository.createProject({
+      id: projectId,
+      name: 'Inbox',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createInboxMessage({
+      id: 'inbox_message' as never,
+      runId,
+      status: 'pending',
+      body: { question: 'Continue?' },
+      createdAt: now,
+    });
+    await repository.createApproval({
+      id: 'approval_inbox' as never,
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'scope-hash-42',
+      status: 'pending',
+      createdAt: now,
+      expiresAt: '2026-08-18T12:00:00.000Z' as never,
+    });
+
+    const response = await getInbox(request('/api/inbox'));
+    await expect(response.json()).resolves.toMatchObject({
+      messages: [{ id: 'inbox_message' }],
+      approvals: [{ id: 'approval_inbox', scopeHash: 'scope-hash-42' }],
+    });
+  });
+
+  it('replays apply and rejects changed payloads, unknown fields, and missing keys', async () => {
+    const apply = (requestBody: unknown, key = 'route-apply') =>
+      POST(
+        request('/api/configuration/apply', {
+          method: 'POST',
+          headers: key ? { 'idempotency-key': key } : {},
+          body: JSON.stringify(requestBody),
+        }),
+      );
+    const first = await apply(body);
+    const replay = await apply(body);
+    expect(await replay.json()).toEqual(await first.json());
+
+    const missingKey = await apply(body, '');
+    expect(missingKey.status).toBe(400);
+    const unknown = await apply(
+      { ...body, token: 'must-not-be-accepted' },
+      'unknown',
+    );
+    expect(unknown.status).toBe(422);
+  });
+});

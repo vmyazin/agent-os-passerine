@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import type {
   Approval,
+  AgentOsConfig,
+  ConfigRevision,
   DomainEvent,
   DomainEventDraft,
   DomainRepository,
@@ -14,7 +16,12 @@ import type {
   RunStatus,
   WorkflowRun,
 } from '@agentos/core';
-import { persistenceId } from '@agentos/core';
+import {
+  canonicalConfigHash,
+  canonicalConfigJson,
+  loadAgentOsConfig,
+  persistenceId,
+} from '@agentos/core';
 
 export type IdGenerator = <Kind extends PersistenceIdKind>(
   kind: Kind,
@@ -36,6 +43,19 @@ export interface CreateRunInput extends PersistenceDigests {
   readonly projectId: string;
   readonly title: string;
   readonly description: string;
+}
+
+export interface ConfigurationInput {
+  readonly canonicalConfig: string;
+  readonly digest: string;
+}
+
+export interface ConfigurationProjection {
+  readonly canonicalConfig?: string;
+  readonly projectId: string;
+  readonly digest: string;
+  readonly revision: number;
+  readonly appliedAt: IsoTimestamp;
 }
 
 const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
@@ -106,6 +126,40 @@ function canonical(value: unknown): string {
 
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex');
+}
+
+function configurationProjection(
+  revision: ConfigRevision,
+  includeCanonical = true,
+): ConfigurationProjection {
+  return {
+    ...(includeCanonical
+      ? { canonicalConfig: canonical(revision.config) }
+      : {}),
+    projectId: revision.projectId,
+    digest: revision.configDigest,
+    revision: revision.revision,
+    appliedAt: revision.createdAt,
+  };
+}
+
+function configurationDigests(
+  config: AgentOsConfig,
+): Omit<PersistenceDigests, 'configDigest'> {
+  return {
+    modelDigest: fingerprint(config.models),
+    promptDigest: fingerprint(
+      Object.fromEntries(
+        Object.entries(config.agents).map(([name, agent]) => [
+          name,
+          agent.prompt ?? '',
+        ]),
+      ),
+    ),
+    environmentDigest: fingerprint(config.environments),
+    policyDigest: fingerprint(config.policies),
+    repositorySha: '0'.repeat(40),
+  };
 }
 
 export interface SafeInboxContent {
@@ -335,6 +389,89 @@ export class ControlPlaneService {
     private readonly generateId: IdGenerator,
   ) {}
 
+  async getConfiguration(includeCanonical = true): Promise<{
+    readonly active: ConfigurationProjection | null;
+  }> {
+    const active = await this.repository.getLatestConfigRevision();
+    return {
+      active:
+        active === undefined
+          ? null
+          : configurationProjection(active, includeCanonical),
+    };
+  }
+
+  async applyConfiguration(
+    idempotencyKey: string,
+    input: ConfigurationInput,
+  ): Promise<ConfigurationProjection> {
+    let config: AgentOsConfig;
+    try {
+      config = loadAgentOsConfig(input.canonicalConfig);
+    } catch {
+      throw new ServiceError(
+        'configuration_invalid',
+        'configuration did not match the v1 schema',
+        422,
+      );
+    }
+    const canonicalConfig = canonicalConfigJson(config);
+    const digest = canonicalConfigHash(config);
+    if (input.canonicalConfig !== canonicalConfig) {
+      throw new ServiceError(
+        'configuration_not_canonical',
+        'configuration must use canonical JSON',
+        422,
+      );
+    }
+    if (input.digest !== digest) {
+      throw new ServiceError(
+        'configuration_digest_mismatch',
+        'configuration digest does not match the payload',
+        422,
+      );
+    }
+    const now = this.clock();
+    const projectId = this.generateId(
+      'project',
+      `configuration:${config.project.name}`,
+    );
+    try {
+      const revision = await this.repository.applyConfigRevision(
+        {
+          id: projectId,
+          name: config.project.name,
+          ...(config.project.repository === undefined
+            ? {}
+            : { repository: config.project.repository }),
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: this.generateId(
+            'configRevision',
+            `configuration:${idempotencyKey}`,
+          ),
+          projectId,
+          config: JSON.parse(canonicalConfig) as JsonValue,
+          configDigest: digest,
+          ...configurationDigests(config),
+          createdAt: now,
+        },
+      );
+      return configurationProjection(revision);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'IdempotencyConflictError') {
+        throw new ServiceError(
+          'idempotency_conflict',
+          'idempotency key was already used with another configuration',
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
   createFeatureRun(idempotencyKey: string, input: CreateRunInput) {
     return this.createRun('feature', idempotencyKey, input);
   }
@@ -458,8 +595,19 @@ export class ControlPlaneService {
     id: string,
     decision: 'approve' | 'reject',
     idempotencyKey: string,
+    expectedScopeHash?: string,
   ): Promise<ApprovalProjection> {
     const approval = await this.getApprovalRecord(id);
+    if (
+      expectedScopeHash !== undefined &&
+      expectedScopeHash !== approval.fingerprint
+    ) {
+      throw new ServiceError(
+        'approval_scope_mismatch',
+        'approval scope hash does not match',
+        409,
+      );
+    }
     if (approval.status === 'expired') {
       throw new ServiceError('approval_expired', 'approval expired', 409);
     }

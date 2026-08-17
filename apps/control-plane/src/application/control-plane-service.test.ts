@@ -1,5 +1,11 @@
 import { InMemoryDomainRepository } from '@agentos/adapters';
-import { persistenceId, isoTimestamp } from '@agentos/core';
+import {
+  canonicalConfigHash,
+  canonicalConfigJson,
+  loadAgentOsConfig,
+  persistenceId,
+  isoTimestamp,
+} from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
 import { ControlPlaneService, ServiceError } from './control-plane-service';
@@ -23,6 +29,130 @@ const feature = {
 };
 
 describe('ControlPlaneService', () => {
+  it('records configuration immutably and replays the same apply key', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Passerine }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const input = {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+    };
+
+    const first = await service.applyConfiguration('apply-key', input);
+    const replay = await createService(repository).applyConfiguration(
+      'apply-key',
+      input,
+    );
+
+    expect(replay).toEqual(first);
+    expect(first).toMatchObject({
+      digest: input.digest,
+      projectId: expect.stringMatching(/^project-/),
+      revision: 1,
+    });
+    expect(await service.getConfiguration()).toEqual({ active: first });
+    expect(await service.getConfiguration(false)).toEqual({
+      active: {
+        projectId: first.projectId,
+        digest: first.digest,
+        revision: first.revision,
+        appliedAt: first.appliedAt,
+      },
+    });
+    const projects = await repository.listProjects();
+    expect(projects).toHaveLength(1);
+    await expect(
+      repository.listConfigRevisions(projects[0]!.id),
+    ).resolves.toHaveLength(1);
+  });
+
+  it('rejects changed configuration under a used apply key and invalid digests', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Passerine }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const canonicalConfig = canonicalConfigJson(config);
+    await service.applyConfiguration('apply-key', {
+      canonicalConfig,
+      digest: canonicalConfigHash(config),
+    });
+
+    await expect(
+      service.applyConfiguration('apply-key', {
+        canonicalConfig: canonicalConfig.replace(
+          '"concurrency":1',
+          '"concurrency":2',
+        ),
+        digest: '0'.repeat(64),
+      }),
+    ).rejects.toMatchObject({
+      code: 'configuration_digest_mismatch',
+      status: 422,
+    });
+    const changed = loadAgentOsConfig(
+      canonicalConfig.replace('"maxSteps":2', '"maxSteps":3'),
+    );
+    await expect(
+      service.applyConfiguration('apply-key', {
+        canonicalConfig: canonicalConfigJson(changed),
+        digest: canonicalConfigHash(changed),
+      }),
+    ).rejects.toMatchObject({ code: 'idempotency_conflict', status: 409 });
+  });
+
+  it('returns the newest active configuration beyond one page of revisions', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'many-revisions');
+    await repository.createProject({
+      id: projectId,
+      name: 'Many revisions',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let revision = 1; revision <= 1_001; revision += 1) {
+      await repository.createConfigRevision({
+        id: persistenceId('configRevision', `revision-${String(revision)}`),
+        projectId,
+        revision,
+        config: { version: revision },
+        configDigest: `config-${String(revision)}`,
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: '0'.repeat(40),
+        createdAt: now,
+      });
+    }
+
+    await expect(
+      createService(repository).getConfiguration(),
+    ).resolves.toMatchObject({
+      active: { digest: 'config-1001', revision: 1_001 },
+    });
+  });
+
   it('creates a feature idempotently across service restarts', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({
@@ -415,5 +545,45 @@ describe('ControlPlaneService', () => {
       service.consumeApproval('single-decision', 'reject', 'reject-key'),
     ).rejects.toMatchObject({ code: 'approval_already_decided' });
     await expect(repository.listEvents(runId)).resolves.toHaveLength(1);
+  });
+
+  it('rejects an approval decision when the supplied scope hash is stale', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'stale-scope-run');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'stale-scope'),
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'current-scope-hash',
+      status: 'pending',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+
+    await expect(
+      createService(repository).consumeApproval(
+        'stale-scope',
+        'approve',
+        'decision-key',
+        'stale-scope-hash',
+      ),
+    ).rejects.toMatchObject({ code: 'approval_scope_mismatch', status: 409 });
+    await expect(
+      repository.getApproval(persistenceId('approval', 'stale-scope')),
+    ).resolves.toMatchObject({ status: 'pending' });
   });
 });

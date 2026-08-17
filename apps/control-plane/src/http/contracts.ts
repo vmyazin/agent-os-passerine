@@ -23,7 +23,28 @@ export const createRunSchema = z
   .strict();
 
 export const emptyMutationSchema = z.object({}).strict();
-export const approvalDecisionSchema = z.object({}).strict();
+export const approvalDecisionSchema = z.object({ scopeHash: digest }).strict();
+export const configurationApplySchema = z
+  .object({
+    canonicalConfig: z
+      .string()
+      .min(2)
+      .max(56 * 1024),
+    digest: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export const configurationProjectionSchema = z
+  .object({
+    canonicalConfig: z.string().optional(),
+    projectId: id,
+    digest: z.string().regex(/^[a-f0-9]{64}$/),
+    revision: z.number().int().positive(),
+    appliedAt: z.string(),
+  })
+  .strict();
+export const activeConfigurationSchema = z
+  .object({ active: configurationProjectionSchema.nullable() })
+  .strict();
 export const inboxReplySchema = z
   .object({
     reply: z.union([
@@ -146,6 +167,13 @@ export const inboxMessageSchema = z
       .optional(),
     createdAt: z.string(),
     repliedAt: z.string().optional(),
+  })
+  .strict();
+
+export const inboxListingSchema = z
+  .object({
+    messages: z.array(inboxMessageSchema),
+    approvals: z.array(approvalSchema),
   })
   .strict();
 

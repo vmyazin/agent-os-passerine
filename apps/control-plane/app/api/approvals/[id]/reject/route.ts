@@ -20,11 +20,12 @@ export async function POST(
       body: approvalDecisionSchema,
       output: approvalSchema,
     },
-    async () => {
+    async (body) => {
       return controlPlaneService().consumeApproval(
         boundedPathId(id),
         'reject',
         idempotencyKey(request),
+        body.scopeHash,
       );
     },
   );

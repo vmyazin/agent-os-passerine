@@ -31,8 +31,10 @@ function useMutation() {
 
 export function ApprovalActions({
   approvalId,
+  scopeHash,
 }: {
   readonly approvalId: string;
+  readonly scopeHash: string;
 }) {
   const { message, mutate, pending, statusRef } = useMutation();
   return (
@@ -40,7 +42,7 @@ export function ApprovalActions({
       <div className="button-row">
         <button
           onClick={() =>
-            void mutate(`/api/approvals/${approvalId}/approve`, {})
+            void mutate(`/api/approvals/${approvalId}/approve`, { scopeHash })
           }
           disabled={pending}
           type="button"
@@ -50,7 +52,9 @@ export function ApprovalActions({
         <button
           className="secondary"
           disabled={pending}
-          onClick={() => void mutate(`/api/approvals/${approvalId}/reject`, {})}
+          onClick={() =>
+            void mutate(`/api/approvals/${approvalId}/reject`, { scopeHash })
+          }
           type="button"
         >
           Reject

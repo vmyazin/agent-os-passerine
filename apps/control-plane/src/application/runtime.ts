@@ -21,3 +21,10 @@ export function controlPlaneService(): ControlPlaneService {
   );
   return service;
 }
+
+export function resetControlPlaneServiceForTests(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('control-plane service reset is test-only');
+  }
+  service = undefined;
+}

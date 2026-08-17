@@ -117,6 +117,44 @@ describe('NeonDomainRepository', () => {
     }
   });
 
+  it('applies configuration with one serialized atomic statement', async () => {
+    const at = isoTimestamp('2026-08-17T12:00:00.000Z');
+    const project = {
+      id: persistenceId('project', 'configuration-project'),
+      name: 'Configuration Project',
+      createdAt: at,
+      updatedAt: at,
+    } as const;
+    const revision = {
+      id: persistenceId('configRevision', 'configuration-revision'),
+      projectId: project.id,
+      config: { version: 1 },
+      configDigest: 'config',
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      repositorySha: '0'.repeat(40),
+      createdAt: at,
+    } as const;
+    const recorded = { ...revision, revision: 1 };
+    const { execute, repository } = repositoryWithRows([recorded]);
+
+    await expect(
+      repository.applyConfigRevision(project, revision),
+    ).resolves.toEqual(recorded);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(executedSql(execute)).toContain('pg_advisory_xact_lock');
+    expect(executedSql(execute)).toContain('on conflict ("id")');
+
+    const conflict = repositoryWithRows([
+      { ...recorded, config: { version: 2 } },
+    ]).repository;
+    await expect(
+      conflict.applyConfigRevision(project, revision),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
   it('fails closed before constructing a client when database configuration is absent', () => {
     expect(() => createNeonDomainRepositoryFromEnv({})).toThrow(
       'DATABASE_URL is required',

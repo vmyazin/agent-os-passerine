@@ -6,6 +6,7 @@ import type {
   ArtifactId,
   ArtifactRecord,
   ConfigRevision,
+  ConfigRevisionDraft,
   ConfigRevisionId,
   ConfigSnapshot,
   ConfigSnapshotId,
@@ -65,6 +66,23 @@ function copy<T>(value: T): T {
 
 function same(left: unknown, right: unknown): boolean {
   return canonical(left) === canonical(right);
+}
+
+function configRevisionMatches(
+  existing: ConfigRevision,
+  requested: ConfigRevisionDraft,
+): boolean {
+  return (
+    existing.id === requested.id &&
+    existing.projectId === requested.projectId &&
+    same(existing.config, requested.config) &&
+    existing.configDigest === requested.configDigest &&
+    existing.modelDigest === requested.modelDigest &&
+    existing.promptDigest === requested.promptDigest &&
+    existing.environmentDigest === requested.environmentDigest &&
+    existing.policyDigest === requested.policyDigest &&
+    existing.repositorySha === requested.repositorySha
+  );
 }
 
 function canonical(value: unknown): string {
@@ -227,11 +245,54 @@ export class InMemoryDomainRepository implements DomainRepository {
     return created;
   }
 
+  async applyConfigRevision(
+    project: Project,
+    revision: ConfigRevisionDraft,
+  ): Promise<ConfigRevision> {
+    const existing = this.#configRevisions.get(revision.id);
+    if (existing !== undefined) {
+      if (!configRevisionMatches(existing, revision)) {
+        throw new IdempotencyConflictError('Config revision', revision.id);
+      }
+      return copy(existing);
+    }
+    const existingProject = this.#projects.get(project.id);
+    if (existingProject !== undefined && !same(existingProject, project)) {
+      throw new IdempotencyConflictError('Project', project.id);
+    }
+    const nextRevision =
+      Math.max(
+        0,
+        ...[...this.#configRevisions.values()]
+          .filter((entry) => entry.projectId === project.id)
+          .map((entry) => entry.revision),
+      ) + 1;
+    const created = { ...revision, revision: nextRevision };
+    assertValidConfigRevision(created);
+    const key = `${project.id}\u0000${String(nextRevision)}`;
+    this.failBeforeCommit('applyConfigRevision');
+    if (existingProject === undefined)
+      this.#projects.set(project.id, copy(project));
+    this.#configRevisions.set(created.id, copy(created));
+    this.#configRevisionKeys.set(key, created.id);
+    return copy(created);
+  }
+
   async getConfigRevision(
     id: ConfigRevisionId,
   ): Promise<ConfigRevision | undefined> {
     const value = this.#configRevisions.get(id);
     return value === undefined ? undefined : copy(value);
+  }
+
+  async getLatestConfigRevision(): Promise<ConfigRevision | undefined> {
+    const latest = [...this.#configRevisions.values()].sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        right.revision - left.revision ||
+        right.id.localeCompare(left.id),
+    )[0];
+    return latest === undefined ? undefined : copy(latest);
   }
 
   async listConfigRevisions(
