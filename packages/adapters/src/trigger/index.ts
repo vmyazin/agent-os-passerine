@@ -10,5 +10,6 @@ export * from './outbox.js';
 export * from './types.js';
 export * from './trigger-adapter.js';
 export * from './task-handler.js';
+export * from './goal-verifier.js';
 export * from './verifier.js';
 export * from './workflow.js';
