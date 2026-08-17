@@ -49,23 +49,27 @@ describe('production feature role isolation', () => {
       expect(() =>
         resolveFeatureRolesFromSnapshot(snapshot(yaml), {
           artifactMcpUrl: 'https://artifacts.test/mcp',
+          verificationRegistryHosts: ['registry.npmjs.org'],
         }),
       ).toThrow(/verification.*secretless|verification.*isolated/i);
     },
   );
 
-  it('forces the accepted verification environment to secretless no-network mode', () => {
+  it('forces secretless verification with only the trusted registry allowlist', () => {
     const roles = resolveFeatureRolesFromSnapshot(
       snapshot('{ runtime: managed }'),
-      { artifactMcpUrl: 'https://artifacts.test/mcp' },
+      {
+        artifactMcpUrl: 'https://artifacts.test/mcp',
+        verificationRegistryHosts: ['registry.npmjs.org'],
+      },
     );
     expect(roles.verification.environment).toMatchObject({
       variables: {},
       networking: {
         type: 'limited',
-        allowedHosts: [],
+        allowedHosts: ['registry.npmjs.org'],
         allowMcpServers: false,
-        allowPackageManagers: false,
+        allowPackageManagers: true,
       },
     });
   });

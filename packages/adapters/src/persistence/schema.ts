@@ -564,18 +564,26 @@ export const usageRecords = pgTable(
       onDelete: 'set null',
     }),
     model: text('model').notNull(),
-    pricingVersion: text('pricing_version').notNull(),
+    pricingVersion: text('pricing_version')
+      .notNull()
+      .default('legacy-pricing-v0'),
     inputTokens: bigint('input_tokens', { mode: 'number' }).notNull(),
     outputTokens: bigint('output_tokens', { mode: 'number' }).notNull(),
     cacheReadInputTokens: bigint('cache_read_input_tokens', {
       mode: 'number',
-    }).notNull(),
+    })
+      .notNull()
+      .default(0),
     cacheCreation5mInputTokens: bigint('cache_creation_5m_input_tokens', {
       mode: 'number',
-    }).notNull(),
+    })
+      .notNull()
+      .default(0),
     cacheCreation1hInputTokens: bigint('cache_creation_1h_input_tokens', {
       mode: 'number',
-    }).notNull(),
+    })
+      .notNull()
+      .default(0),
     runtimeMs: bigint('runtime_ms', { mode: 'number' }).notNull(),
     microdollars: bigint('microdollars', { mode: 'number' }).notNull(),
     recordedAt: instant('recorded_at').notNull(),

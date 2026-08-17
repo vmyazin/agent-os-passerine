@@ -16,6 +16,20 @@ const artifactMigration = readFileSync(
 ).toLowerCase();
 
 describe('domain persistence migration', () => {
+  it('keeps expand-phase usage defaults for version-locked workflow writers', () => {
+    const pricingMigration = readFileSync(
+      resolve(migrationDirectory, '0016_complete_usage_pricing.sql'),
+      'utf8',
+    ).toLowerCase();
+    expect(pricingMigration).toContain(
+      '"pricing_version" text not null default',
+    );
+    expect(pricingMigration).toContain(
+      '"cache_read_input_tokens" bigint not null default 0',
+    );
+    expect(pricingMigration).not.toContain('drop default');
+  });
+
   it.each([
     'projects',
     'config_revisions',

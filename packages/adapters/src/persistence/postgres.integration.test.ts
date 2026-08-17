@@ -628,6 +628,27 @@ describePostgres('PostgreSQL persistence integration', () => {
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
+  it('accepts a version-locked legacy usage insert during the expand phase', async () => {
+    const { runId, at } = await seed(`legacy-usage-${randomUUID()}`);
+    const usageId = persistenceId('usage', `legacy-${randomUUID()}`);
+    await client`
+      insert into usage_records
+        (idempotency_id, run_id, model, input_tokens, output_tokens, runtime_ms, microdollars, recorded_at)
+      values
+        (${usageId}, ${runId}, 'legacy/model', 1, 2, 3, 4, ${at})
+    `;
+
+    await expect(repository.listUsage(runId)).resolves.toEqual([
+      expect.objectContaining({
+        idempotencyId: usageId,
+        pricingVersion: 'legacy-pricing-v0',
+        cacheReadInputTokens: 0,
+        cacheCreation5mInputTokens: 0,
+        cacheCreation1hInputTokens: 0,
+      }),
+    ]);
+  });
+
   it('grants exactly one concurrent webhook claim without xmax', async () => {
     const receipt = {
       source: `github-${randomUUID()}`,

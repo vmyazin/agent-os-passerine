@@ -15,7 +15,10 @@ const FEATURE_ROLES: readonly FeatureRole[] = [
 
 export function resolveFeatureRolesFromSnapshot(
   snapshot: ConfigSnapshot,
-  options?: { readonly artifactMcpUrl: string },
+  options?: {
+    readonly artifactMcpUrl: string;
+    readonly verificationRegistryHosts?: readonly string[];
+  },
 ): FeatureWorkflowRoles {
   const config = parseAgentOsConfig(snapshot.config);
   const pipeline = config.pipelines.feature;
@@ -64,6 +67,18 @@ export function resolveFeatureRolesFromSnapshot(
         options === undefined
           ? undefined
           : new URL(options.artifactMcpUrl).hostname;
+      const verificationRegistryHosts = [
+        ...new Set(options?.verificationRegistryHosts ?? []),
+      ];
+      if (
+        role === 'verification' &&
+        verificationRegistryHosts.some(
+          (host) =>
+            host.length > 253 ||
+            !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host),
+        )
+      )
+        throw new Error('verification registry host allowlist is invalid');
       return [
         role,
         {
@@ -95,13 +110,16 @@ export function resolveFeatureRolesFromSnapshot(
                   ...(artifactHost === undefined || role === 'verification'
                     ? []
                     : [artifactHost]),
+                  ...(role === 'verification' ? verificationRegistryHosts : []),
                 ]),
               ],
               allowMcpServers: options !== undefined && role !== 'verification',
               allowPackageManagers:
-                environment.networking?.type === 'limited'
-                  ? environment.networking.allowPackageManagers
-                  : false,
+                role === 'verification'
+                  ? verificationRegistryHosts.length > 0
+                  : environment.networking?.type === 'limited'
+                    ? environment.networking.allowPackageManagers
+                    : false,
             },
             ...(environment.packages === undefined || role === 'verification'
               ? {}

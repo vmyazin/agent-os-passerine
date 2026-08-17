@@ -20,7 +20,10 @@ import {
   ManagedAgentsLimitError,
   ManagedAgentsProviderError,
 } from './errors.js';
-import { normalizeEvent } from './normalization.js';
+import {
+  normalizeEvent,
+  normalizeRuntimeMilliseconds,
+} from './normalization.js';
 import type {
   ManagedAgentsClient,
   ManagedAgentsEvent,
@@ -843,10 +846,9 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       cacheCreation1hInputTokens:
         cache1h +
         (cache5m === 0 && cache1h === 0 ? undifferentiatedCacheCreation : 0),
-      runtimeMs:
-        nonnegative(
-          session.usage.active_seconds ?? session.stats.active_seconds,
-        ) * 1000,
+      runtimeMs: normalizeRuntimeMilliseconds(
+        session.usage.active_seconds ?? session.stats.active_seconds,
+      ),
     };
   }
 

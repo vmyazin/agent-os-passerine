@@ -282,8 +282,17 @@ function normalizedUsage(value: unknown): Record<string, number> {
     cacheCreation1hInputTokens:
       cache1h +
       (cache5m === 0 && cache1h === 0 ? undifferentiatedCacheCreation : 0),
-    runtimeMs: nonnegativeNumber(value.active_seconds) * 1000,
+    runtimeMs: normalizeRuntimeMilliseconds(value.active_seconds),
   };
+}
+
+export function normalizeRuntimeMilliseconds(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+    throw new Error('Provider runtime usage is invalid');
+  const milliseconds = Math.ceil(value * 1000);
+  if (!Number.isSafeInteger(milliseconds))
+    throw new Error('Provider runtime usage is invalid');
+  return milliseconds;
 }
 
 function linkedToolId(event: ManagedAgentsEvent): Record<string, string> {

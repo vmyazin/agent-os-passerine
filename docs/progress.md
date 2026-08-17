@@ -28,7 +28,8 @@ Last reviewed: 2026-08-17
    persistent fair reconciliation cursor. Current hardening also includes
    complete prompt-cache pricing, delayed independent absence confirmation,
    a separate read-only source GitHub App identity, safe apply-to-start
-   provenance projection, and a one-MiB source-bundle transport limit.
+   provenance projection, a one-MiB source-bundle transport limit, and a
+   secretless frozen-lockfile verifier with a trusted registry allowlist.
 
 ## Verification boundary
 

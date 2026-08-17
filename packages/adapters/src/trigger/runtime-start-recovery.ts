@@ -69,6 +69,7 @@ export function createRuntimeStartRecoveryResolver(options: {
   readonly repository: DomainRepository;
   readonly checkpoints: WorkflowCheckpointStore;
   readonly artifactMcpUrl: string;
+  readonly verificationRegistryHosts?: readonly string[];
 }) {
   return Object.freeze({
     async resolve(input: {
@@ -98,6 +99,11 @@ export function createRuntimeStartRecoveryResolver(options: {
       const snapshot = snapshots[0]!;
       const roles = resolveFeatureRolesFromSnapshot(snapshot, {
         artifactMcpUrl: options.artifactMcpUrl,
+        ...(options.verificationRegistryHosts === undefined
+          ? {}
+          : {
+              verificationRegistryHosts: options.verificationRegistryHosts,
+            }),
       });
       const role = roleForStep(step.stepKey);
       const definition = roles[role];

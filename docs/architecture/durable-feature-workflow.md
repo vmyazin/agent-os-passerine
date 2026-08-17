@@ -29,9 +29,11 @@ session leases.
    step scope. A requested fix gets one fresh
    implementation session followed by a fresh final-review session; a final
    `changes_requested` decision cannot publish.
-5. Verification runs the allowlisted test command in a separate, secretless
-   Managed sandbox with only source/change inputs and Bash. Provider-observed
-   tool-use/result records are bound into a signed, bounded test-report artifact.
+5. Verification runs a trusted frozen-lockfile `pnpm` install followed by the
+   allowlisted test command in a separate, secretless Managed sandbox with only
+   source/change inputs and Bash. It can reach only server-configured package
+   registry hosts; lifecycle scripts are disabled. The provider-observed exact
+   install/test sequence and result are bound into a signed, bounded report.
 6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
    protected-path policy. A trusted publication authority—not an agent—creates
    the publisher input. The GitHub App publisher revalidates the stale base and
@@ -150,7 +152,9 @@ Production feature configuration must contain exact `specification`,
 `planning`, `implementation`, `review`, and `verification` step IDs, each with
 a separate limited-network environment. The first four may use only the
 `artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
-variables, network hosts, package-manager access, or package installation.
+variables, or YAML-selected network/package capabilities. Trusted server
+configuration supplies its exact package-registry allowlist and enables only
+the package manager needed for the frozen-lockfile install.
 Source ingestion additionally requires the distinct
 `GITHUB_READER_APP_ID`, `GITHUB_READER_APP_PRIVATE_KEY`, and
 `GITHUB_READER_SELECTED_REPOSITORIES_JSON`; the reader App ID must differ from
@@ -158,6 +162,11 @@ the publisher App ID. Required
 server-only values include `AGENTOS_ARTIFACT_MCP_URL`,
 `ARTIFACT_CAPABILITY_KEYS_JSON`, `AGENTOS_TEST_REPORT_KEYS_JSON`, and the
 runtime/R2/GitHub credentials documented in `.env.example`.
+
+Migration `0016_complete_usage_pricing.sql` intentionally retains defaults for
+its new usage columns so version-locked older Trigger deployments can finish
+writing during the expand phase. A later contract migration may remove those
+defaults only after old task versions and waitpoints have drained.
 
 `CRON_SECRET` must be 32–256 bytes and protects both internal reconciliation
 and retention routes. Never expose Trigger secrets, waitpoint callback URLs, or

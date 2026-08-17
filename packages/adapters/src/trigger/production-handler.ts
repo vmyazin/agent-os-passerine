@@ -167,14 +167,14 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function exactTrustedCommand(definition: {
+export function exactTrustedCommand(definition: {
   readonly executable: string;
   readonly arguments: readonly string[];
 }): string {
   const invocation = [definition.executable, ...definition.arguments]
     .map(shellQuote)
     .join(' ');
-  return `set +e; rm -rf /workspace/repo; mkdir -p /workspace/repo; node /workspace/inputs/materialize.mjs && cd /workspace/repo && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
+  return `set +e; rm -rf /workspace/repo; mkdir -p /workspace/repo; node /workspace/inputs/materialize.mjs && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
 }
 
 function priceUsage(
@@ -214,6 +214,22 @@ export async function createProductionFeatureWorkflowFromEnv(
   ).toString();
   if (!artifactMcpUrl.startsWith('https://'))
     throw new Error('AGENTOS_ARTIFACT_MCP_URL must use HTTPS');
+  const verificationRegistryHosts = z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(253)
+        .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i),
+    )
+    .min(1)
+    .max(4)
+    .parse(
+      parsedJson<unknown>(
+        environment,
+        'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',
+      ),
+    );
   const artifactCapabilityKeys = parsedJson<ArtifactCapabilityKey[]>(
     environment,
     'ARTIFACT_CAPABILITY_KEYS_JSON',
@@ -447,6 +463,7 @@ export async function createProductionFeatureWorkflowFromEnv(
       };
       const roleDefinitions = resolveFeatureRolesFromSnapshot(snapshot, {
         artifactMcpUrl,
+        verificationRegistryHosts,
       });
       const runtimeAccess = {
         prepare: async (request: {

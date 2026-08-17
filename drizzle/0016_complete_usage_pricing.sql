@@ -1,11 +1,7 @@
 ALTER TABLE "usage_records" ADD COLUMN "pricing_version" text NOT NULL DEFAULT 'legacy-pricing-v0';
-ALTER TABLE "usage_records" ALTER COLUMN "pricing_version" DROP DEFAULT;
 ALTER TABLE "usage_records" ADD COLUMN "cache_read_input_tokens" bigint NOT NULL DEFAULT 0;
-ALTER TABLE "usage_records" ALTER COLUMN "cache_read_input_tokens" DROP DEFAULT;
 ALTER TABLE "usage_records" ADD COLUMN "cache_creation_5m_input_tokens" bigint NOT NULL DEFAULT 0;
-ALTER TABLE "usage_records" ALTER COLUMN "cache_creation_5m_input_tokens" DROP DEFAULT;
 ALTER TABLE "usage_records" ADD COLUMN "cache_creation_1h_input_tokens" bigint NOT NULL DEFAULT 0;
-ALTER TABLE "usage_records" ALTER COLUMN "cache_creation_1h_input_tokens" DROP DEFAULT;
 ALTER TABLE "usage_records" ADD CONSTRAINT "usage_cache_read_nonnegative" CHECK ("usage_records"."cache_read_input_tokens" >= 0);
 ALTER TABLE "usage_records" ADD CONSTRAINT "usage_cache_read_safe_integer" CHECK ("usage_records"."cache_read_input_tokens" <= 9007199254740991);
 ALTER TABLE "usage_records" ADD CONSTRAINT "usage_cache_creation_5m_nonnegative" CHECK ("usage_records"."cache_creation_5m_input_tokens" >= 0);

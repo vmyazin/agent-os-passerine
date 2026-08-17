@@ -4,9 +4,26 @@ import { generateKeyPairSync } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { createProductionFeatureWorkflowFromEnv } from './production-handler.js';
+import {
+  createProductionFeatureWorkflowFromEnv,
+  exactTrustedCommand,
+} from './production-handler.js';
 
 describe('production feature workflow composition', () => {
+  it('builds one observed secretless install-and-test command', () => {
+    const command = exactTrustedCommand({
+      executable: 'pnpm',
+      arguments: ['test'],
+    });
+    expect(command).toContain(
+      'pnpm install --frozen-lockfile --ignore-scripts',
+    );
+    expect(command.indexOf('pnpm install')).toBeLessThan(
+      command.indexOf("'pnpm' 'test'"),
+    );
+    expect(command).toContain('AGENTOS_EXIT_CODE');
+  });
+
   it('fails closed with an actionable, secret-free missing environment error', async () => {
     const error = await createProductionFeatureWorkflowFromEnv({}).catch(
       (reason: unknown) => reason,
@@ -56,6 +73,9 @@ describe('production feature workflow composition', () => {
         AGENTOS_TRUSTED_TEST_COMMANDS_JSON: JSON.stringify({
           'pnpm test': { executable: 'pnpm', arguments: ['test'] },
         }),
+        AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON: JSON.stringify([
+          'registry.npmjs.org',
+        ]),
       }),
     ).resolves.toMatchObject({ run: expect.any(Function) });
   });

@@ -1631,6 +1631,40 @@ describe('bounded normalization, replay, output, and usage', () => {
     );
   });
 
+  it('ceil-normalizes fractional provider active seconds to integer milliseconds', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    const session = client.sessions.get(handle.id)!;
+    session.usage.active_seconds = 1.001;
+    await expect(provider.usage(handle)).resolves.toMatchObject({
+      runtimeMs: 1_001,
+    });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, Number.MAX_VALUE])(
+    'rejects unsafe provider active seconds: %s',
+    async (activeSeconds) => {
+      const { client, provider } = await syncedProvider();
+      const handle = await provider.start({
+        runId: 'run-1',
+        stepId: 'step-1',
+        agentId: 'writer',
+        environmentId: 'node',
+        input: 'work',
+      });
+      client.sessions.get(handle.id)!.usage.active_seconds = activeSeconds;
+      await expect(provider.usage(handle)).rejects.toThrow(
+        'runtime usage is invalid',
+      );
+    },
+  );
+
   it('stops history iteration when cumulative normalized output exceeds the byte cap', async () => {
     const { client, provider } = await syncedProvider(undefined, {
       limits: {

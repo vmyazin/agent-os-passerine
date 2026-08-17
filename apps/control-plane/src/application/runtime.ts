@@ -89,6 +89,27 @@ function trustedReaderConfiguration() {
   };
 }
 
+function verificationRegistryHosts(): readonly string[] {
+  const hosts = parsedRuntimeJson<unknown>(
+    'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',
+  );
+  if (
+    !Array.isArray(hosts) ||
+    hosts.length < 1 ||
+    hosts.length > 4 ||
+    hosts.some(
+      (host) =>
+        typeof host !== 'string' ||
+        host.length > 253 ||
+        !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host),
+    )
+  )
+    throw new Error(
+      'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON must contain 1-4 exact registry hosts',
+    );
+  return hosts;
+}
+
 function cancellationRuntime(): RuntimeProvider {
   let provider: Promise<RuntimeProvider> | undefined;
   const get = () =>
@@ -202,6 +223,7 @@ export function workflowDispatchFromEnv() {
       repository,
       checkpoints,
       artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
+      verificationRegistryHosts: verificationRegistryHosts(),
     }),
     sourceSnapshot,
   });
