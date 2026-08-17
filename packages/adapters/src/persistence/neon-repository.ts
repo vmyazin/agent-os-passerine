@@ -145,14 +145,34 @@ function isPostgresConstraintError(
   error: unknown,
   constraint: string,
 ): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    error.code === '23505' &&
-    'constraint' in error &&
-    error.constraint === constraint
-  );
+  const seen = new Set<object>();
+  let current = error;
+
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (
+      (typeof current !== 'object' || current === null) &&
+      typeof current !== 'function'
+    ) {
+      return false;
+    }
+    if (seen.has(current)) return false;
+    seen.add(current);
+
+    let code: unknown;
+    let currentConstraint: unknown;
+    let cause: unknown;
+    try {
+      code = Reflect.get(current, 'code');
+      currentConstraint = Reflect.get(current, 'constraint');
+      cause = Reflect.get(current, 'cause');
+    } catch {
+      return false;
+    }
+    if (code === '23505' && currentConstraint === constraint) return true;
+    current = cause;
+  }
+
+  return false;
 }
 
 const timestampTypeParsers = {

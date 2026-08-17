@@ -82,6 +82,17 @@ function executedQuery(execute: ReturnType<typeof vi.fn>) {
 
 const runId = persistenceId('run', 'run-1');
 
+function eventWithSequence(sequence = 1) {
+  return {
+    runId,
+    eventId: persistenceId('event', `event-sequence-${String(sequence)}`),
+    fingerprint: `sha256:event-${String(sequence)}`,
+    sequence,
+    type: 'run.updated',
+    occurredAt: isoTimestamp('2026-08-16T12:01:00.000Z'),
+  } as const;
+}
+
 describe('NeonDomainRepository', () => {
   it('does not require or connect to a database during import', () => {
     expect(NeonDomainRepository).toBeTypeOf('function');
@@ -158,6 +169,48 @@ describe('NeonDomainRepository', () => {
       }),
     ).rejects.toBeInstanceOf(EventSequenceConflictError);
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('unwraps a Drizzle query error to map the named sequence constraint', async () => {
+    const postgresError = Object.assign(
+      new Error('duplicate key value violates unique constraint'),
+      {
+        code: '23505',
+        constraint: 'domain_events_run_sequence_unique',
+      },
+    );
+    const query = vi.fn().mockRejectedValue(postgresError);
+    const database = drizzle({ client: { query } as never, schema });
+    const repository = new NeonDomainRepository(database);
+
+    await expect(
+      repository.appendEvent(eventWithSequence(2)),
+    ).rejects.toBeInstanceOf(EventSequenceConflictError);
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops safely on cyclic or hostile error cause chains', async () => {
+    const cyclic = new Error('cyclic');
+    Object.assign(cyclic, { cause: cyclic });
+    const hostile = new Error('hostile');
+    Object.defineProperty(hostile, 'cause', {
+      get() {
+        throw new Error('cause getter must not escape');
+      },
+    });
+
+    for (const error of [cyclic, hostile]) {
+      const execute = vi.fn().mockRejectedValue(error);
+      const repository = new NeonDomainRepository({ execute } as never);
+      let received: unknown;
+      try {
+        await repository.appendEvent(eventWithSequence(3));
+      } catch (caught) {
+        received = caught;
+      }
+      expect(received).toBe(error);
+      expect(execute).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('encodes required top-level JSON null as JSONB on Drizzle inserts', async () => {
