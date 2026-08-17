@@ -30,6 +30,10 @@ Trigger.dev task coordination, the Postgres outbox/checkpoint model, approval
 wake semantics, budgets, and local operations are documented in
 [durable-feature-workflow.md](./durable-feature-workflow.md).
 
+The bounded goal loop — its three-step cap, immutable criterion provenance,
+signed command evidence, child ownership, and replay model — is documented in
+[durable-goal-workflow.md](./durable-goal-workflow.md).
+
 Dependencies point inward: delivery apps and adapters can depend on core, while
 core stays portable. Apps do not import one another, and provider-specific types
 must not leak through public core APIs.
@@ -48,5 +52,6 @@ must not leak through public core APIs.
    recovery, and security controls with end-to-end verification.
 
 The repository now includes the foundation contracts plus the first durable
-control-plane, provider, artifact, and delivery adapters. Later staged pipeline
-and goal-loop behavior still composes through the inward-facing core contracts.
+control-plane, provider, artifact, and delivery adapters, and the bounded goal
+loop that delegates to the feature workflow. Later staged pipeline behavior
+still composes through the inward-facing core contracts.

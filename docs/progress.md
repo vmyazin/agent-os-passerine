@@ -30,6 +30,17 @@ Last reviewed: 2026-08-17
    a separate read-only source GitHub App identity, safe apply-to-start
    provenance projection, a one-MiB source-bundle transport limit, and a
    secretless frozen-lockfile verifier with a trusted registry allowlist.
+6. **Bounded goal loop:** pure three-step goal reducer with canonical event
+   fingerprints and stuck/step-limit detection, immutable criterion provenance
+   bound to one applied configuration revision, idempotent goal
+   criterion/progress records with a legacy fail-closed migration, HMAC
+   kind-separated trusted command verification issuing DoD attestations,
+   replay-safe durable goal coordination over deterministic feature children,
+   goal-owned child dispatch/cancellation protection, pipeline-bound outbox
+   dispatch of `agentos-goal-workflow-v1`, strict fail-closed goal input
+   validation shared by task entry, reconciliation, and durable execution, and
+   a sanitized bounded goal projection with run-page and CLI
+   (`--criteria-json`, `goal show`) parity.
 
 ## Verification boundary
 
@@ -59,10 +70,13 @@ original agent message and the operator's sent reply as visible conversation
 history after reload. The layout stacks without horizontal overflow at a 390 px
 viewport. The approval and reply mutations remain unchanged.
 
+The bounded goal loop is implemented and tested through the same no-cost
+boundary: goal criteria evaluate only signed provider-observed command
+evidence, and no goal Trigger deployment or live goal attempt has been
+exercised in this build.
+
 ## Remaining product stages
 
-- Bounded autonomous goal loop with deterministic DoD criteria and a three-step
-  cap.
 - Broader reliability/security operations: webhook signatures and replay
   protection, dead-letter UI, telemetry, rotation, alerts, and adversarial live
   validation.
