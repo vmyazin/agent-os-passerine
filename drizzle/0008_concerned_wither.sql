@@ -67,7 +67,7 @@ WHERE "run"."id" = "artifact"."run_id"
 	AND "artifact"."cleanup_at" > "artifact"."created_at"
 	AND "artifact"."cleanup_at" <= "artifact"."created_at" + CASE "artifact"."retention_class"
 		WHEN 'working' THEN interval '30 days'
-		ELSE interval '24 hours'
+		ELSE interval '23 hours 45 minutes'
 	END
 	AND "artifact"."digest" ~ '^[0-9a-f]{64}$'
 	AND split_part("artifact"."key", '/', 3) ~ '^[A-Za-z0-9]([A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$'

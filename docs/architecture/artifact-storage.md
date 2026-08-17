@@ -23,12 +23,15 @@ optional full-object `ChecksumSHA256` request shape, while SigV4 still protects
 transport and Agent OS verifies its own SHA-256 before and after storage.
 
 Agent-facing R2 credentials are bucket-scoped to read/write only. The ten-minute
-Vercel cron uses `CRON_SECRET`, an owner-checked Postgres lease renewed between
-bounded 25-item pages, and separate control-plane R2 delete credentials. The
-runtime rejects identical agent/admin access-key IDs. Source bundles and
-cloud-session uploads expire at 23 hours 45 minutes, leaving a cleanup safety
-margin inside the 24-hour requirement; working artifacts expire after 30 days.
-Each deletion records its reason and timestamp in the manifest. Legacy rows without the
+Vercel cron uses `CRON_SECRET`, bounded 25-item pages, and separate control-plane
+R2 delete credentials. Its owner-checked five-minute Postgres lease is renewed
+before and after every four-object concurrency group. Groups are abortable and
+stop with a 30-second margin inside the four-minute execution budget and lease.
+The runtime rejects identical agent/admin access-key IDs. Source bundles and
+cloud-session uploads have a maximum expiry of 23 hours 45 minutes, including
+explicit expiry requests, leaving a cleanup safety margin inside the 24-hour
+requirement; working artifacts expire after 30 days. Each deletion records its
+reason and timestamp in the manifest. Legacy rows without the
 `artifact-manifest-v1` discriminator are excluded from retention scans. Audit
 metadata remains in Postgres after the object is removed.
 

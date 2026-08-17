@@ -388,17 +388,29 @@ export function createR2ArtifactStorageWithDependencies(
   const now = options.now ?? (() => new Date());
   const cursors = options.cursorCodec ?? createArtifactCursorCodec();
 
-  const send = async (command: R2Command): Promise<Record<string, unknown>> => {
+  const send = async (
+    command: R2Command,
+    externalSignal?: AbortSignal,
+  ): Promise<Record<string, unknown>> => {
     let last: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (externalSignal?.aborted)
+        throw Object.assign(new Error('artifact operation aborted'), {
+          name: 'AbortError',
+        });
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      const signal =
+        externalSignal === undefined
+          ? controller.signal
+          : AbortSignal.any([controller.signal, externalSignal]);
       try {
         return await options.client.send(command, {
-          abortSignal: controller.signal,
+          abortSignal: signal,
         });
       } catch (error) {
         last = error;
+        if (externalSignal?.aborted) throw error;
         if (!transient(error) || attempt === attempts) throw error;
         await sleep(baseDelayMs * 2 ** (attempt - 1));
       } finally {
@@ -602,8 +614,18 @@ export function createR2ArtifactStorageWithDependencies(
   });
 
   const admin: ArtifactAdminStore = Object.freeze({
-    async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
+    async delete(
+      key: string,
+      audit?: Omit<ArtifactDeletionAudit, 'key'>,
+      operation?: { readonly signal?: AbortSignal },
+    ) {
       try {
+        if (operation?.signal?.aborted)
+          throw new ArtifactStoreAdapterError(
+            'artifact_store_unavailable',
+            'artifact deletion was cancelled',
+            503,
+          );
         const parts = parseArtifactKey(key);
         const reservationTime = now().toISOString();
         const deletionAudit = {
@@ -618,10 +640,13 @@ export function createR2ArtifactStorageWithDependencies(
           reservationTime,
         );
         if (expected === undefined) return false;
-        await send({
-          kind: 'DeleteObject',
-          input: { Bucket: options.bucket, Key: key },
-        });
+        await send(
+          {
+            kind: 'DeleteObject',
+            input: { Bucket: options.bucket, Key: key },
+          },
+          operation?.signal,
+        );
         await options.manifest.finalizeDeletion(expected, deletionAudit);
         return true;
       } catch (error) {

@@ -200,8 +200,23 @@ export function createDomainArtifactManifestStore(
           'artifact run is outside the requested project',
           403,
         );
+      const existing = await repository.getArtifactByRunKey(
+        persistenceId('run', metadata.runId),
+        logicalKey(metadata),
+      );
+      let authoritative = metadata;
+      if (existing !== undefined) {
+        if (
+          existing.deletedAt !== undefined ||
+          existing.deletionState === 'pending' ||
+          existing.deletionState === 'deleted'
+        )
+          throw deleted();
+        authoritative = metadataFromRecord(existing);
+        if (!equivalent(authoritative, metadata)) throw conflict();
+      }
       const record = await repository.claimArtifactForWrite({
-        artifact: recordFromMetadata(metadata),
+        artifact: recordFromMetadata(authoritative),
         leaseId: lease.leaseId,
         now: isoTimestamp(lease.now),
         expiresAt: isoTimestamp(lease.expiresAt),
@@ -213,7 +228,7 @@ export function createDomainArtifactManifestStore(
       )
         throw deleted();
       const claimed = metadataFromRecord(record);
-      if (!equivalent(claimed, metadata)) throw conflict();
+      if (!equivalent(claimed, authoritative)) throw conflict();
       if (record.writeLeaseId !== lease.leaseId) throw conflict();
       return claimed;
     },
@@ -515,6 +530,7 @@ export interface ArtifactRetentionCleanupResult {
   readonly inspected: number;
   readonly deleted: number;
   readonly failed: number;
+  readonly stopped?: true;
 }
 
 export async function cleanupExpiredArtifacts(options: {
@@ -523,6 +539,8 @@ export async function cleanupExpiredArtifacts(options: {
   readonly now: Date;
   readonly limit?: number;
   readonly concurrency?: number;
+  readonly startGroup?: () => Promise<AbortSignal | false>;
+  readonly finishGroup?: () => Promise<boolean>;
 }): Promise<ArtifactRetentionCleanupResult> {
   const limit = options.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
@@ -534,29 +552,42 @@ export async function cleanupExpiredArtifacts(options: {
   const expired = await options.manifest.listExpired(deletedAt, limit);
   let deleted = 0;
   let failed = expired.invalidCount;
+  let inspected = expired.invalidCount;
+  let stopped = false;
   for (let offset = 0; offset < expired.items.length; offset += concurrency) {
+    const signal = (await options.startGroup?.()) ?? undefined;
+    if (signal === false) {
+      stopped = true;
+      break;
+    }
+    const group = expired.items.slice(offset, offset + concurrency);
     const results = await Promise.all(
-      expired.items
-        .slice(offset, offset + concurrency)
-        .map(async (metadata) => {
-          try {
-            return await options.admin.delete(metadata.key, {
-              deletedAt,
-              reason: 'retention_expired',
-            });
-          } catch {
-            return false;
-          }
-        }),
+      group.map(async (metadata) => {
+        try {
+          return await options.admin.delete(
+            metadata.key,
+            { deletedAt, reason: 'retention_expired' },
+            signal === undefined ? undefined : { signal },
+          );
+        } catch {
+          return false;
+        }
+      }),
     );
+    inspected += group.length;
     for (const removed of results) {
       if (removed) deleted += 1;
       else failed += 1;
     }
+    if (options.finishGroup !== undefined && !(await options.finishGroup())) {
+      stopped = true;
+      break;
+    }
   }
   return Object.freeze({
-    inspected: expired.items.length + expired.invalidCount,
+    inspected,
     deleted,
     failed,
+    ...(stopped ? { stopped: true as const } : {}),
   });
 }

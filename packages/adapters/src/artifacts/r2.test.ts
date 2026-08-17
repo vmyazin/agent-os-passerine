@@ -3,13 +3,19 @@ import { Readable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
 
+import { isoTimestamp, persistenceId } from '@agentos/core';
+
 import { artifactStoreContract } from './artifact-store-contract.js';
 import {
   createR2ArtifactStorageForTest,
   type R2Command,
   type R2SdkClient,
 } from './test-support.js';
-import { createInMemoryArtifactManifestStore } from './manifest.js';
+import { InMemoryDomainRepository } from '../persistence/in-memory.js';
+import {
+  createDomainArtifactManifestStore,
+  createInMemoryArtifactManifestStore,
+} from './manifest.js';
 
 class FakeR2Client implements R2SdkClient {
   readonly objects = new Map<
@@ -26,9 +32,12 @@ class FakeR2Client implements R2SdkClient {
   raceOnPut = false;
   bodyFactory: (() => unknown) | undefined;
   beforePut: (() => Promise<void>) | undefined;
-  beforeDelete: (() => Promise<void>) | undefined;
+  beforeDelete: ((signal?: AbortSignal) => Promise<void>) | undefined;
 
-  async send(command: R2Command): Promise<Record<string, unknown>> {
+  async send(
+    command: R2Command,
+    options?: { readonly abortSignal?: AbortSignal },
+  ): Promise<Record<string, unknown>> {
     this.commands.push(command);
     if (this.failures > 0) {
       this.failures -= 1;
@@ -69,7 +78,7 @@ class FakeR2Client implements R2SdkClient {
         };
       }
       case 'DeleteObject':
-        await this.beforeDelete?.();
+        await this.beforeDelete?.(options?.abortSignal);
         this.objects.delete(key);
         return {};
     }
@@ -99,6 +108,55 @@ function fixture(client = new FakeR2Client()) {
 artifactStoreContract('r2', () => fixture());
 
 describe('R2 artifact storage', () => {
+  it('retries an equivalent durable manifest after the clock advances', async () => {
+    const client = new FakeR2Client();
+    const repository = new InMemoryDomainRepository();
+    await repository.createProject({
+      id: persistenceId('project', 'p'),
+      name: 'retry project',
+      createdAt: isoTimestamp('2026-08-17T00:00:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T00:00:00.000Z'),
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'r'),
+      projectId: persistenceId('project', 'p'),
+      pipeline: 'artifact-retry',
+      status: 'running',
+      createdAt: isoTimestamp('2026-08-17T00:00:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T00:00:00.000Z'),
+    });
+    let clock = new Date('2026-08-17T00:00:00.000Z');
+    const storage = createR2ArtifactStorageForTest({
+      client,
+      bucket: 'agentos-artifacts',
+      manifest: createDomainArtifactManifestStore(repository),
+      now: () => clock,
+      retry: { attempts: 2, baseDelayMs: 0 },
+    });
+    const input = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'retry',
+      version: 1,
+      bytes: new TextEncoder().encode('immutable'),
+      mediaType: 'text/plain',
+    } as const;
+    client.failures = 2;
+    await expect(storage.store.put(input)).rejects.toMatchObject({
+      code: 'artifact_store_unavailable',
+    });
+    clock = new Date('2026-08-17T00:01:00.000Z');
+    await expect(storage.store.put(input)).resolves.toMatchObject({
+      createdAt: '2026-08-17T00:00:00.000Z',
+      expiresAt: '2026-09-16T00:00:00.000Z',
+    });
+    await expect(
+      storage.store.put({
+        ...input,
+        bytes: new TextEncoder().encode('different'),
+      }),
+    ).rejects.toMatchObject({ code: 'artifact_conflict' });
+  });
+
   it('reserves deletion before touching R2 so a concurrent put is rejected', async () => {
     const result = fixture();
     const input = {
@@ -183,6 +241,36 @@ describe('R2 artifact storage', () => {
       result.store.get({ scope: input.scope, key: stored.key }),
     ).resolves.toBeUndefined();
     expect((await result.store.list({ scope: input.scope })).items).toEqual([]);
+  });
+
+  it('propagates cleanup cancellation before deleting the R2 object', async () => {
+    const result = fixture();
+    const stored = await result.store.put({
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'cancel-delete',
+      version: 1,
+      bytes: new TextEncoder().encode('immutable'),
+      mediaType: 'text/plain',
+    });
+    const controller = new AbortController();
+    const started = deferred();
+    result.client.beforeDelete = async (signal) => {
+      started.resolve();
+      await new Promise<void>((_resolve, reject) =>
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true,
+        }),
+      );
+    };
+    const deleting = result.admin.delete(stored.key, undefined, {
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort();
+    await expect(deleting).rejects.toMatchObject({
+      code: 'artifact_store_unavailable',
+    });
+    expect(result.client.objects.has(stored.key)).toBe(true);
   });
 
   it('fails closed on invalid Cloudflare R2 configuration', async () => {

@@ -183,7 +183,17 @@ export function createInMemoryArtifactStorage(
     },
   });
   const admin: ArtifactAdminStore = Object.freeze({
-    async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
+    async delete(
+      key: string,
+      audit?: Omit<ArtifactDeletionAudit, 'key'>,
+      operation?: { readonly signal?: AbortSignal },
+    ) {
+      if (operation?.signal?.aborted)
+        throw new ArtifactStoreAdapterError(
+          'artifact_store_unavailable',
+          'artifact deletion was cancelled',
+          503,
+        );
       const parts = parseArtifactKey(key);
       const reservationTime = now().toISOString();
       const deletedAt = audit?.deletedAt ?? reservationTime;

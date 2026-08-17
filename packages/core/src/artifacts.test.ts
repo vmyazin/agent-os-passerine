@@ -173,11 +173,25 @@ describe('artifact contracts', () => {
             bytes,
             mediaType: 'application/octet-stream',
             retentionClass,
-            expiresAt: '2026-08-18T00:00:00.000Z',
+            expiresAt: '2026-08-17T23:45:00.000Z',
           },
           new Date('2026-08-17T00:00:00.000Z'),
         ).expiresAt,
-      ).toBe('2026-08-18T00:00:00.000Z');
+      ).toBe('2026-08-17T23:45:00.000Z');
+      expect(() =>
+        prepareArtifactPut(
+          {
+            scope,
+            artifactId: 'over-safety-margin',
+            version: 1,
+            bytes,
+            mediaType: 'application/octet-stream',
+            retentionClass,
+            expiresAt: '2026-08-17T23:45:00.001Z',
+          },
+          new Date('2026-08-17T00:00:00.000Z'),
+        ),
+      ).toThrow(/retention/i);
     }
   });
 

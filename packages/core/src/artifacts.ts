@@ -20,15 +20,9 @@ const BINARY_MEDIA_TYPES = new Set([
   'application/x-tar',
 ]);
 const RETENTION_MILLISECONDS = {
-  'source-bundle': 24 * 60 * 60 * 1_000,
-  'cloud-session-upload': 24 * 60 * 60 * 1_000,
-  working: 30 * 24 * 60 * 60 * 1_000,
-} as const;
-const DEFAULT_RETENTION_MILLISECONDS = {
-  ...RETENTION_MILLISECONDS,
-  // Leave a 15-minute enforcement margin for the 10-minute cleanup schedule.
   'source-bundle': (24 * 60 - 15) * 60 * 1_000,
   'cloud-session-upload': (24 * 60 - 15) * 60 * 1_000,
+  working: 30 * 24 * 60 * 60 * 1_000,
 } as const;
 
 export type ArtifactRetentionClass = keyof typeof RETENTION_MILLISECONDS;
@@ -97,6 +91,7 @@ export interface ArtifactAdminStore {
   delete(
     key: string,
     audit?: Omit<ArtifactDeletionAudit, 'key'>,
+    operation?: { readonly signal?: AbortSignal },
   ): Promise<boolean>;
 }
 
@@ -320,13 +315,12 @@ export function prepareArtifactPut(
     throw new ArtifactValidationError('artifact digest does not match bytes');
   const retentionClass = request.retentionClass ?? 'working';
   const retentionMaxMs = RETENTION_MILLISECONDS[retentionClass];
-  const defaultRetentionMs = DEFAULT_RETENTION_MILLISECONDS[retentionClass];
-  if (retentionMaxMs === undefined || defaultRetentionMs === undefined)
+  if (retentionMaxMs === undefined)
     throw new ArtifactValidationError('artifact retention class is invalid');
   const createdAt = new Date(now.getTime()).toISOString();
   const expiresAt = request.expiresAt
     ? timestamp(request.expiresAt, 'expiresAt')
-    : new Date(now.getTime() + defaultRetentionMs).toISOString();
+    : new Date(now.getTime() + retentionMaxMs).toISOString();
   const expiresMs = Date.parse(expiresAt);
   if (expiresMs <= now.getTime() || expiresMs > now.getTime() + retentionMaxMs)
     throw new ArtifactValidationError(

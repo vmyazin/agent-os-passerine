@@ -469,6 +469,12 @@ describePostgres('PostgreSQL persistence integration', () => {
       const recordId = `artifact_${createHash('sha256')
         .update(`${projectId}\0${runId}\0${logicalKey}`)
         .digest('hex')}`;
+      const overMarginDigest = 'b'.repeat(64);
+      const overMarginLogicalKey = `artifact-manifest/v1/${stepId}/over-margin/1`;
+      const overMarginUri = `artifacts/v1/${projectId}/${runId}/${stepId}/over-margin/1/sha256/${overMarginDigest}`;
+      const overMarginRecordId = `artifact_${createHash('sha256')
+        .update(`${projectId}\0${runId}\0${overMarginLogicalKey}`)
+        .digest('hex')}`;
       await upgradeAdmin`
         insert into projects (id, name, created_at, updated_at)
         values (${projectId}, 'upgrade', '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z')
@@ -481,7 +487,8 @@ describePostgres('PostgreSQL persistence integration', () => {
         insert into artifacts
           (id, run_id, key, media_type, size_bytes, digest, uri, retention_class, created_at, cleanup_at)
         values
-          (${recordId}, ${runId}, ${logicalKey}, 'text/plain', 4, ${digest}, ${uri}, 'working', '2026-08-17T00:00:00.000Z', '2026-08-18T00:00:00.000Z'),
+          (${recordId}, ${runId}, ${logicalKey}, 'text/plain', 4, ${digest}, ${uri}, 'source-bundle', '2026-08-17T00:00:00.000Z', '2026-08-17T23:45:00.000Z'),
+          (${overMarginRecordId}, ${runId}, ${overMarginLogicalKey}, 'text/plain', 4, ${overMarginDigest}, ${overMarginUri}, 'source-bundle', '2026-08-17T00:00:00.000Z', '2026-08-17T23:45:00.001Z'),
           ('legacy-row', ${runId}, 'legacy-report', null, null, 'legacy', null, null, '2026-08-17T00:00:00.000Z', '2026-08-18T00:00:00.000Z')
       `;
 
@@ -512,6 +519,11 @@ describePostgres('PostgreSQL persistence integration', () => {
       ).resolves.toHaveLength(1);
       await expect(
         upgradeRepository.getArtifact(persistenceId('artifact', 'legacy-row')),
+      ).resolves.not.toHaveProperty('manifestVersion');
+      await expect(
+        upgradeRepository.getArtifact(
+          persistenceId('artifact', overMarginRecordId),
+        ),
       ).resolves.not.toHaveProperty('manifestVersion');
     } finally {
       await upgradeAdmin.end();

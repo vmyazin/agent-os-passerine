@@ -8,7 +8,13 @@ import {
 import type { ArtifactManifestStore } from '@agentos/core';
 
 import { repositoryFromEnv } from '../persistence/repository-factory';
-import { runArtifactRetentionCleanup } from './artifact-cleanup';
+import {
+  ARTIFACT_RETENTION_CLEANUP_POLICY,
+  runArtifactRetentionCleanup,
+} from './artifact-cleanup';
+
+export const ARTIFACT_RETENTION_CLEANUP_PAGE_LIMIT =
+  ARTIFACT_RETENTION_CLEANUP_POLICY.pageLimit;
 
 function required(
   environment: Readonly<Record<string, string | undefined>>,
@@ -65,6 +71,6 @@ export async function runConfiguredArtifactRetentionCleanup(): Promise<unknown> 
     admin,
     owner: `vercel-cron-${randomUUID()}`,
     now: new Date(),
-    limit: 100,
+    limit: ARTIFACT_RETENTION_CLEANUP_PAGE_LIMIT,
   });
 }

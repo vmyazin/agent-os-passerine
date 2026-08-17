@@ -102,6 +102,7 @@ describe('domain persistence migration', () => {
     expect(artifactMigration).toContain(
       '"artifact"."cleanup_at" > "artifact"."created_at"',
     );
+    expect(artifactMigration).toContain("interval '23 hours 45 minutes'");
     expect(artifactMigration).toContain(
       '"artifact"."digest" = split_part("artifact"."uri", \'/\', 9)',
     );
