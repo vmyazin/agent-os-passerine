@@ -214,7 +214,6 @@ export function repositoryParityContract(
             runId: missingRun,
             eventId: persistenceId('event', 'fk-event'),
             fingerprint: 'fk',
-            sequence: 0,
             type: 'fk',
             occurredAt: at,
           }),
@@ -402,26 +401,31 @@ export function repositoryParityContract(
       ).resolves.toMatchObject({ ordinal: 1 });
     });
 
-    it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-      'rejects invalid event sequence %s',
-      async (sequence) => {
-        const repository = await createRepository();
-        const { runId } = await seed(
-          repository,
-          `${implementation}-event-${String(sequence)}`,
-        );
-        await expect(
-          repository.appendEvent({
-            runId,
-            eventId: persistenceId('event', `invalid-${String(sequence)}`),
-            fingerprint: 'invalid',
-            sequence,
-            type: 'invalid',
-            occurredAt: at,
-          }),
-        ).rejects.toThrow('sequence must be a non-negative safe integer');
-      },
-    );
+    it('allocates monotonically increasing event sequences in the repository', async () => {
+      const repository = await createRepository();
+      const { runId } = await seed(
+        repository,
+        `${implementation}-event-sequence`,
+      );
+      const first = await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', 'allocated-first'),
+        fingerprint: 'allocated-first',
+        type: 'allocated',
+        occurredAt: at,
+      });
+      const second = await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', 'allocated-second'),
+        fingerprint: 'allocated-second',
+        type: 'allocated',
+        occurredAt: at,
+      });
+      expect([first.sequence, second.sequence]).toEqual([1, 2]);
+      await expect(repository.getEvent(runId, second.eventId)).resolves.toEqual(
+        second,
+      );
+    });
 
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
       'rejects invalid artifact size %s',

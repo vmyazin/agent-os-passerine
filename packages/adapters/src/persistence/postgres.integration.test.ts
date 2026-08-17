@@ -13,7 +13,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   EventFingerprintConflictError,
-  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import { NeonDomainRepository } from './neon-repository.js';
@@ -92,7 +91,7 @@ describePostgres('PostgreSQL persistence integration', () => {
     return { projectId, runId, at };
   }
 
-  it('resolves concurrent event replays and both event conflict keys', async () => {
+  it('resolves concurrent event replays and allocates independent sequences', async () => {
     const { runId, at } = await seed(`event-${randomUUID()}`);
     const event = {
       runId,
@@ -119,7 +118,7 @@ describePostgres('PostgreSQL persistence integration', () => {
         eventId: persistenceId('event', 'event-sequence-conflict'),
         fingerprint: 'sha256:sequence',
       }),
-    ).rejects.toBeInstanceOf(EventSequenceConflictError);
+    ).resolves.toMatchObject({ eventId: 'event-sequence-conflict' });
   });
 
   it('resolves concurrent usage replays and rejects changed content', async () => {

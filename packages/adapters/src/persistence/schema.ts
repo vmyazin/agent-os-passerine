@@ -351,6 +351,25 @@ export const domainEvents = pgTable(
   ],
 );
 
+export const runEventSequences = pgTable(
+  'run_event_sequences',
+  {
+    runId: text('run_id')
+      .primaryKey()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    nextSequence: bigint('next_sequence', { mode: 'number' })
+      .notNull()
+      .default(1),
+  },
+  (table) => [
+    check('run_event_sequences_next_positive', sql`${table.nextSequence} > 0`),
+    check(
+      'run_event_sequences_next_safe_integer',
+      sql`${table.nextSequence} <= 9007199254740992`,
+    ),
+  ],
+);
+
 export const artifacts = pgTable(
   'artifacts',
   {

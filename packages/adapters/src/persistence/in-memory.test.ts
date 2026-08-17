@@ -152,13 +152,12 @@ describe('InMemoryDomainRepository', () => {
     expect(await repository.listEvents(run.id)).toEqual([event]);
   });
 
-  it('rejects a different event id at an existing run sequence', async () => {
+  it('allocates the next sequence instead of accepting a caller sequence', async () => {
     const repository = await seededRepository();
     await repository.appendEvent({
       runId: run.id,
       eventId,
       fingerprint: 'sha256:event-one',
-      sequence: 1,
       type: 'run.started',
       occurredAt: isoTimestamp('2026-08-16T12:03:00.000Z'),
     });
@@ -168,11 +167,10 @@ describe('InMemoryDomainRepository', () => {
         runId: run.id,
         eventId: persistenceId('event', 'event-2'),
         fingerprint: 'sha256:event-two',
-        sequence: 1,
         type: 'run.updated',
         occurredAt: isoTimestamp('2026-08-16T12:04:00.000Z'),
       }),
-    ).rejects.toThrow('sequence 1');
+    ).resolves.toMatchObject({ sequence: 2 });
   });
 
   it('consumes only a matching, pending, unexpired approval once', async () => {

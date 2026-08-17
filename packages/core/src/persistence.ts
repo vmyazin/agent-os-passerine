@@ -304,6 +304,9 @@ export interface DomainEvent {
   readonly occurredAt: IsoTimestamp;
 }
 
+/** An event before the repository atomically allocates its per-run sequence. */
+export type DomainEventDraft = Omit<DomainEvent, 'sequence'>;
+
 export interface ArtifactRecord {
   readonly id: ArtifactId;
   readonly runId: WorkflowRunId;
@@ -421,7 +424,24 @@ export interface DomainRepository {
   ): Promise<readonly InboxMessage[]>;
   replyInboxMessage(request: ReplyInboxMessageRequest): Promise<InboxMessage>;
 
-  appendEvent(event: DomainEvent): Promise<DomainEvent>;
+  appendEvent(event: DomainEventDraft): Promise<DomainEvent>;
+  getEvent(
+    runId: WorkflowRunId,
+    eventId: EventId,
+  ): Promise<DomainEvent | undefined>;
+  cancelRunWithEvent(
+    runId: WorkflowRunId,
+    update: WorkflowRunUpdate,
+    event: DomainEventDraft,
+  ): Promise<WorkflowRun>;
+  consumeApprovalWithEvent(
+    request: ConsumeApprovalRequest,
+    event: DomainEventDraft,
+  ): Promise<Approval | undefined>;
+  replyInboxMessageWithEvent(
+    request: ReplyInboxMessageRequest,
+    event: DomainEventDraft,
+  ): Promise<InboxMessage>;
   listEvents(
     runId: WorkflowRunId,
     page?: ListPage<number>,

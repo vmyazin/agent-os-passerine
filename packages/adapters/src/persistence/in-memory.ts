@@ -11,6 +11,7 @@ import type {
   ConfigSnapshotId,
   ConsumeApprovalRequest,
   DomainEvent,
+  DomainEventDraft,
   DomainRepository,
   ExternalSession,
   ExternalSessionId,
@@ -40,7 +41,6 @@ import type {
 
 import {
   EventFingerprintConflictError,
-  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import { boundedListLimit } from './pagination.js';
@@ -64,7 +64,19 @@ function copy<T>(value: T): T {
 }
 
 function same(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return canonical(left) === canonical(right);
+}
+
+function canonical(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function assertPersistenceTimestamps(value: object): void {
@@ -143,15 +155,15 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #configRevisions = new Map<string, ConfigRevision>();
   readonly #configRevisionKeys = new Map<string, string>();
   readonly #configSnapshots = new Map<string, ConfigSnapshot>();
-  readonly #runs = new Map<string, WorkflowRun>();
+  #runs = new Map<string, WorkflowRun>();
   readonly #stepRuns = new Map<string, StepRun>();
   readonly #stepKeys = new Map<string, string>();
   readonly #externalSessions = new Map<string, ExternalSession>();
   readonly #externalSessionKeys = new Map<string, string>();
-  readonly #approvals = new Map<string, Approval>();
-  readonly #inboxMessages = new Map<string, InboxMessage>();
-  readonly #events = new Map<string, DomainEvent>();
-  readonly #eventSequences = new Map<string, string>();
+  #approvals = new Map<string, Approval>();
+  #inboxMessages = new Map<string, InboxMessage>();
+  #events = new Map<string, DomainEvent>();
+  #nextEventSequence = new Map<string, number>();
   readonly #artifacts = new Map<string, ArtifactRecord>();
   readonly #artifactKeys = new Map<string, string>();
   readonly #usage = new Map<string, UsageRecordEntry>();
@@ -159,6 +171,10 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #goalCriteria = new Map<string, GoalCriterion>();
   readonly #goalCriterionKeys = new Map<string, string>();
   readonly #goalProgress = new Map<string, GoalProgress>();
+
+  constructor(
+    private readonly failBeforeCommit: (operation: string) => void = () => {},
+  ) {}
 
   async createProject(project: Project): Promise<Project> {
     return insertUnique(this.#projects, project.id, project, 'Project');
@@ -567,26 +583,189 @@ export class InMemoryDomainRepository implements DomainRepository {
     return copy(replied);
   }
 
-  async appendEvent(event: DomainEvent): Promise<DomainEvent> {
+  #stageEvent(event: DomainEventDraft): {
+    readonly key: string;
+    readonly event: DomainEvent;
+    readonly replay: boolean;
+  } {
     assertPersistenceTimestamps(event);
-    assertValidEvent(event);
     requireEntry(this.#runs, event.runId, 'Run');
     const key = `${event.runId}\u0000${event.eventId}`;
     const existing = this.#events.get(key);
     if (existing !== undefined) {
-      if (existing.fingerprint !== event.fingerprint) {
+      if (
+        existing.fingerprint !== event.fingerprint ||
+        existing.type !== event.type ||
+        !same(existing.payload, event.payload)
+      ) {
         throw new EventFingerprintConflictError(event.runId, event.eventId);
       }
-      return copy(existing);
+      return { key, event: copy(existing), replay: true };
     }
-    const sequenceKey = `${event.runId}\u0000${event.sequence}`;
-    if (this.#eventSequences.has(sequenceKey)) {
-      throw new EventSequenceConflictError(event.runId, event.sequence);
+    const sequence = this.#nextEventSequence.get(event.runId) ?? 1;
+    const staged: DomainEvent = { ...copy(event), sequence };
+    assertValidEvent(staged);
+    return { key, event: staged, replay: false };
+  }
+
+  #applyStagedEvent(
+    staged: {
+      readonly key: string;
+      readonly event: DomainEvent;
+      readonly replay: boolean;
+    },
+    events: Map<string, DomainEvent>,
+    sequences: Map<string, number>,
+  ): void {
+    if (staged.replay) return;
+    events.set(staged.key, copy(staged.event));
+    sequences.set(staged.event.runId, staged.event.sequence + 1);
+  }
+
+  #commitStagedEvent(staged: {
+    readonly key: string;
+    readonly event: DomainEvent;
+    readonly replay: boolean;
+  }): void {
+    if (staged.replay) return;
+    const events = new Map(this.#events);
+    const sequences = new Map(this.#nextEventSequence);
+    this.#applyStagedEvent(staged, events, sequences);
+    this.#events = events;
+    this.#nextEventSequence = sequences;
+  }
+
+  async appendEvent(event: DomainEventDraft): Promise<DomainEvent> {
+    const staged = this.#stageEvent(event);
+    if (!staged.replay) {
+      this.failBeforeCommit('appendEvent');
+      this.#commitStagedEvent(staged);
     }
-    const stored = copy(event);
-    this.#events.set(key, stored);
-    this.#eventSequences.set(sequenceKey, key);
-    return copy(stored);
+    return copy(staged.event);
+  }
+
+  async getEvent(
+    runId: WorkflowRunId,
+    eventId: import('@agentos/core').EventId,
+  ): Promise<DomainEvent | undefined> {
+    const value = this.#events.get(`${runId}\u0000${eventId}`);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async cancelRunWithEvent(
+    runId: WorkflowRunId,
+    update: WorkflowRunUpdate,
+    event: DomainEventDraft,
+  ): Promise<WorkflowRun> {
+    if (event.runId !== runId)
+      throw new Error('event run does not match mutation');
+    const run = requireEntry(this.#runs, runId, 'Run');
+    const staged = this.#stageEvent(event);
+    if (staged.replay) {
+      if (run.status !== 'cancelled')
+        throw new Error('event replay does not match run state');
+      return copy(run);
+    }
+    assertPersistenceTimestamps(update);
+    if (['succeeded', 'failed', 'cancelled'].includes(run.status)) {
+      throw new Error(`Run ${runId} cannot be cancelled`);
+    }
+    const cancelled: WorkflowRun = {
+      ...run,
+      ...copy(update),
+      status: 'cancelled',
+    };
+    const runs = new Map(this.#runs);
+    const events = new Map(this.#events);
+    const sequences = new Map(this.#nextEventSequence);
+    runs.set(runId, cancelled);
+    this.#applyStagedEvent(staged, events, sequences);
+    this.failBeforeCommit('cancelRunWithEvent');
+    this.#runs = runs;
+    this.#events = events;
+    this.#nextEventSequence = sequences;
+    return copy(cancelled);
+  }
+
+  async consumeApprovalWithEvent(
+    request: ConsumeApprovalRequest,
+    event: DomainEventDraft,
+  ): Promise<Approval | undefined> {
+    if (event.runId !== request.runId)
+      throw new Error('event run does not match mutation');
+    assertPersistenceTimestamps(request);
+    const approval = this.#approvals.get(request.approvalId);
+    const staged = this.#stageEvent(event);
+    if (staged.replay) {
+      if (approval?.status !== 'consumed')
+        throw new Error('event replay does not match approval state');
+      return copy(approval);
+    }
+    if (
+      approval === undefined ||
+      approval.runId !== request.runId ||
+      approval.scope !== request.scope ||
+      approval.fingerprint !== request.fingerprint ||
+      approval.status !== 'pending' ||
+      isoTimestampEpochMicroseconds(approval.expiresAt) <=
+        isoTimestampEpochMicroseconds(request.consumedAt)
+    ) {
+      return undefined;
+    }
+    const consumed: Approval = {
+      ...approval,
+      status: 'consumed',
+      consumedAt: request.consumedAt,
+    };
+    const approvals = new Map(this.#approvals);
+    const events = new Map(this.#events);
+    const sequences = new Map(this.#nextEventSequence);
+    approvals.set(approval.id, copy(consumed));
+    this.#applyStagedEvent(staged, events, sequences);
+    this.failBeforeCommit('consumeApprovalWithEvent');
+    this.#approvals = approvals;
+    this.#events = events;
+    this.#nextEventSequence = sequences;
+    return copy(consumed);
+  }
+
+  async replyInboxMessageWithEvent(
+    request: ReplyInboxMessageRequest,
+    event: DomainEventDraft,
+  ): Promise<InboxMessage> {
+    assertPersistenceTimestamps(request);
+    const message = requireEntry(
+      this.#inboxMessages,
+      request.messageId,
+      'Inbox message',
+    );
+    if (event.runId !== message.runId)
+      throw new Error('event run does not match mutation');
+    const staged = this.#stageEvent(event);
+    if (staged.replay) {
+      if (message.status !== 'replied' || !same(message.reply, request.reply))
+        throw new Error('event replay does not match inbox state');
+      return copy(message);
+    }
+    if (message.status !== 'pending') {
+      throw new Error(`Inbox message ${request.messageId} already replied`);
+    }
+    const replied: InboxMessage = {
+      ...message,
+      status: 'replied',
+      reply: copy(request.reply),
+      repliedAt: request.repliedAt,
+    };
+    const inboxMessages = new Map(this.#inboxMessages);
+    const events = new Map(this.#events);
+    const sequences = new Map(this.#nextEventSequence);
+    inboxMessages.set(message.id, copy(replied));
+    this.#applyStagedEvent(staged, events, sequences);
+    this.failBeforeCommit('replyInboxMessageWithEvent');
+    this.#inboxMessages = inboxMessages;
+    this.#events = events;
+    this.#nextEventSequence = sequences;
+    return copy(replied);
   }
 
   async listEvents(

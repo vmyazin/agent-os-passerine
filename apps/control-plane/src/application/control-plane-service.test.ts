@@ -94,6 +94,81 @@ describe('ControlPlaneService', () => {
     expect(JSON.stringify(projection)).toContain('Visible');
   });
 
+  it('uses allowlisted projection DTOs and redacts secret-bearing values', async () => {
+    const repository = new InMemoryDomainRepository();
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const runId = persistenceId('run', 'run-value-secrets');
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'failed',
+      input: {
+        title: 'Deploy with Bearer eyJhbGciOiJIUzI1Ni.secret.signature',
+        description:
+          'credential https://operator:super-secret@example.com and api_key=sk-abcdefghijklmnop123456',
+        providerRequest: { arbitrary: 'must never escape' },
+      },
+      output: {
+        providerPayload: 'must never expose provider output',
+        accessToken: 'ghp_abcdefghijklmnopqrstuvwxyz1234567890',
+      },
+      error: {
+        code: 'provider_failure',
+        message: 'GitHub token github_pat_abcdefghijklmnopqrstuvwxyz_123456',
+        details: [
+          'Authorization: Bearer opaque-cli-token-1234567890',
+          'password=hunter2',
+        ],
+        raw: { response: 'must never expose raw error payload' },
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.appendEvent({
+      runId,
+      eventId: persistenceId('event', 'secret-event'),
+      fingerprint: 'sha256:secret-event',
+      type: 'provider.completed',
+      payload: {
+        message: 'used token ghp_abcdefghijklmnopqrstuvwxyz1234567890',
+        details: ['Bearer opaque-provider-token-1234567890'],
+        providerResponse: {
+          arbitrary: 'must never expose event provider data',
+        },
+      },
+      occurredAt: now,
+    });
+
+    const serialized = JSON.stringify(
+      await createService(repository).getRun('run-value-secrets'),
+    );
+    for (const secret of [
+      'eyJhbGciOiJIUzI1Ni.secret.signature',
+      'super-secret',
+      'sk-abcdefghijklmnop123456',
+      'github_pat_',
+      'ghp_',
+      'opaque-cli-token',
+      'opaque-provider-token',
+      'hunter2',
+      'must never escape',
+      'must never expose provider output',
+      'must never expose raw error payload',
+      'must never expose event provider data',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(serialized).toContain('[REDACTED]');
+    expect(serialized).toContain('provider_failure');
+    expect(serialized).not.toContain('"output"');
+  });
+
   it('replays scoped approval creation after a service restart', async () => {
     const repository = new InMemoryDomainRepository();
     const runId = persistenceId('run', 'approval-run');
@@ -170,6 +245,62 @@ describe('ControlPlaneService', () => {
 
     const events = await repository.listEvents(runId);
     expect(events[0]?.type).toBe('approval.rejected');
+  });
+
+  it('replays an approval decision after restart beyond 1,000 prior events', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'deep-event-run');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let index = 0; index < 1_001; index += 1) {
+      await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', `prior-${String(index)}`),
+        fingerprint: `prior-${String(index)}`,
+        type: 'run.updated',
+        occurredAt: now,
+      });
+    }
+    await repository.createApproval({
+      id: persistenceId('approval', 'deep-approval'),
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'deep-scope-hash',
+      status: 'pending',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+
+    const first = await createService(repository).consumeApproval(
+      'deep-approval',
+      'approve',
+      'deep-decision-key',
+    );
+    const replay = await createService(repository).consumeApproval(
+      'deep-approval',
+      'approve',
+      'deep-decision-key',
+    );
+
+    expect(replay).toEqual(first);
+    await expect(
+      repository.getEvent(
+        runId,
+        ids('event', `event:${runId}:approval:deep-decision-key`) as never,
+      ),
+    ).resolves.toMatchObject({ sequence: 1_002 });
   });
 
   it('rejects a reused inbox idempotency key before mutating another item', async () => {

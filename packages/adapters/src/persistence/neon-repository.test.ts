@@ -8,7 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   EventFingerprintConflictError,
-  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import {
@@ -129,7 +128,6 @@ describe('NeonDomainRepository', () => {
       runId,
       eventId: persistenceId('event', 'event-1'),
       fingerprint: 'sha256:event',
-      sequence: 1,
       type: 'run.started',
       payload: null,
       occurredAt: isoTimestamp('2026-08-16T12:00:00.000Z'),
@@ -138,7 +136,10 @@ describe('NeonDomainRepository', () => {
       { ...event, sequence: '1', payloadPresent: true },
     ]);
 
-    await expect(replay.repository.appendEvent(event)).resolves.toEqual(event);
+    await expect(replay.repository.appendEvent(event)).resolves.toEqual({
+      ...event,
+      sequence: 1,
+    });
     expect(replay.execute).toHaveBeenCalledTimes(1);
     expect(executedSql(replay.execute)).toMatch(
       /insert into "domain_events"[\s\S]*on conflict[\s\S]*do update[\s\S]*returning/,
@@ -146,7 +147,12 @@ describe('NeonDomainRepository', () => {
     expect(executedQuery(replay.execute).params).toContain('null');
 
     const conflict = repositoryWithRows([
-      { ...event, fingerprint: 'sha256:different', payloadPresent: true },
+      {
+        ...event,
+        fingerprint: 'sha256:different',
+        sequence: '1',
+        payloadPresent: true,
+      },
     ]);
     await expect(conflict.repository.appendEvent(event)).rejects.toBeInstanceOf(
       EventFingerprintConflictError,
@@ -164,61 +170,103 @@ describe('NeonDomainRepository', () => {
     await expect(repository.appendEvent(event)).resolves.toEqual(event);
   });
 
-  it('maps a duplicate event sequence to the domain conflict atomically', async () => {
-    const execute = vi.fn().mockRejectedValue(
-      Object.assign(
-        new Error('duplicate key value violates unique constraint'),
-        {
-          code: '23505',
-          constraint: 'domain_events_run_sequence_unique',
-        },
-      ),
-    );
-    const repository = new NeonDomainRepository({ execute } as never);
-
-    await expect(
-      repository.appendEvent({
-        runId,
-        eventId: persistenceId('event', 'event-with-duplicate-sequence'),
-        fingerprint: 'sha256:event-two',
-        sequence: 1,
-        type: 'run.updated',
-        occurredAt: isoTimestamp('2026-08-16T12:01:00.000Z'),
-      }),
-    ).rejects.toBeInstanceOf(EventSequenceConflictError);
-    expect(execute).toHaveBeenCalledTimes(1);
-  });
-
-  it('unwraps a Drizzle query error to map the named sequence constraint', async () => {
-    const postgresError = Object.assign(
-      new Error('duplicate key value violates unique constraint'),
+  it('uses one data-modifying CTE for each mutation and its audit event', async () => {
+    const occurredAt = isoTimestamp('2026-08-16T12:01:00.000Z');
+    const event = {
+      runId,
+      eventId: persistenceId('event', 'atomic-event'),
+      fingerprint: 'sha256:atomic',
+      type: 'atomic.changed',
+      payload: { messageId: 'message-1' },
+      occurredAt,
+    } as const;
+    const run = repositoryWithRows([
       {
-        code: '23505',
-        constraint: 'domain_events_run_sequence_unique',
+        id: runId,
+        projectId: 'project-1',
+        pipeline: 'feature',
+        status: 'cancelled',
+        input: null,
+        inputPresent: false,
+        output: null,
+        outputPresent: false,
+        error: null,
+        errorPresent: false,
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+        completedAt: occurredAt,
+        eventFingerprint: event.fingerprint,
+        eventType: event.type,
+        eventPayload: event.payload,
       },
+    ]);
+    await run.repository.cancelRunWithEvent(
+      runId,
+      { status: 'cancelled', updatedAt: occurredAt, completedAt: occurredAt },
+      event,
     );
-    const query = vi.fn().mockRejectedValue(postgresError);
-    const database = drizzle({ client: { query } as never, schema });
-    const repository = new NeonDomainRepository(database);
+    expect(run.execute).toHaveBeenCalledTimes(1);
+    expect(executedSql(run.execute)).toMatch(
+      /with existing[\s\S]*update "workflow_runs"[\s\S]*insert into "domain_events"/,
+    );
 
-    await expect(
-      repository.appendEvent(eventWithSequence(2)),
-    ).rejects.toBeInstanceOf(EventSequenceConflictError);
-    expect(query).toHaveBeenCalledTimes(1);
-  });
+    const approval = repositoryWithRows([
+      {
+        id: 'approval-1',
+        runId,
+        scope: 'merge:42',
+        fingerprint: 'scope-hash',
+        status: 'consumed',
+        createdAt: occurredAt,
+        expiresAt: isoTimestamp('2026-08-17T12:01:00.000Z'),
+        consumedAt: occurredAt,
+        eventFingerprint: event.fingerprint,
+        eventType: event.type,
+        eventPayload: event.payload,
+      },
+    ]);
+    await approval.repository.consumeApprovalWithEvent(
+      {
+        approvalId: persistenceId('approval', 'approval-1'),
+        runId,
+        scope: 'merge:42',
+        fingerprint: 'scope-hash',
+        consumedAt: occurredAt,
+      },
+      event,
+    );
+    expect(approval.execute).toHaveBeenCalledTimes(1);
+    expect(executedSql(approval.execute)).toMatch(
+      /update "approvals"[\s\S]*insert into "domain_events"/,
+    );
 
-  it('maps postgres-js constraint_name errors from the integration path', async () => {
-    const postgresError = Object.assign(new Error('duplicate sequence'), {
-      code: '23505',
-      constraint_name: 'domain_events_run_sequence_unique',
-    });
-    const query = vi.fn().mockRejectedValue(postgresError);
-    const database = drizzle({ client: { query } as never, schema });
-    const repository = new NeonDomainRepository(database);
-
-    await expect(
-      repository.appendEvent(eventWithSequence(4)),
-    ).rejects.toBeInstanceOf(EventSequenceConflictError);
+    const inbox = repositoryWithRows([
+      {
+        id: 'message-1',
+        runId,
+        status: 'replied',
+        body: { question: 'Proceed?' },
+        reply: { answer: 'yes' },
+        replyPresent: true,
+        createdAt: occurredAt,
+        repliedAt: occurredAt,
+        eventFingerprint: event.fingerprint,
+        eventType: event.type,
+        eventPayload: event.payload,
+      },
+    ]);
+    await inbox.repository.replyInboxMessageWithEvent(
+      {
+        messageId: persistenceId('inboxMessage', 'message-1'),
+        reply: { answer: 'yes' },
+        repliedAt: occurredAt,
+      },
+      event,
+    );
+    expect(inbox.execute).toHaveBeenCalledTimes(1);
+    expect(executedSql(inbox.execute)).toMatch(
+      /update "inbox_messages"[\s\S]*insert into "domain_events"/,
+    );
   });
 
   it('stops safely on cyclic or hostile error cause chains', async () => {

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type {
   Approval,
   DomainEvent,
+  DomainEventDraft,
   DomainRepository,
   InboxMessage,
   IsoTimestamp,
@@ -37,20 +38,55 @@ export interface CreateRunInput extends PersistenceDigests {
   readonly description: string;
 }
 
-const SENSITIVE_KEY =
-  /(?:secret|token|password|authorization|cookie|stack|idempotency|chain.?of.?thought|reasoning|private.?key)/i;
+const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
+  [/\bBearer\s+[^\s,;"']+/gi, 'Bearer [REDACTED]'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED]'],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '[REDACTED]'],
+  [/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED]'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]'],
+  [
+    /\b(api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/gi,
+    '$1=[REDACTED]',
+  ],
+];
 
-function sanitize(value: JsonValue | undefined): JsonValue | undefined {
-  if (value === undefined) return undefined;
-  if (Array.isArray(value)) return value.map((item) => sanitize(item) ?? null);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([key]) => !SENSITIVE_KEY.test(key))
-        .map(([key, item]) => [key, sanitize(item) ?? null]),
-    );
+function redactText(value: string): string {
+  let redacted = value.replace(/:\/\/[^\s/:@]+:[^\s/@]+@/g, '://[REDACTED]@');
+  for (const [pattern, replacement] of VALUE_SECRET_PATTERNS) {
+    redacted = redacted.replace(pattern, replacement);
   }
-  return value;
+  return redacted;
+}
+
+function record(
+  value: JsonValue | undefined,
+): { readonly [key: string]: JsonValue } | undefined {
+  return value !== undefined &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof value === 'object'
+    ? (value as { readonly [key: string]: JsonValue })
+    : undefined;
+}
+
+function safeString(
+  source: { readonly [key: string]: JsonValue } | undefined,
+  key: string,
+): string | undefined {
+  const value = source?.[key];
+  return typeof value === 'string' ? redactText(value) : undefined;
+}
+
+function safeStrings(
+  source: { readonly [key: string]: JsonValue } | undefined,
+  key: string,
+): readonly string[] | undefined {
+  const value = source?.[key];
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is string => typeof item === 'string')
+        .map(redactText)
+    : undefined;
 }
 
 function canonical(value: unknown): string {
@@ -68,12 +104,58 @@ function fingerprint(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex');
 }
 
-function sanitizeInboxMessage(message: InboxMessage): InboxMessage {
-  const reply = sanitize(message.reply);
+export interface SafeInboxContent {
+  readonly text?: string;
+  readonly question?: string;
+  readonly message?: string;
+  readonly answer?: string;
+  readonly options?: readonly string[];
+}
+
+export interface InboxProjection {
+  readonly id: string;
+  readonly runId: string;
+  readonly stepRunId?: string;
+  readonly status: InboxMessage['status'];
+  readonly body: SafeInboxContent;
+  readonly reply?: SafeInboxContent;
+  readonly createdAt: IsoTimestamp;
+  readonly repliedAt?: IsoTimestamp;
+}
+
+function projectInboxContent(value: JsonValue | undefined): SafeInboxContent {
+  if (typeof value === 'string') return { text: redactText(value) };
+  const source = record(value);
+  const text = safeString(source, 'text');
+  const question = safeString(source, 'question');
+  const message = safeString(source, 'message');
+  const answer = safeString(source, 'answer');
+  const options = safeStrings(source, 'options');
   return {
-    ...message,
-    body: sanitize(message.body) ?? null,
-    ...(reply === undefined ? {} : { reply }),
+    ...(text === undefined ? {} : { text }),
+    ...(question === undefined ? {} : { question }),
+    ...(message === undefined ? {} : { message }),
+    ...(answer === undefined ? {} : { answer }),
+    ...(options === undefined ? {} : { options }),
+  };
+}
+
+function projectInboxMessage(message: InboxMessage): InboxProjection {
+  return {
+    id: message.id,
+    runId: message.runId,
+    ...(message.stepRunId === undefined
+      ? {}
+      : { stepRunId: message.stepRunId }),
+    status: message.status,
+    body: projectInboxContent(message.body),
+    ...(message.reply === undefined
+      ? {}
+      : { reply: projectInboxContent(message.reply) }),
+    createdAt: message.createdAt,
+    ...(message.repliedAt === undefined
+      ? {}
+      : { repliedAt: message.repliedAt }),
   };
 }
 
@@ -98,9 +180,15 @@ export interface RunProjection extends PersistenceDigests {
   readonly projectId: string;
   readonly pipeline: string;
   readonly status: RunStatus;
-  readonly input?: JsonValue;
-  readonly output?: JsonValue;
-  readonly error?: JsonValue;
+  readonly input?: {
+    readonly title?: string;
+    readonly description?: string;
+  };
+  readonly error?: {
+    readonly code?: string;
+    readonly message?: string;
+    readonly details?: readonly string[];
+  };
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
   readonly steps: readonly {
@@ -113,9 +201,79 @@ export interface RunProjection extends PersistenceDigests {
     eventId: string;
     sequence: number;
     type: string;
-    payload?: JsonValue;
+    payload?: {
+      readonly approvalId?: string;
+      readonly scopeHash?: string;
+      readonly messageId?: string;
+      readonly status?: string;
+      readonly decision?: string;
+      readonly message?: string;
+      readonly summary?: string;
+      readonly details?: readonly string[];
+      readonly options?: readonly string[];
+    };
     occurredAt: IsoTimestamp;
   }[];
+}
+
+function projectRunInput(value: JsonValue | undefined): RunProjection['input'] {
+  const source = record(value);
+  const title = safeString(source, 'title');
+  const description = safeString(source, 'description');
+  if (title === undefined && description === undefined) return undefined;
+  return {
+    ...(title === undefined ? {} : { title }),
+    ...(description === undefined ? {} : { description }),
+  };
+}
+
+function projectRunError(value: JsonValue | undefined): RunProjection['error'] {
+  const source = record(value);
+  const code = safeString(source, 'code');
+  const message = safeString(source, 'message');
+  const details = safeStrings(source, 'details');
+  if (code === undefined && message === undefined && details === undefined)
+    return undefined;
+  return {
+    ...(code === undefined ? {} : { code }),
+    ...(message === undefined ? {} : { message }),
+    ...(details === undefined ? {} : { details }),
+  };
+}
+
+function projectEventPayload(
+  value: JsonValue | undefined,
+): RunProjection['timeline'][number]['payload'] {
+  const source = record(value);
+  if (source === undefined) return undefined;
+  const strings = Object.fromEntries(
+    [
+      'approvalId',
+      'scopeHash',
+      'messageId',
+      'status',
+      'decision',
+      'message',
+      'summary',
+    ]
+      .map((key) => [key, safeString(source, key)] as const)
+      .filter(
+        (entry): entry is readonly [string, string] => entry[1] !== undefined,
+      ),
+  );
+  const details = safeStrings(source, 'details');
+  const options = safeStrings(source, 'options');
+  if (
+    Object.keys(strings).length === 0 &&
+    details === undefined &&
+    options === undefined
+  )
+    return undefined;
+  return {
+    ...strings,
+    ...(details === undefined ? {} : { details }),
+    ...(options === undefined ? {} : { options }),
+  };
 }
 
 function provenance(run: WorkflowRun): PersistenceDigests {
@@ -219,14 +377,20 @@ export class ControlPlaneService {
         409,
       );
     }
-    if (run.status !== 'cancelled') {
-      const now = this.clock();
-      await this.repository.updateRun(runId, {
-        status: 'cancelled',
-        updatedAt: now,
-        completedAt: now,
-      });
-      await this.appendEvent(id, idempotencyKey, 'run.cancelled', {});
+    if (run.status === 'cancelled') return this.getRun(id);
+    const now = this.clock();
+    try {
+      await this.repository.cancelRunWithEvent(
+        runId,
+        {
+          status: 'cancelled',
+          updatedAt: now,
+          completedAt: now,
+        },
+        this.eventDraft(runId, idempotencyKey, 'run.cancelled', {}, now),
+      );
+    } catch (error) {
+      this.rethrowEventConflict(error);
     }
     return this.getRun(id);
   }
@@ -283,52 +447,42 @@ export class ControlPlaneService {
     }
     const decisionType =
       decision === 'approve' ? 'approval.approved' : 'approval.rejected';
-    if (approval.status === 'consumed') {
-      const eventId = this.generateId(
-        'event',
-        `event:${approval.runId}:approval:${idempotencyKey}`,
+    const consumedAt = this.clock();
+    let consumed: Approval | undefined;
+    try {
+      consumed = await this.repository.consumeApprovalWithEvent(
+        {
+          approvalId: approval.id,
+          runId: approval.runId,
+          scope: approval.scope,
+          fingerprint: approval.fingerprint,
+          consumedAt,
+        },
+        this.eventDraft(
+          approval.runId,
+          `approval:${idempotencyKey}`,
+          decisionType,
+          { approvalId: id, scopeHash: approval.fingerprint },
+          consumedAt,
+        ),
       );
-      const replay = (
-        await this.repository.listEvents(approval.runId, {
-          limit: 1_000,
-        })
-      ).find((event) => event.eventId === eventId);
-      if (!replay) {
-        throw new ServiceError(
-          'approval_already_decided',
-          'approval was already decided',
-          409,
-        );
-      }
-      if (replay.type !== decisionType) {
-        throw new ServiceError(
-          'idempotency_conflict',
-          'approval decision key conflict',
-          409,
-        );
-      }
-      return approval;
+    } catch (error) {
+      this.rethrowEventConflict(error);
     }
-    const event = await this.appendEvent(
-      approval.runId,
-      `approval:${idempotencyKey}`,
-      decisionType,
-      { approvalId: id, scopeHash: approval.fingerprint },
-    );
-    void event;
-    const consumed = await this.repository.consumeApproval({
-      approvalId: approval.id,
-      runId: approval.runId,
-      scope: approval.scope,
-      fingerprint: approval.fingerprint,
-      consumedAt: this.clock(),
-    });
     if (!consumed)
-      throw new ServiceError('approval_invalid', 'approval is invalid', 409);
+      throw new ServiceError(
+        approval.status === 'consumed'
+          ? 'approval_already_decided'
+          : 'approval_invalid',
+        approval.status === 'consumed'
+          ? 'approval was already decided'
+          : 'approval is invalid',
+        409,
+      );
     return consumed;
   }
 
-  async listInbox(limit = 50): Promise<readonly InboxMessage[]> {
+  async listInbox(limit = 50): Promise<readonly InboxProjection[]> {
     const runs = await this.repository.listRuns({ limit });
     const pages = await Promise.all(
       runs.map((run) =>
@@ -338,7 +492,7 @@ export class ControlPlaneService {
     return pages
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map(sanitizeInboxMessage);
+      .map(projectInboxMessage);
   }
 
   async listPendingApprovals(limit = 50): Promise<readonly Approval[]> {
@@ -355,36 +509,44 @@ export class ControlPlaneService {
     id: string,
     reply: JsonValue,
     idempotencyKey: string,
-  ): Promise<InboxMessage> {
+  ): Promise<InboxProjection> {
     const message = await this.repository.getInboxMessage(
       persistenceId('inboxMessage', id),
     );
     if (!message)
       throw new ServiceError('not_found', 'inbox item not found', 404);
     if (message.status === 'replied') {
-      if (canonical(message.reply) !== canonical(reply)) {
+      const eventId = this.generateId(
+        'event',
+        `event:${message.runId}:inbox:${idempotencyKey}`,
+      );
+      const existing = await this.repository.getEvent(message.runId, eventId);
+      if (!existing || canonical(message.reply) !== canonical(reply)) {
         throw new ServiceError(
           'idempotency_conflict',
           'reply key conflict',
           409,
         );
       }
-      return sanitizeInboxMessage(message);
+      return projectInboxMessage(message);
     }
-    await this.appendEvent(
-      message.runId,
-      `inbox:${idempotencyKey}`,
-      'inbox.replied',
-      {
-        messageId: id,
-      },
-    );
-    const result = await this.repository.replyInboxMessage({
-      messageId: message.id,
-      reply,
-      repliedAt: this.clock(),
-    });
-    return sanitizeInboxMessage(result);
+    const repliedAt = this.clock();
+    let result: InboxMessage;
+    try {
+      result = await this.repository.replyInboxMessageWithEvent(
+        { messageId: message.id, reply, repliedAt },
+        this.eventDraft(
+          message.runId,
+          `inbox:${idempotencyKey}`,
+          'inbox.replied',
+          { messageId: id, replyFingerprint: fingerprint(reply) },
+          repliedAt,
+        ),
+      );
+    } catch (error) {
+      this.rethrowEventConflict(error);
+    }
+    return projectInboxMessage(result);
   }
 
   async appendEvent(
@@ -394,32 +556,44 @@ export class ControlPlaneService {
     payload: JsonValue,
   ): Promise<DomainEvent> {
     const runId = persistenceId('run', runIdValue);
-    const existing = await this.repository.listEvents(runId, { limit: 1_000 });
-    const eventId = this.generateId(
-      'event',
-      `event:${runId}:${idempotencyKey}`,
-    );
-    const replay = existing.find((event) => event.eventId === eventId);
-    const eventFingerprint = fingerprint({ type, payload });
-    if (replay) {
-      if (replay.fingerprint !== eventFingerprint) {
-        throw new ServiceError(
-          'idempotency_conflict',
-          'event key conflict',
-          409,
-        );
-      }
-      return replay;
+    try {
+      return await this.repository.appendEvent(
+        this.eventDraft(runId, idempotencyKey, type, payload, this.clock()),
+      );
+    } catch (error) {
+      this.rethrowEventConflict(error);
     }
-    return this.repository.appendEvent({
+  }
+
+  private eventDraft(
+    runId: WorkflowRun['id'],
+    idempotencyKey: string,
+    type: string,
+    payload: JsonValue,
+    occurredAt: IsoTimestamp,
+  ): DomainEventDraft {
+    return {
       runId,
-      eventId,
-      fingerprint: eventFingerprint,
-      sequence: (existing.at(-1)?.sequence ?? 0) + 1,
+      eventId: this.generateId('event', `event:${runId}:${idempotencyKey}`),
+      fingerprint: fingerprint({ type, payload }),
       type,
       payload,
-      occurredAt: this.clock(),
-    });
+      occurredAt,
+    };
+  }
+
+  private rethrowEventConflict(error: unknown): never {
+    if (
+      error instanceof Error &&
+      error.name === 'EventFingerprintConflictError'
+    ) {
+      throw new ServiceError(
+        'idempotency_conflict',
+        'idempotency key was already used with another payload',
+        409,
+      );
+    }
+    throw error;
   }
 
   private async project(run: WorkflowRun): Promise<RunProjection> {
@@ -427,16 +601,14 @@ export class ControlPlaneService {
       this.repository.listStepRuns(run.id, { limit: 100 }),
       this.repository.listEvents(run.id, { limit: 1_000 }),
     ]);
-    const safeInput = sanitize(run.input);
-    const safeOutput = sanitize(run.output);
-    const safeError = sanitize(run.error);
+    const safeInput = projectRunInput(run.input);
+    const safeError = projectRunError(run.error);
     return {
       id: run.id,
       projectId: run.projectId,
       pipeline: run.pipeline,
       status: run.status,
       ...(safeInput === undefined ? {} : { input: safeInput }),
-      ...(safeOutput === undefined ? {} : { output: safeOutput }),
       ...(safeError === undefined ? {} : { error: safeError }),
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
@@ -448,7 +620,7 @@ export class ControlPlaneService {
         status: step.status,
       })),
       timeline: events.map((event) => {
-        const payload = sanitize(event.payload);
+        const payload = projectEventPayload(event.payload);
         return {
           eventId: event.eventId,
           sequence: event.sequence,

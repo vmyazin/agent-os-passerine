@@ -36,6 +36,13 @@
       "when": 1786953799740,
       "tag": "0004_explicit_cursor_collation",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786956704445,
+      "tag": "0005_nervous_violations",
+      "breakpoints": true
     }
   ]
 }

@@ -1,18 +1,11 @@
-import { stringify } from 'yaml';
-
 import { requirePageSession } from '../../src/auth/page-session';
+import { loadConfigurationPageYaml } from '../../src/config/configuration-page-model';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ConfigurationPage() {
   await requirePageSession();
-  const metadata = {
-    schema: 'agentos/v1',
-    mode: 'read-only',
-    source: 'agentos configuration',
-    repository: process.env.AGENTOS_REPOSITORY ?? 'not configured',
-    secrets: 'redacted',
-  };
+  const yaml = await loadConfigurationPageYaml();
   return (
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="configuration-title">
@@ -21,7 +14,7 @@ export default async function ConfigurationPage() {
         <p>Canonical metadata for the active control-plane configuration.</p>
       </section>
       <pre className="configuration" aria-label="Canonical configuration YAML">
-        <code>{stringify(metadata, { sortMapEntries: true })}</code>
+        <code>{yaml}</code>
       </pre>
     </div>
   );

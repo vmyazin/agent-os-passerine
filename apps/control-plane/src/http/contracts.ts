@@ -41,9 +41,21 @@ export const runProjectionSchema = z
       'failed',
       'cancelled',
     ]),
-    input: z.unknown().optional(),
-    output: z.unknown().optional(),
-    error: z.unknown().optional(),
+    input: z
+      .object({
+        title: z.string().optional(),
+        description: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    error: z
+      .object({
+        code: z.string().optional(),
+        message: z.string().optional(),
+        details: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
     repositorySha: z.string(),
@@ -68,7 +80,20 @@ export const runProjectionSchema = z
           eventId: id,
           sequence: z.number(),
           type: z.string(),
-          payload: z.unknown().optional(),
+          payload: z
+            .object({
+              approvalId: z.string().optional(),
+              scopeHash: z.string().optional(),
+              messageId: z.string().optional(),
+              status: z.string().optional(),
+              decision: z.string().optional(),
+              message: z.string().optional(),
+              summary: z.string().optional(),
+              details: z.array(z.string()).optional(),
+              options: z.array(z.string()).optional(),
+            })
+            .strict()
+            .optional(),
           occurredAt: z.string(),
         })
         .strict(),
@@ -95,8 +120,25 @@ export const inboxMessageSchema = z
     runId: id,
     stepRunId: id.optional(),
     status: z.enum(['pending', 'replied']),
-    body: z.unknown(),
-    reply: z.unknown().optional(),
+    body: z
+      .object({
+        text: z.string().optional(),
+        question: z.string().optional(),
+        message: z.string().optional(),
+        answer: z.string().optional(),
+        options: z.array(z.string()).optional(),
+      })
+      .strict(),
+    reply: z
+      .object({
+        text: z.string().optional(),
+        question: z.string().optional(),
+        message: z.string().optional(),
+        answer: z.string().optional(),
+        options: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
     createdAt: z.string(),
     repliedAt: z.string().optional(),
   })
