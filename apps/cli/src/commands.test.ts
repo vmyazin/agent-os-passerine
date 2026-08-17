@@ -16,6 +16,15 @@ const baseRun = {
   idempotencyKey: 'mutation-key',
   json: false,
 } as const;
+const criteria = [
+  {
+    id: 'tests',
+    type: 'command',
+    description: 'Tests pass',
+    required: true,
+    command: 'pnpm test',
+  },
+] as const;
 
 describe('remote command route mapping', () => {
   it.each<[RemoteCommand, ApiRequest]>([
@@ -29,11 +38,11 @@ describe('remote command route mapping', () => {
       },
     ],
     [
-      { kind: 'goal.start', ...baseRun },
+      { kind: 'goal.start', ...baseRun, criteria },
       {
         method: 'POST',
         path: '/api/goals',
-        body: expect.any(Object),
+        body: expect.objectContaining({ criteria }),
         idempotencyKey: 'mutation-key',
       },
     ],
@@ -43,6 +52,10 @@ describe('remote command route mapping', () => {
     ],
     [
       { kind: 'runs.show', id: 'run_1', json: false },
+      { method: 'GET', path: '/api/runs/run_1' },
+    ],
+    [
+      { kind: 'goal.show', id: 'run_1', json: false },
       { method: 'GET', path: '/api/runs/run_1' },
     ],
     [

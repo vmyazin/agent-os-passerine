@@ -17,6 +17,16 @@ export interface RunStartOptions extends GlobalOptions {
   readonly idempotencyKey: string;
 }
 
+export interface GoalCommandCriterion {
+  readonly id: string;
+  readonly type: 'command';
+  readonly description: string;
+  readonly required?: boolean;
+  readonly command: string;
+  readonly cwd?: string;
+  readonly timeoutMs?: number;
+}
+
 export type Command =
   | (GlobalOptions & { readonly kind: 'help' | 'version' })
   | (GlobalOptions & {
@@ -33,9 +43,16 @@ export type Command =
       readonly config: string;
       readonly idempotencyKey: string;
     })
-  | (RunStartOptions & { readonly kind: 'feature.start' | 'goal.start' })
+  | (RunStartOptions & { readonly kind: 'feature.start' })
+  | (RunStartOptions & {
+      readonly kind: 'goal.start';
+      readonly criteria: readonly GoalCommandCriterion[];
+    })
   | (GlobalOptions & { readonly kind: 'runs.list' | 'inbox.list' })
-  | (GlobalOptions & { readonly kind: 'runs.show'; readonly id: string })
+  | (GlobalOptions & {
+      readonly kind: 'runs.show' | 'goal.show';
+      readonly id: string;
+    })
   | (GlobalOptions & {
       readonly kind: 'runs.cancel';
       readonly id: string;

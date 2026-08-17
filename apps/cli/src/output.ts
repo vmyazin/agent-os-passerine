@@ -52,6 +52,69 @@ function table(rows: readonly Record<string, unknown>[]): string {
   return `${line(header)}\n${rows.map(line).join('\n')}\n`;
 }
 
+function goalLines(
+  value: Record<string, unknown>,
+): readonly string[] | undefined {
+  const goal = value.goal;
+  if (goal === null || typeof goal !== 'object' || Array.isArray(goal))
+    return undefined;
+  const source = goal as Record<string, unknown>;
+  if (
+    typeof source.currentStep !== 'number' ||
+    typeof source.maxSteps !== 'number' ||
+    !Array.isArray(source.criteria) ||
+    !Array.isArray(source.latestResults) ||
+    !Array.isArray(source.children)
+  )
+    return undefined;
+  const results = new Map<string, Record<string, unknown>>();
+  for (const result of source.latestResults) {
+    if (result === null || typeof result !== 'object' || Array.isArray(result))
+      continue;
+    const candidate = result as Record<string, unknown>;
+    if (typeof candidate.criterionId === 'string')
+      results.set(candidate.criterionId, candidate);
+  }
+  const lines = [
+    `Goal step: ${String(source.currentStep)}/${String(source.maxSteps)}`,
+  ];
+  for (const criterion of source.criteria) {
+    if (
+      criterion === null ||
+      typeof criterion !== 'object' ||
+      Array.isArray(criterion)
+    )
+      continue;
+    const candidate = criterion as Record<string, unknown>;
+    if (typeof candidate.id !== 'string') continue;
+    const result = results.get(candidate.id);
+    const status =
+      typeof result?.status === 'string' ? result.status : 'pending';
+    const code = typeof result?.code === 'string' ? ` (${result.code})` : '';
+    const label =
+      typeof candidate.description === 'string'
+        ? candidate.description
+        : candidate.id;
+    lines.push(`${label}: ${status}${code}`);
+  }
+  for (const child of source.children) {
+    if (child === null || typeof child !== 'object' || Array.isArray(child))
+      continue;
+    const candidate = child as Record<string, unknown>;
+    if (
+      typeof candidate.step !== 'number' ||
+      typeof candidate.runId !== 'string'
+    )
+      continue;
+    const status =
+      typeof candidate.status === 'string' ? ` (${candidate.status})` : '';
+    lines.push(
+      `Attempt ${String(candidate.step)}: ${candidate.runId}${status}`,
+    );
+  }
+  return lines;
+}
+
 export function renderResult(value: unknown, json: boolean): string {
   if (json) return `${canonicalJsonValue(value)}\n`;
   if (
@@ -64,9 +127,13 @@ export function renderResult(value: unknown, json: boolean): string {
     return table(value as Record<string, unknown>[]);
   }
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    return `${Object.entries(value)
+    const object = value as Record<string, unknown>;
+    const goal = goalLines(object);
+    const base = Object.entries(object)
+      .filter(([key]) => key !== 'goal')
       .map(([key, entry]) => `${key}: ${display(entry)}`)
-      .join('\n')}\n`;
+      .join('\n');
+    return `${[base, ...(goal ?? [])].filter(Boolean).join('\n')}\n`;
   }
   return `${display(value)}\n`;
 }

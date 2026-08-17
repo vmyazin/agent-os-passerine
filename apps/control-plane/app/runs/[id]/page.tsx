@@ -39,6 +39,43 @@ export default async function RunPage({
           </dd>
         </div>
       </dl>
+      {run.goal === undefined ? null : (
+        <section aria-labelledby="goal-title">
+          <h2 id="goal-title">Bounded goal progress</h2>
+          <p>
+            Step {run.goal.currentStep} of {run.goal.maxSteps}
+          </p>
+          <ol className="timeline">
+            {run.goal.criteria.map((criterion) => {
+              const result = run.goal?.latestResults.find(
+                (candidate) => candidate.criterionId === criterion.id,
+              );
+              return (
+                <li key={criterion.id}>
+                  <strong>{criterion.description}</strong>
+                  <span>
+                    {result?.status ?? 'pending'}
+                    {result?.code === undefined ? '' : ` (${result.code})`}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+          {run.goal.children.length === 0 ? null : (
+            <ol className="timeline" aria-label="Goal feature attempts">
+              {run.goal.children.map((child) => (
+                <li key={child.runId}>
+                  <strong>Attempt {child.step}</strong>
+                  <span>{child.status ?? 'pending'}</span>
+                  {child.draftPullRequestUrl === undefined ? null : (
+                    <a href={child.draftPullRequestUrl}>Draft pull request</a>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+      )}
       <section aria-labelledby="steps-title">
         <h2 id="steps-title">Steps</h2>
         {run.steps.length === 0 ? (

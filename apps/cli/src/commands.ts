@@ -30,6 +30,7 @@ function runBody(
     promptDigest: command.promptDigest,
     environmentDigest: command.environmentDigest,
     policyDigest: command.policyDigest,
+    ...(command.kind === 'goal.start' ? { criteria: command.criteria } : {}),
   };
 }
 
@@ -52,6 +53,7 @@ export async function executeRemoteCommand(
       request = { method: 'GET', path: '/api/runs' };
       break;
     case 'runs.show':
+    case 'goal.show':
       request = {
         method: 'GET',
         path: `/api/runs/${encodeURIComponent(command.id)}`,

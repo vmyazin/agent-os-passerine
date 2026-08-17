@@ -140,6 +140,57 @@ export const runProjectionSchema = z
       })
       .strict()
       .optional(),
+    goal: z
+      .object({
+        maxSteps: z.number().int().min(1).max(3),
+        currentStep: z.number().int().min(1).max(3),
+        criteria: z
+          .array(
+            z
+              .object({
+                id: z.string().min(1).max(128),
+                description: z.string().max(1_000),
+                required: z.boolean(),
+              })
+              .strict(),
+          )
+          .max(20),
+        latestResults: z
+          .array(
+            z
+              .object({
+                criterionId: z.string().min(1).max(128),
+                step: z.number().int().min(1).max(3),
+                status: z.enum(['passed', 'failed']),
+                code: z.string().max(128).optional(),
+              })
+              .strict(),
+          )
+          .max(20),
+        children: z
+          .array(
+            z
+              .object({
+                step: z.number().int().min(1).max(3),
+                runId: id,
+                status: z
+                  .enum([
+                    'pending',
+                    'running',
+                    'waiting',
+                    'succeeded',
+                    'failed',
+                    'cancelled',
+                  ])
+                  .optional(),
+                draftPullRequestUrl: z.url().max(2_048).optional(),
+              })
+              .strict(),
+          )
+          .max(3),
+      })
+      .strict()
+      .optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
     repositorySha: z.string(),

@@ -1,6 +1,11 @@
 import { parseArgs } from 'node:util';
 
-import type { Command, GlobalOptions, RunStartOptions } from './types.js';
+import type {
+  Command,
+  GlobalOptions,
+  GoalCommandCriterion,
+  RunStartOptions,
+} from './types.js';
 
 export const EXIT_USAGE = 2;
 
@@ -29,6 +34,7 @@ const stringFlags = [
   'environment-digest',
   'policy-digest',
   'idempotency-key',
+  'criteria-json',
   'scope-hash',
   'reply',
   'file',
@@ -106,7 +112,7 @@ function exactPositionals(
 function runStart(
   values: Record<string, string | boolean | undefined>,
   kind: 'feature.start' | 'goal.start',
-): RunStartOptions & { readonly kind: typeof kind } {
+): Extract<Command, { kind: 'feature.start' | 'goal.start' }> {
   const label = kind.replace('.', ' ');
   assertAllowed(values, [
     'project-id',
@@ -119,6 +125,7 @@ function runStart(
     'environment-digest',
     'policy-digest',
     'idempotency-key',
+    ...(kind === 'goal.start' ? (['criteria-json'] as const) : []),
   ]);
   const repositorySha = required(values, 'repository-sha', label, 40);
   if (!/^[a-f0-9]{40}$/i.test(repositorySha)) {
@@ -126,8 +133,7 @@ function runStart(
       '--repository-sha must be a 40-character hexadecimal SHA',
     );
   }
-  return {
-    kind,
+  const base: RunStartOptions = {
     ...globals(values),
     projectId: assertId(
       required(values, 'project-id', label, 128),
@@ -143,6 +149,89 @@ function runStart(
     policyDigest: required(values, 'policy-digest', label, 256),
     idempotencyKey: required(values, 'idempotency-key', label, 200),
   };
+  return kind === 'goal.start'
+    ? {
+        kind,
+        ...base,
+        criteria: parseGoalCriteria(
+          required(values, 'criteria-json', label, 64 * 1_024),
+        ),
+      }
+    : { kind, ...base };
+}
+
+function parseGoalCriteria(value: string): readonly GoalCommandCriterion[] {
+  const invalid = () => {
+    throw new CliError(
+      '--criteria-json must be a JSON array of 1 to 20 strict command criteria',
+    );
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return invalid();
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 20)
+    return invalid();
+  const allowed = new Set([
+    'id',
+    'type',
+    'description',
+    'required',
+    'command',
+    'cwd',
+    'timeoutMs',
+  ]);
+  const ids = new Set<string>();
+  return parsed.map((candidate): GoalCommandCriterion => {
+    if (
+      candidate === null ||
+      typeof candidate !== 'object' ||
+      Array.isArray(candidate)
+    )
+      return invalid();
+    const source = candidate as Record<string, unknown>;
+    if (Object.keys(source).some((key) => !allowed.has(key))) return invalid();
+    if (
+      source.type !== 'command' ||
+      typeof source.id !== 'string' ||
+      source.id.trim().length < 1 ||
+      source.id.length > 128 ||
+      ids.has(source.id) ||
+      typeof source.description !== 'string' ||
+      source.description.trim().length < 1 ||
+      source.description.length > 1_000 ||
+      typeof source.command !== 'string' ||
+      source.command.trim().length < 1 ||
+      source.command.length > 10_000 ||
+      (source.required !== undefined && typeof source.required !== 'boolean') ||
+      (source.cwd !== undefined &&
+        (typeof source.cwd !== 'string' ||
+          source.cwd.trim().length < 1 ||
+          source.cwd.length > 1_024)) ||
+      (source.timeoutMs !== undefined &&
+        (typeof source.timeoutMs !== 'number' ||
+          !Number.isSafeInteger(source.timeoutMs) ||
+          source.timeoutMs < 1 ||
+          source.timeoutMs > 3_600_000))
+    )
+      return invalid();
+    ids.add(source.id);
+    return {
+      id: source.id,
+      type: 'command',
+      description: source.description,
+      command: source.command,
+      ...(source.required === undefined
+        ? {}
+        : { required: source.required as boolean }),
+      ...(source.cwd === undefined ? {} : { cwd: source.cwd as string }),
+      ...(source.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: source.timeoutMs as number }),
+    };
+  });
 }
 
 export function parseCommand(argv: readonly string[]): Command {
@@ -212,6 +301,15 @@ export function parseCommand(argv: readonly string[]): Command {
   if (group === 'goal' && action === 'start') {
     exactPositionals(positionals, ['goal', 'start']);
     return runStart(values, 'goal.start');
+  }
+  if (group === 'goal' && action === 'show' && id !== undefined) {
+    exactPositionals(positionals, ['goal', 'show', id]);
+    assertAllowed(values, []);
+    return {
+      kind: 'goal.show',
+      ...globals(values),
+      id: assertId(id, 'run id'),
+    };
   }
   if (group === 'runs' && action === 'list') {
     exactPositionals(positionals, ['runs', 'list']);

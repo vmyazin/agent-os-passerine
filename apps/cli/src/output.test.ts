@@ -35,4 +35,29 @@ describe('CLI output', () => {
       String.prototype.localeCompare = original;
     }
   });
+
+  it('renders readable bounded goal progress without ANSI', () => {
+    const output = renderResult(
+      {
+        id: 'run_1',
+        status: 'running',
+        goal: {
+          currentStep: 1,
+          maxSteps: 3,
+          criteria: [
+            { id: 'tests', description: 'Tests pass', required: true },
+          ],
+          latestResults: [
+            { criterionId: 'tests', step: 1, status: 'failed', code: 'failed' },
+          ],
+          children: [{ step: 1, runId: 'run_child', status: 'failed' }],
+        },
+      },
+      false,
+    );
+    expect(output).toContain('Goal step: 1/3');
+    expect(output).toContain('Tests pass: failed (failed)');
+    expect(output).toContain('Attempt 1: run_child (failed)');
+    expect(output).not.toContain(String.fromCharCode(27));
+  });
 });

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { InMemoryDomainRepository } from '@agentos/adapters';
 import {
   canonicalConfigHash,
@@ -683,6 +685,124 @@ runtime: { provider: local }
       }),
     ).rejects.toThrow('injected criterion failure');
     expect(requestStart).not.toHaveBeenCalled();
+  });
+
+  it('projects bounded goal progress without raw evidence or attestations', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const applied = await applyGoalConfiguration(service, 'goal-projection');
+    const created = await service.createGoalRun('goal-projection', {
+      projectId: applied.projectId,
+      title: 'Project bounded progress',
+      description: 'Expose only safe goal state.',
+      ...applied.provenance,
+      criteria: goalCriteria,
+    });
+    const runId = persistenceId('run', created.id);
+    const raw = await repository.getRun(runId);
+    if (raw?.configRevisionId === undefined)
+      throw new Error('goal projection run missing immutable config');
+    const childRunId = persistenceId(
+      'run',
+      `goal-child-${createHash('sha256')
+        .update(`${runId}\u00001`)
+        .digest('hex')}`,
+    );
+    await repository.createRun({
+      id: childRunId,
+      projectId: raw.projectId,
+      configRevisionId: raw.configRevisionId,
+      pipeline: 'feature',
+      status: 'succeeded',
+      input: {},
+      output: {
+        draftPullRequestUrl: 'https://example.com/pull/42',
+        rawReport: 'child-report-secret',
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${runId}:step:1:child`),
+      runId,
+      step: 1,
+      status: 'pending',
+      payload: { version: 'goal-child-attempt-v1', childRunId },
+      recordedAt: now,
+    });
+    const persistedCriteria = await repository.listGoalCriteria(runId);
+    for (const [ordinal, persisted] of persistedCriteria.entries()) {
+      const definition = goalCriteria[ordinal]!;
+      const passed = ordinal === 0;
+      await repository.appendGoalProgress({
+        id: persistenceId(
+          'goalProgress',
+          `goal:${runId}:step:1:criterion:${definition.id}`,
+        ),
+        runId,
+        criterionId: persisted.id,
+        step: 1,
+        status: passed ? 'satisfied' : 'failed',
+        payload: {
+          version: 'goal-criterion-result-v1',
+          result: passed
+            ? {
+                status: 'passed',
+                criterionId: definition.id,
+                verifierId: 'trusted-goal-command-v1',
+                message: 'passed',
+                attestation: { signature: 'attestation-secret' },
+              }
+            : {
+                status: 'failed',
+                criterionId: definition.id,
+                verifierId: 'trusted-goal-command-v1',
+                code: 'command_failed',
+                message: 'failed',
+                fingerprint: 'f'.repeat(64),
+                rawReport: 'criterion-report-secret',
+              },
+        },
+        recordedAt: now,
+      });
+    }
+
+    const projection = await service.getRun(runId);
+
+    expect(projection).toMatchObject({
+      goal: {
+        maxSteps: 3,
+        currentStep: 1,
+        criteria: [
+          { id: 'tests', description: 'Tests pass', required: true },
+          {
+            id: 'typecheck',
+            description: 'Typecheck passes',
+            required: true,
+          },
+        ],
+        latestResults: [
+          { criterionId: 'tests', step: 1, status: 'passed' },
+          {
+            criterionId: 'typecheck',
+            step: 1,
+            status: 'failed',
+            code: 'command_failed',
+          },
+        ],
+        children: [
+          {
+            step: 1,
+            runId: childRunId,
+            status: 'succeeded',
+            draftPullRequestUrl: 'https://example.com/pull/42',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(projection)).not.toMatch(
+      /attestation-secret|child-report-secret|criterion-report-secret|signature/,
+    );
   });
 
   it('redacts secrets and hidden reasoning from run projections', async () => {

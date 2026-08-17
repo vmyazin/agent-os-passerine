@@ -25,12 +25,26 @@ describe('parseCommand', () => {
     '--idempotency-key',
     'run-key',
   ];
+  const criteria = [
+    {
+      id: 'tests',
+      type: 'command',
+      description: 'Tests pass',
+      required: true,
+      command: 'pnpm test',
+    },
+  ];
+  const goalFlags = [...runFlags, '--criteria-json', JSON.stringify(criteria)];
 
   it('parses every supported command and global JSON mode', () => {
     expect(parseCommand(['--json', 'runs', 'show', 'run_1'])).toMatchObject({
       kind: 'runs.show',
       id: 'run_1',
       json: true,
+    });
+    expect(parseCommand(['goal', 'show', 'run_1'])).toMatchObject({
+      kind: 'goal.show',
+      id: 'run_1',
     });
     expect(parseCommand(['config', 'validate'])).toMatchObject({
       kind: 'config.validate',
@@ -78,7 +92,7 @@ describe('parseCommand', () => {
     [['config', 'plan'], 'config.plan'],
     [['config', 'apply', '--idempotency-key', 'apply-key'], 'config.apply'],
     [['feature', 'start', ...runFlags], 'feature.start'],
-    [['goal', 'start', ...runFlags], 'goal.start'],
+    [['goal', 'start', ...goalFlags], 'goal.start'],
     [['runs', 'list'], 'runs.list'],
     [['runs', 'show', 'run_1'], 'runs.show'],
     [
@@ -142,11 +156,46 @@ describe('parseCommand', () => {
     const incomplete = runFlags.filter(
       (_value, position) => position !== index && position !== index + 1,
     );
-    for (const group of ['feature', 'goal']) {
-      expect(() => parseCommand([group, 'start', ...incomplete])).toThrow(
-        `requires --${missing}`,
-      );
-    }
+    expect(() => parseCommand(['feature', 'start', ...incomplete])).toThrow(
+      `requires --${missing}`,
+    );
+    expect(() =>
+      parseCommand([
+        'goal',
+        'start',
+        ...incomplete,
+        '--criteria-json',
+        JSON.stringify(criteria),
+      ]),
+    ).toThrow(`requires --${missing}`);
+  });
+
+  it('requires strict bounded criteria for goal start only', () => {
+    expect(parseCommand(['goal', 'start', ...goalFlags])).toMatchObject({
+      kind: 'goal.start',
+      criteria,
+    });
+    expect(() => parseCommand(['goal', 'start', ...runFlags])).toThrow(
+      'requires --criteria-json',
+    );
+    expect(() =>
+      parseCommand([
+        'goal',
+        'start',
+        ...runFlags,
+        '--criteria-json',
+        JSON.stringify([{ ...criteria[0], unexpected: true }]),
+      ]),
+    ).toThrow('--criteria-json');
+    expect(() =>
+      parseCommand([
+        'feature',
+        'start',
+        ...runFlags,
+        '--criteria-json',
+        JSON.stringify(criteria),
+      ]),
+    ).toThrow('not valid for this command');
   });
 
   it.each([

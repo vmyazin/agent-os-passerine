@@ -24,6 +24,7 @@ import {
   canonicalPublicationPolicyDigest,
   loadAgentOsConfig,
   normalizePublicationPolicySnapshot,
+  parseAgentOsConfig,
   persistenceId,
 } from '@agentos/core';
 
@@ -358,6 +359,27 @@ export interface RunProjection extends PersistenceDigests {
     readonly code?: string;
     readonly message?: string;
     readonly details?: readonly string[];
+  };
+  readonly goal?: {
+    readonly maxSteps: number;
+    readonly currentStep: number;
+    readonly criteria: readonly {
+      readonly id: string;
+      readonly description: string;
+      readonly required: boolean;
+    }[];
+    readonly latestResults: readonly {
+      readonly criterionId: string;
+      readonly step: number;
+      readonly status: 'passed' | 'failed';
+      readonly code?: string;
+    }[];
+    readonly children: readonly {
+      readonly step: number;
+      readonly runId: string;
+      readonly status?: RunStatus;
+      readonly draftPullRequestUrl?: string;
+    }[];
   };
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
@@ -1051,9 +1073,10 @@ export class ControlPlaneService {
   }
 
   private async project(run: WorkflowRun): Promise<RunProjection> {
-    const [steps, events] = await Promise.all([
+    const [steps, events, goal] = await Promise.all([
       this.repository.listStepRuns(run.id, { limit: 100 }),
       this.repository.listEvents(run.id, { limit: 1_000 }),
+      this.projectGoal(run),
     ]);
     const safeInput = projectRunInput(run.input);
     const safeError = projectRunError(run.error);
@@ -1064,6 +1087,7 @@ export class ControlPlaneService {
       status: run.status,
       ...(safeInput === undefined ? {} : { input: safeInput }),
       ...(safeError === undefined ? {} : { error: safeError }),
+      ...(goal === undefined ? {} : { goal }),
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       ...provenance(run),
@@ -1083,6 +1107,161 @@ export class ControlPlaneService {
           occurredAt: event.occurredAt,
         };
       }),
+    };
+  }
+
+  private async projectGoal(run: WorkflowRun): Promise<RunProjection['goal']> {
+    if (run.pipeline !== 'goal') return undefined;
+    const [criterionRecords, progress, snapshots] = await Promise.all([
+      this.repository.listGoalCriteria(run.id, { limit: 21 }),
+      this.repository.listGoalProgress(run.id, { limit: 100 }),
+      this.repository.listConfigSnapshots(run.id, { limit: 2 }),
+    ]);
+    let maxSteps = 3;
+    if (snapshots.length === 1) {
+      try {
+        maxSteps = parseAgentOsConfig(snapshots[0]!.config).goals.maxSteps;
+      } catch {
+        maxSteps = 3;
+      }
+    }
+    maxSteps = Math.max(1, Math.min(3, maxSteps));
+    const criteria = criterionRecords
+      .slice()
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .flatMap((criterion) => {
+        const definition = record(criterion.definition);
+        const id = definition?.id;
+        const description = definition?.description;
+        if (typeof id !== 'string' || typeof description !== 'string')
+          return [];
+        return [
+          {
+            id: id.slice(0, 128),
+            description: redactText(description).slice(0, 1_000),
+            required: definition?.required !== false,
+            recordId: criterion.id,
+          },
+        ];
+      });
+    const criterionByRecord = new Map(
+      criteria.map((criterion) => [criterion.recordId, criterion]),
+    );
+    const latest = new Map<
+      string,
+      NonNullable<RunProjection['goal']>['latestResults'][number]
+    >();
+    const childCheckpoints = new Map<number, WorkflowRun['id']>();
+    let currentStep = 1;
+    for (const item of progress) {
+      if (
+        !Number.isSafeInteger(item.step) ||
+        item.step < 1 ||
+        item.step > maxSteps
+      )
+        continue;
+      currentStep = Math.max(currentStep, item.step);
+      if (item.criterionId === undefined) {
+        const payload = record(item.payload);
+        const childRunId = payload?.childRunId;
+        const expected = persistenceId(
+          'run',
+          `goal-child-${createHash('sha256')
+            .update(`${run.id}\u0000${String(item.step)}`)
+            .digest('hex')}`,
+        );
+        if (
+          item.id ===
+            persistenceId(
+              'goalProgress',
+              `goal:${run.id}:step:${String(item.step)}:child`,
+            ) &&
+          item.status === 'pending' &&
+          payload?.version === 'goal-child-attempt-v1' &&
+          childRunId === expected
+        )
+          childCheckpoints.set(item.step, expected);
+        continue;
+      }
+      const criterion = criterionByRecord.get(item.criterionId);
+      if (criterion === undefined) continue;
+      const payload = record(item.payload);
+      const result = record(payload?.result);
+      const resultStatus = result?.status;
+      if (
+        item.id !==
+          persistenceId(
+            'goalProgress',
+            `goal:${run.id}:step:${String(item.step)}:criterion:${criterion.id}`,
+          ) ||
+        payload?.version !== 'goal-criterion-result-v1' ||
+        result?.criterionId !== criterion.id ||
+        (resultStatus === 'passed' && item.status !== 'satisfied') ||
+        (resultStatus === 'failed' && item.status !== 'failed') ||
+        (resultStatus !== 'passed' && resultStatus !== 'failed')
+      )
+        continue;
+      const prior = latest.get(criterion.id);
+      if (prior !== undefined && prior.step > item.step) continue;
+      const code =
+        resultStatus === 'failed' ? safeString(result, 'code') : undefined;
+      latest.set(criterion.id, {
+        criterionId: criterion.id,
+        step: item.step,
+        status: resultStatus,
+        ...(code === undefined ? {} : { code: code.slice(0, 128) }),
+      });
+    }
+    const children = (
+      await Promise.all(
+        [...childCheckpoints.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(async ([step, runId]) => {
+            const child = await this.repository.getRun(runId);
+            if (
+              child === undefined ||
+              child.projectId !== run.projectId ||
+              child.pipeline !== 'feature'
+            )
+              return undefined;
+            const output = record(child.output);
+            const candidateUrl = safeString(output, 'draftPullRequestUrl');
+            let draftPullRequestUrl: string | undefined;
+            if (candidateUrl !== undefined && candidateUrl.length <= 2_048) {
+              try {
+                const parsed = new URL(candidateUrl);
+                if (parsed.protocol === 'https:' || parsed.protocol === 'http:')
+                  draftPullRequestUrl = candidateUrl;
+              } catch {
+                draftPullRequestUrl = undefined;
+              }
+            }
+            return {
+              step,
+              runId,
+              status: child.status,
+              ...(draftPullRequestUrl === undefined
+                ? {}
+                : { draftPullRequestUrl }),
+            };
+          }),
+      )
+    ).filter(
+      (child): child is NonNullable<typeof child> => child !== undefined,
+    );
+    return {
+      maxSteps,
+      currentStep: Math.min(maxSteps, currentStep),
+      criteria: criteria.map((criterion) => ({
+        id: criterion.id,
+        description: criterion.description,
+        required: criterion.required,
+      })),
+      latestResults: criteria.flatMap((criterion) => {
+        const result = latest.get(criterion.id);
+        return result === undefined ? [] : [result];
+      }),
+      children,
     };
   }
 }
