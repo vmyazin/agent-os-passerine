@@ -1,4 +1,5 @@
-import { neon } from '@neondatabase/serverless';
+import { neon, types } from '@neondatabase/serverless';
+import { isoTimestampEpochMicroseconds } from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
@@ -30,7 +31,7 @@ import type {
   WorkflowRunId,
   WorkflowRunUpdate,
 } from '@agentos/core';
-import { and, asc, eq, gt } from 'drizzle-orm';
+import { and, asc, eq, gt, sql } from 'drizzle-orm';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
 
 import {
@@ -41,6 +42,35 @@ import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
 } from './errors.js';
+import {
+  approvalSelection,
+  artifactSelection,
+  configRevisionSelection,
+  configSnapshotSelection,
+  domainEventSelection,
+  externalSessionSelection,
+  goalCriterionSelection,
+  goalProgressSelection,
+  inboxMessageSelection,
+  mapApprovalRow,
+  mapArtifactRow,
+  mapConfigRevisionRow,
+  mapConfigSnapshotRow,
+  mapDomainEventRow,
+  mapExternalSessionRow,
+  mapGoalCriterionRow,
+  mapGoalProgressRow,
+  mapInboxMessageRow,
+  mapProjectRow,
+  mapStepRunRow,
+  mapUsageRecordRow,
+  mapWebhookReceiptRow,
+  mapWorkflowRunRow,
+  projectSelection,
+  stepRunSelection,
+  usageRecordSelection,
+  workflowRunSelection,
+} from './row-mapping.js';
 import * as schema from './schema.js';
 import {
   approvals,
@@ -55,7 +85,6 @@ import {
   projects,
   stepRuns,
   usageRecords,
-  webhookReceipts,
   workflowRuns,
 } from './schema.js';
 import { assertValidUsage } from './validation.js';
@@ -68,14 +97,19 @@ function one<T>(rows: readonly T[], description: string): T {
   return row;
 }
 
-function normalized<T>(row: object): T {
-  return Object.fromEntries(
-    Object.entries(row).filter(([, value]) => value !== null),
-  ) as T;
+function mappedOne<T>(
+  rows: readonly Readonly<Record<string, unknown>>[],
+  description: string,
+  mapper: (row: Readonly<Record<string, unknown>>) => T,
+): T {
+  return mapper(one(rows, description));
 }
 
-function normalizedRows<T>(rows: readonly object[]): readonly T[] {
-  return rows.map((row) => normalized<T>(row));
+function mappedRows<T>(
+  rows: readonly Readonly<Record<string, unknown>>[],
+  mapper: (row: Readonly<Record<string, unknown>>) => T,
+): readonly T[] {
+  return rows.map(mapper);
 }
 
 function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
@@ -88,128 +122,155 @@ function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
     row.outputTokens === usage.outputTokens &&
     row.runtimeMs === usage.runtimeMs &&
     row.microdollars === usage.microdollars &&
-    row.recordedAt === usage.recordedAt
+    isoTimestampEpochMicroseconds(row.recordedAt) ===
+      isoTimestampEpochMicroseconds(usage.recordedAt)
   );
 }
+
+function jsonbValue(value: unknown) {
+  return value === undefined ? sql`null` : sql`${JSON.stringify(value)}::jsonb`;
+}
+
+const timestampTypeParsers = {
+  getTypeParser(id: number, format?: 'text' | 'binary') {
+    if (id === types.builtins.TIMESTAMPTZ && format !== 'binary') {
+      return (value: string) => value;
+    }
+    return types.getTypeParser(id, format);
+  },
+};
 
 export class NeonDomainRepository implements DomainRepository {
   public constructor(private readonly database: Database) {}
 
   async createProject(project: Project): Promise<Project> {
-    return normalized(
-      one(
-        await this.database.insert(projects).values(project).returning(),
-        'Project',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(projects)
+        .values(project)
+        .returning(projectSelection),
+      'Project',
+      mapProjectRow,
     );
   }
 
   async getProject(id: ProjectId): Promise<Project | undefined> {
-    const row = await this.database.query.projects.findFirst({
-      where: eq(projects.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(projectSelection)
+      .from(projects)
+      .where(eq(projects.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapProjectRow(row);
   }
 
   async listProjects(): Promise<readonly Project[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(projectSelection)
         .from(projects)
         .orderBy(asc(projects.createdAt)),
+      mapProjectRow,
     );
   }
 
   async createConfigRevision(
     revision: ConfigRevision,
   ): Promise<ConfigRevision> {
-    return normalized(
-      one(
-        await this.database
-          .insert(configRevisions)
-          .values(revision)
-          .returning(),
-        'Config revision',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(configRevisions)
+        .values(revision)
+        .returning(configRevisionSelection),
+      'Config revision',
+      mapConfigRevisionRow,
     );
   }
 
   async getConfigRevision(
     id: ConfigRevisionId,
   ): Promise<ConfigRevision | undefined> {
-    const row = await this.database.query.configRevisions.findFirst({
-      where: eq(configRevisions.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(configRevisionSelection)
+      .from(configRevisions)
+      .where(eq(configRevisions.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapConfigRevisionRow(row);
   }
 
   async listConfigRevisions(
     projectId: ProjectId,
   ): Promise<readonly ConfigRevision[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(configRevisionSelection)
         .from(configRevisions)
         .where(eq(configRevisions.projectId, projectId))
         .orderBy(asc(configRevisions.revision)),
+      mapConfigRevisionRow,
     );
   }
 
   async createConfigSnapshot(
     snapshot: ConfigSnapshot,
   ): Promise<ConfigSnapshot> {
-    return normalized(
-      one(
-        await this.database
-          .insert(configSnapshots)
-          .values(snapshot)
-          .returning(),
-        'Config snapshot',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(configSnapshots)
+        .values(snapshot)
+        .returning(configSnapshotSelection),
+      'Config snapshot',
+      mapConfigSnapshotRow,
     );
   }
 
   async getConfigSnapshot(
     id: ConfigSnapshotId,
   ): Promise<ConfigSnapshot | undefined> {
-    const row = await this.database.query.configSnapshots.findFirst({
-      where: eq(configSnapshots.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(configSnapshotSelection)
+      .from(configSnapshots)
+      .where(eq(configSnapshots.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapConfigSnapshotRow(row);
   }
 
   async listConfigSnapshots(
     runId: WorkflowRunId,
   ): Promise<readonly ConfigSnapshot[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(configSnapshotSelection)
         .from(configSnapshots)
         .where(eq(configSnapshots.runId, runId))
         .orderBy(asc(configSnapshots.createdAt)),
+      mapConfigSnapshotRow,
     );
   }
 
   async createRun(run: WorkflowRun): Promise<WorkflowRun> {
-    return normalized(
-      one(
-        await this.database.insert(workflowRuns).values(run).returning(),
-        'Run',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(workflowRuns)
+        .values(run)
+        .returning(workflowRunSelection),
+      'Run',
+      mapWorkflowRunRow,
     );
   }
 
   async getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined> {
-    const row = await this.database.query.workflowRuns.findFirst({
-      where: eq(workflowRuns.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(workflowRunSelection)
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapWorkflowRunRow(row);
   }
 
   async listRuns(filter: RunListFilter = {}): Promise<readonly WorkflowRun[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(workflowRunSelection)
         .from(workflowRuns)
         .where(
           and(
@@ -222,6 +283,7 @@ export class NeonDomainRepository implements DomainRepository {
           ),
         )
         .orderBy(asc(workflowRuns.createdAt)),
+      mapWorkflowRunRow,
     );
   }
 
@@ -229,15 +291,14 @@ export class NeonDomainRepository implements DomainRepository {
     id: WorkflowRunId,
     update: WorkflowRunUpdate,
   ): Promise<WorkflowRun> {
-    return normalized(
-      one(
-        await this.database
-          .update(workflowRuns)
-          .set(update)
-          .where(eq(workflowRuns.id, id))
-          .returning(),
-        `Run ${id}`,
-      ),
+    return mappedOne(
+      await this.database
+        .update(workflowRuns)
+        .set(update)
+        .where(eq(workflowRuns.id, id))
+        .returning(workflowRunSelection),
+      `Run ${id}`,
+      mapWorkflowRunRow,
     );
   }
 
@@ -259,85 +320,95 @@ export class NeonDomainRepository implements DomainRepository {
           cleanupAt: step.cleanupAt,
         },
       })
-      .returning();
-    return normalized(one(rows, 'Step run'));
+      .returning(stepRunSelection);
+    return mappedOne(rows, 'Step run', mapStepRunRow);
   }
 
   async getStepRun(id: StepRunId): Promise<StepRun | undefined> {
-    const row = await this.database.query.stepRuns.findFirst({
-      where: eq(stepRuns.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(stepRunSelection)
+      .from(stepRuns)
+      .where(eq(stepRuns.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapStepRunRow(row);
   }
 
   async listStepRuns(runId: WorkflowRunId): Promise<readonly StepRun[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(stepRunSelection)
         .from(stepRuns)
         .where(eq(stepRuns.runId, runId))
         .orderBy(asc(stepRuns.stepKey), asc(stepRuns.attempt)),
+      mapStepRunRow,
     );
   }
 
   async createExternalSession(
     session: ExternalSession,
   ): Promise<ExternalSession> {
-    return normalized(
-      one(
-        await this.database
-          .insert(externalSessions)
-          .values(session)
-          .returning(),
-        'External session',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(externalSessions)
+        .values(session)
+        .returning(externalSessionSelection),
+      'External session',
+      mapExternalSessionRow,
     );
   }
 
   async getExternalSession(
     id: ExternalSessionId,
   ): Promise<ExternalSession | undefined> {
-    const row = await this.database.query.externalSessions.findFirst({
-      where: eq(externalSessions.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(externalSessionSelection)
+      .from(externalSessions)
+      .where(eq(externalSessions.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapExternalSessionRow(row);
   }
 
   async listExternalSessions(
     runId: WorkflowRunId,
   ): Promise<readonly ExternalSession[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(externalSessionSelection)
         .from(externalSessions)
         .where(eq(externalSessions.runId, runId))
         .orderBy(asc(externalSessions.createdAt)),
+      mapExternalSessionRow,
     );
   }
 
   async createApproval(approval: Approval): Promise<Approval> {
-    return normalized(
-      one(
-        await this.database.insert(approvals).values(approval).returning(),
-        'Approval',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(approvals)
+        .values(approval)
+        .returning(approvalSelection),
+      'Approval',
+      mapApprovalRow,
     );
   }
 
   async getApproval(id: ApprovalId): Promise<Approval | undefined> {
-    const row = await this.database.query.approvals.findFirst({
-      where: eq(approvals.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(approvalSelection)
+      .from(approvals)
+      .where(eq(approvals.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapApprovalRow(row);
   }
 
   async listApprovals(runId: WorkflowRunId): Promise<readonly Approval[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(approvalSelection)
         .from(approvals)
         .where(eq(approvals.runId, runId))
         .orderBy(asc(approvals.createdAt)),
+      mapApprovalRow,
     );
   }
 
@@ -357,34 +428,38 @@ export class NeonDomainRepository implements DomainRepository {
           gt(approvals.expiresAt, request.consumedAt),
         ),
       )
-      .returning();
+      .returning(approvalSelection);
     const row = rows[0];
-    return row === undefined ? undefined : normalized(row);
+    return row === undefined ? undefined : mapApprovalRow(row);
   }
 
   async createInboxMessage(message: InboxMessage): Promise<InboxMessage> {
-    return normalized(
-      one(
-        await this.database.insert(inboxMessages).values(message).returning(),
-        'Inbox message',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(inboxMessages)
+        .values(message)
+        .returning(inboxMessageSelection),
+      'Inbox message',
+      mapInboxMessageRow,
     );
   }
 
   async getInboxMessage(id: InboxMessageId): Promise<InboxMessage | undefined> {
-    const row = await this.database.query.inboxMessages.findFirst({
-      where: eq(inboxMessages.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(inboxMessageSelection)
+      .from(inboxMessages)
+      .where(eq(inboxMessages.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapInboxMessageRow(row);
   }
 
   async listInboxMessages(
     runId: WorkflowRunId,
     status?: InboxMessage['status'],
   ): Promise<readonly InboxMessage[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(inboxMessageSelection)
         .from(inboxMessages)
         .where(
           and(
@@ -393,6 +468,7 @@ export class NeonDomainRepository implements DomainRepository {
           ),
         )
         .orderBy(asc(inboxMessages.createdAt)),
+      mapInboxMessageRow,
     );
   }
 
@@ -412,177 +488,193 @@ export class NeonDomainRepository implements DomainRepository {
           eq(inboxMessages.status, 'pending'),
         ),
       )
-      .returning();
+      .returning(inboxMessageSelection);
     const row = rows[0];
     if (row === undefined) {
       throw new Error(
         `Inbox message ${request.messageId} not found or already replied`,
       );
     }
-    return normalized(row);
+    return mapInboxMessageRow(row);
   }
 
   async appendEvent(event: DomainEvent): Promise<DomainEvent> {
-    const inserted = await this.database
-      .insert(domainEvents)
-      .values(event)
-      .onConflictDoNothing({
-        target: [domainEvents.runId, domainEvents.eventId],
-      })
-      .returning();
-    const insertedRow = inserted[0];
-    if (insertedRow !== undefined) return normalized(insertedRow);
-
-    const existing = await this.database.query.domainEvents.findFirst({
-      where: and(
-        eq(domainEvents.runId, event.runId),
-        eq(domainEvents.eventId, event.eventId),
-      ),
-    });
-    if (existing === undefined)
-      throw new Error('Event conflict could not be resolved');
+    const result = await this.database.execute<Record<string, unknown>>(sql`
+      insert into "domain_events"
+        ("run_id", "event_id", "fingerprint", "sequence", "type", "payload", "occurred_at")
+      values
+        (${event.runId}, ${event.eventId}, ${event.fingerprint}, ${event.sequence}, ${event.type}, ${jsonbValue(event.payload)}, ${event.occurredAt})
+      on conflict ("run_id", "event_id") do update
+        set "fingerprint" = "domain_events"."fingerprint"
+      returning
+        "run_id" as "runId",
+        "event_id" as "eventId",
+        "fingerprint",
+        "sequence"::float8 as "sequence",
+        "type",
+        "payload",
+        ("payload" is not null) as "payloadPresent",
+        to_char("occurred_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "occurredAt"
+    `);
+    const existing = mapDomainEventRow(one(result.rows, 'Event'));
     if (existing.fingerprint !== event.fingerprint) {
       throw new EventFingerprintConflictError(event.runId, event.eventId);
     }
-    return normalized(existing);
+    return existing;
   }
 
   async listEvents(runId: WorkflowRunId): Promise<readonly DomainEvent[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(domainEventSelection)
         .from(domainEvents)
         .where(eq(domainEvents.runId, runId))
         .orderBy(asc(domainEvents.sequence)),
+      mapDomainEventRow,
     );
   }
 
   async createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord> {
-    return normalized(
-      one(
-        await this.database.insert(artifacts).values(artifact).returning(),
-        'Artifact',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(artifacts)
+        .values(artifact)
+        .returning(artifactSelection),
+      'Artifact',
+      mapArtifactRow,
     );
   }
 
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
-    const row = await this.database.query.artifacts.findFirst({
-      where: eq(artifacts.id, id),
-    });
-    return row === undefined ? undefined : normalized(row);
+    const [row] = await this.database
+      .select(artifactSelection)
+      .from(artifacts)
+      .where(eq(artifacts.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapArtifactRow(row);
   }
 
   async listArtifacts(
     runId: WorkflowRunId,
   ): Promise<readonly ArtifactRecord[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(artifactSelection)
         .from(artifacts)
         .where(eq(artifacts.runId, runId))
         .orderBy(asc(artifacts.createdAt)),
+      mapArtifactRow,
     );
   }
 
   async appendUsage(usage: UsageRecordEntry): Promise<UsageRecordEntry> {
     assertValidUsage(usage);
-    const inserted = await this.database
-      .insert(usageRecords)
-      .values(usage)
-      .onConflictDoNothing({ target: usageRecords.idempotencyId })
-      .returning();
-    const insertedRow = inserted[0];
-    if (insertedRow !== undefined) return normalized(insertedRow);
-
-    const existing = await this.database.query.usageRecords.findFirst({
-      where: eq(usageRecords.idempotencyId, usage.idempotencyId),
-    });
-    if (existing === undefined)
-      throw new Error('Usage conflict could not be resolved');
-    const normalizedExisting = normalized<UsageRecordEntry>(existing);
-    if (!usageMatches(normalizedExisting, usage)) {
+    const result = await this.database.execute<Record<string, unknown>>(sql`
+      insert into "usage_records"
+        ("idempotency_id", "run_id", "step_run_id", "model", "input_tokens", "output_tokens", "runtime_ms", "microdollars", "recorded_at")
+      values
+        (${usage.idempotencyId}, ${usage.runId}, ${usage.stepRunId ?? null}, ${usage.model}, ${usage.inputTokens}, ${usage.outputTokens}, ${usage.runtimeMs}, ${usage.microdollars}, ${usage.recordedAt})
+      on conflict ("idempotency_id") do update
+        set "idempotency_id" = "usage_records"."idempotency_id"
+      returning
+        "idempotency_id" as "idempotencyId",
+        "run_id" as "runId",
+        "step_run_id" as "stepRunId",
+        "model",
+        "input_tokens"::float8 as "inputTokens",
+        "output_tokens"::float8 as "outputTokens",
+        "runtime_ms"::float8 as "runtimeMs",
+        "microdollars"::float8 as "microdollars",
+        to_char("recorded_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "recordedAt"
+    `);
+    const existing = mapUsageRecordRow(one(result.rows, 'Usage record'));
+    if (!usageMatches(existing, usage)) {
       throw new IdempotencyConflictError('Usage record', usage.idempotencyId);
     }
-    return normalizedExisting;
+    return existing;
   }
 
   async listUsage(runId: WorkflowRunId): Promise<readonly UsageRecordEntry[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(usageRecordSelection)
         .from(usageRecords)
         .where(eq(usageRecords.runId, runId))
         .orderBy(asc(usageRecords.recordedAt)),
+      mapUsageRecordRow,
     );
   }
 
   async claimWebhook(receipt: WebhookReceipt): Promise<WebhookClaim> {
-    const inserted = await this.database
-      .insert(webhookReceipts)
-      .values(receipt)
-      .onConflictDoNothing({
-        target: [webhookReceipts.source, webhookReceipts.deliveryId],
-      })
-      .returning();
-    const insertedRow = inserted[0];
-    if (insertedRow !== undefined) {
-      return { claimed: true, receipt: normalized(insertedRow) };
-    }
-
-    const existing = await this.database.query.webhookReceipts.findFirst({
-      where: and(
-        eq(webhookReceipts.source, receipt.source),
-        eq(webhookReceipts.deliveryId, receipt.deliveryId),
-      ),
-    });
-    if (existing === undefined)
-      throw new Error('Webhook conflict could not be resolved');
+    const result = await this.database.execute<Record<string, unknown>>(sql`
+      insert into "webhook_receipts"
+        ("source", "delivery_id", "fingerprint", "received_at", "expires_at")
+      values
+        (${receipt.source}, ${receipt.deliveryId}, ${receipt.fingerprint}, ${receipt.receivedAt}, ${receipt.expiresAt})
+      on conflict ("source", "delivery_id") do update
+        set "fingerprint" = "webhook_receipts"."fingerprint"
+      returning
+        "source",
+        "delivery_id" as "deliveryId",
+        "fingerprint",
+        to_char("received_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "receivedAt",
+        to_char("expires_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expiresAt",
+        (xmax = 0) as "claimed"
+    `);
+    const raw = one(result.rows, 'Webhook receipt');
+    const { claimed, ...receiptRow } = raw;
+    const existing = mapWebhookReceiptRow(receiptRow);
     if (existing.fingerprint !== receipt.fingerprint) {
       throw new IdempotencyConflictError('Webhook receipt', receipt.deliveryId);
     }
-    return { claimed: false, receipt: normalized(existing) };
+    return { claimed: claimed === true, receipt: existing };
   }
 
   async createGoalCriterion(criterion: GoalCriterion): Promise<GoalCriterion> {
-    return normalized(
-      one(
-        await this.database.insert(goalCriteria).values(criterion).returning(),
-        'Goal criterion',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(goalCriteria)
+        .values(criterion)
+        .returning(goalCriterionSelection),
+      'Goal criterion',
+      mapGoalCriterionRow,
     );
   }
 
   async listGoalCriteria(
     runId: WorkflowRunId,
   ): Promise<readonly GoalCriterion[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(goalCriterionSelection)
         .from(goalCriteria)
         .where(eq(goalCriteria.runId, runId))
         .orderBy(asc(goalCriteria.ordinal)),
+      mapGoalCriterionRow,
     );
   }
 
   async appendGoalProgress(progress: GoalProgress): Promise<GoalProgress> {
-    return normalized(
-      one(
-        await this.database.insert(goalProgress).values(progress).returning(),
-        'Goal progress',
-      ),
+    return mappedOne(
+      await this.database
+        .insert(goalProgress)
+        .values(progress)
+        .returning(goalProgressSelection),
+      'Goal progress',
+      mapGoalProgressRow,
     );
   }
 
   async listGoalProgress(
     runId: WorkflowRunId,
   ): Promise<readonly GoalProgress[]> {
-    return normalizedRows(
+    return mappedRows(
       await this.database
-        .select()
+        .select(goalProgressSelection)
         .from(goalProgress)
         .where(eq(goalProgress.runId, runId))
         .orderBy(asc(goalProgress.recordedAt)),
+      mapGoalProgressRow,
     );
   }
 }
@@ -592,6 +684,12 @@ export function createNeonDomainRepository(
 ): DomainRepository {
   const validatedUrl = databaseUrlFromEnv({ DATABASE_URL: databaseUrl });
   const client = neon(validatedUrl);
+  const query = client.query.bind(client);
+  client.query = ((queryText, params, options) =>
+    query(queryText, params, {
+      ...options,
+      types: timestampTypeParsers,
+    })) as typeof client.query;
   return new NeonDomainRepository(drizzle(client, { schema }));
 }
 

@@ -5,6 +5,7 @@ import {
   approvals,
   domainEvents,
   inboxMessages,
+  projects,
   stepRuns,
   usageRecords,
   webhookReceipts,
@@ -12,6 +13,14 @@ import {
 } from './schema.js';
 
 describe('Drizzle persistence schema', () => {
+  it('maps Neon Date values to canonical ISO timestamps without shifting the instant', () => {
+    expect(
+      projects.createdAt.mapFromDriverValue(
+        new Date('2026-08-16T12:00:00.123Z') as never,
+      ),
+    ).toBe('2026-08-16T12:00:00.123Z');
+  });
+
   it('models idempotency keys as primary or unique constraints', () => {
     expect(getTableConfig(stepRuns).uniqueConstraints).toHaveLength(1);
     expect(getTableConfig(domainEvents).primaryKeys).toHaveLength(1);

@@ -7,6 +7,13 @@ export class EventFingerprintConflictError extends Error {
   }
 }
 
+export class EventSequenceConflictError extends Error {
+  public constructor(runId: string, sequence: number) {
+    super(`Event sequence ${sequence} for run ${runId} already exists`);
+    this.name = 'EventSequenceConflictError';
+  }
+}
+
 export class IdempotencyConflictError extends Error {
   public constructor(kind: string, id: string) {
     super(`${kind} ${id} already exists with different content`);

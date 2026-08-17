@@ -40,7 +40,9 @@ export type IsoTimestamp = string & {
 };
 
 const ISO_TIMESTAMP =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:(Z)|([+-])(\d{2}):(\d{2}))$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:(Z)|([+-])(\d{2}):(\d{2}))$/;
+const ISO_TIMESTAMP_INSTANT =
+  /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(?:(Z)|([+-])(\d{2}):(\d{2}))$/;
 
 function hasValidCalendarParts(match: RegExpExecArray): boolean {
   const year = Number(match[1]);
@@ -100,6 +102,25 @@ export function isoTimestamp(value: string): IsoTimestamp {
     throw new TypeError('timestamp must be an ISO 8601 string');
   }
   return value as IsoTimestamp;
+}
+
+export function isoTimestampEpochMicroseconds(value: IsoTimestamp): bigint {
+  const match = ISO_TIMESTAMP_INSTANT.exec(value);
+  if (match === null)
+    throw new TypeError('timestamp must be an ISO 8601 string');
+
+  const utcMilliseconds = Date.parse(`${match[1]}T${match[2]}Z`);
+  const offsetMinutes =
+    match[4] === 'Z'
+      ? 0
+      : (match[5] === '+' ? 1 : -1) *
+        (Number(match[6]) * 60 + Number(match[7]));
+  const fractionMicroseconds = BigInt((match[3] ?? '').padEnd(6, '0') || '0');
+
+  return (
+    BigInt(utcMilliseconds - offsetMinutes * 60_000) * 1_000n +
+    fractionMicroseconds
+  );
 }
 export type JsonValue =
   | null

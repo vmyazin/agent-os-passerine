@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
+  isoTimestampEpochMicroseconds,
   isoTimestamp,
   persistenceId,
   type ProjectId,
@@ -31,6 +32,33 @@ describe('persistence boundary values', () => {
     );
     expect(() => isoTimestamp('next Tuesday')).toThrow(
       'timestamp must be an ISO 8601 string',
+    );
+  });
+
+  it('rejects timestamp precision PostgreSQL cannot preserve', () => {
+    expect(() => isoTimestamp('2026-08-16T12:00:00.1234567Z')).toThrow(
+      'timestamp must be an ISO 8601 string',
+    );
+  });
+
+  it('compares offset timestamps without losing microsecond precision', () => {
+    expect(
+      isoTimestampEpochMicroseconds(
+        isoTimestamp('2026-08-16T05:00:00.123456-07:00'),
+      ),
+    ).toBe(
+      isoTimestampEpochMicroseconds(
+        isoTimestamp('2026-08-16T12:00:00.123456Z'),
+      ),
+    );
+    expect(
+      isoTimestampEpochMicroseconds(
+        isoTimestamp('2026-08-16T12:00:00.123456Z'),
+      ),
+    ).not.toBe(
+      isoTimestampEpochMicroseconds(
+        isoTimestamp('2026-08-16T12:00:00.123999Z'),
+      ),
     );
   });
 

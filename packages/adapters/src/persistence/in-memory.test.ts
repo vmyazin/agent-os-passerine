@@ -122,10 +122,12 @@ describe('InMemoryDomainRepository', () => {
       ),
       status: 'succeeded',
       output: { result: 'done' },
+      createdAt: isoTimestamp('2026-08-16T12:03:30.000Z'),
       updatedAt: isoTimestamp('2026-08-16T12:04:00.000Z'),
     });
 
     expect(second.id).toBe(stepRunId);
+    expect(second.createdAt).toBe(first.createdAt);
     expect(second.status).toBe('succeeded');
     expect(await repository.listStepRuns(run.id)).toHaveLength(1);
   });
@@ -148,6 +150,29 @@ describe('InMemoryDomainRepository', () => {
       repository.appendEvent({ ...event, fingerprint: 'sha256:different' }),
     ).rejects.toBeInstanceOf(EventFingerprintConflictError);
     expect(await repository.listEvents(run.id)).toEqual([event]);
+  });
+
+  it('rejects a different event id at an existing run sequence', async () => {
+    const repository = await seededRepository();
+    await repository.appendEvent({
+      runId: run.id,
+      eventId,
+      fingerprint: 'sha256:event-one',
+      sequence: 1,
+      type: 'run.started',
+      occurredAt: isoTimestamp('2026-08-16T12:03:00.000Z'),
+    });
+
+    await expect(
+      repository.appendEvent({
+        runId: run.id,
+        eventId: persistenceId('event', 'event-2'),
+        fingerprint: 'sha256:event-two',
+        sequence: 1,
+        type: 'run.updated',
+        occurredAt: isoTimestamp('2026-08-16T12:04:00.000Z'),
+      }),
+    ).rejects.toThrow('sequence 1');
   });
 
   it('consumes only a matching, pending, unexpired approval once', async () => {
@@ -190,6 +215,54 @@ describe('InMemoryDomainRepository', () => {
         consumedAt: isoTimestamp('2026-08-16T12:11:00.000Z'),
       }),
     ).toBeUndefined();
+  });
+
+  it('compares approval expiry and consumption as instants', async () => {
+    const repository = await seededRepository();
+    const offsetApprovalId = persistenceId('approval', 'approval-offset');
+    await repository.createApproval({
+      id: offsetApprovalId,
+      runId: run.id,
+      scope: 'publish:offset-test',
+      fingerprint: 'sha256:offset-approval',
+      status: 'pending',
+      createdAt: isoTimestamp('2026-08-16T11:00:00-07:00'),
+      expiresAt: isoTimestamp('2026-08-16T12:00:00-07:00'),
+    });
+
+    expect(
+      await repository.consumeApproval({
+        approvalId: offsetApprovalId,
+        runId: run.id,
+        scope: 'publish:offset-test',
+        fingerprint: 'sha256:offset-approval',
+        consumedAt: isoTimestamp('2026-08-16T18:30:00.000Z'),
+      }),
+    ).toMatchObject({ status: 'consumed' });
+  });
+
+  it('preserves microsecond precision when checking approval expiry', async () => {
+    const repository = await seededRepository();
+    const preciseApprovalId = persistenceId('approval', 'approval-precise');
+    await repository.createApproval({
+      id: preciseApprovalId,
+      runId: run.id,
+      scope: 'publish:precise-test',
+      fingerprint: 'sha256:precise-approval',
+      status: 'pending',
+      createdAt: isoTimestamp('2026-08-16T12:00:00.000000Z'),
+      expiresAt: isoTimestamp('2026-08-16T12:00:00.123999Z'),
+    });
+
+    expect(
+      await repository.consumeApproval({
+        approvalId: preciseApprovalId,
+        runId: run.id,
+        scope: 'publish:precise-test',
+        fingerprint: 'sha256:precise-approval',
+        consumedAt: isoTimestamp('2026-08-16T12:00:00.123456Z'),
+      }),
+    ).toMatchObject({ status: 'consumed' });
   });
 
   it('creates and replies to inbox messages exactly once', async () => {

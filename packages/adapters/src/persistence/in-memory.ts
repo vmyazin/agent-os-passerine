@@ -1,4 +1,4 @@
-import { isoTimestamp } from '@agentos/core';
+import { isoTimestamp, isoTimestampEpochMicroseconds } from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
@@ -33,12 +33,14 @@ import type {
 
 import {
   EventFingerprintConflictError,
+  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 import { assertValidUsage } from './validation.js';
 
 export {
   EventFingerprintConflictError,
+  EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
 
@@ -93,6 +95,7 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #approvals = new Map<string, Approval>();
   readonly #inboxMessages = new Map<string, InboxMessage>();
   readonly #events = new Map<string, DomainEvent>();
+  readonly #eventSequences = new Map<string, string>();
   readonly #artifacts = new Map<string, ArtifactRecord>();
   readonly #usage = new Map<string, UsageRecordEntry>();
   readonly #webhooks = new Map<string, WebhookReceipt>();
@@ -209,7 +212,12 @@ export class InMemoryDomainRepository implements DomainRepository {
       return copy(step);
     }
     const existing = requireEntry(this.#stepRuns, existingId, 'Step run');
-    const updated = copy({ ...existing, ...step, id: existing.id });
+    const updated = copy({
+      ...existing,
+      ...step,
+      id: existing.id,
+      createdAt: existing.createdAt,
+    });
     this.#stepRuns.set(existing.id, updated);
     return copy(updated);
   }
@@ -287,7 +295,8 @@ export class InMemoryDomainRepository implements DomainRepository {
       approval.scope !== request.scope ||
       approval.fingerprint !== request.fingerprint ||
       approval.status !== 'pending' ||
-      approval.expiresAt <= request.consumedAt
+      isoTimestampEpochMicroseconds(approval.expiresAt) <=
+        isoTimestampEpochMicroseconds(request.consumedAt)
     ) {
       return undefined;
     }
@@ -359,8 +368,13 @@ export class InMemoryDomainRepository implements DomainRepository {
       }
       return copy(existing);
     }
+    const sequenceKey = `${event.runId}\u0000${event.sequence}`;
+    if (this.#eventSequences.has(sequenceKey)) {
+      throw new EventSequenceConflictError(event.runId, event.sequence);
+    }
     const stored = copy(event);
     this.#events.set(key, stored);
+    this.#eventSequences.set(sequenceKey, key);
     return copy(stored);
   }
 

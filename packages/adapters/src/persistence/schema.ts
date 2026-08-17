@@ -1,9 +1,10 @@
-import type { JsonValue } from '@agentos/core';
+import { isoTimestamp, type IsoTimestamp, type JsonValue } from '@agentos/core';
 import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigint,
   check,
+  customType,
   index,
   integer,
   jsonb,
@@ -11,12 +12,28 @@ import {
   pgTable,
   primaryKey,
   text,
-  timestamp,
   unique,
 } from 'drizzle-orm/pg-core';
 
-const instant = (name: string) =>
-  timestamp(name, { mode: 'string', withTimezone: true });
+function normalizeTimestampDriverValue(value: Date | string): IsoTimestamp {
+  if (value instanceof Date) return isoTimestamp(value.toISOString());
+
+  const withSeparator = value.replace(' ', 'T');
+  const withOffsetMinutes = withSeparator
+    .replace(/([+-]\d{2})$/, '$1:00')
+    .replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  return isoTimestamp(withOffsetMinutes);
+}
+
+const instantType = customType<{
+  data: IsoTimestamp;
+  driverData: Date | string;
+}>({
+  dataType: () => 'timestamp with time zone',
+  fromDriver: normalizeTimestampDriverValue,
+  toDriver: (value) => value,
+});
+const instant = (name: string) => instantType(name);
 const json = (name: string) => jsonb(name).$type<JsonValue>();
 
 export const runStatus = pgEnum('run_status', [
