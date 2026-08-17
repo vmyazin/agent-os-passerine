@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  MAX_CANONICAL_CONFIG_BYTES,
+  MAX_CONFIGURATION_APPLY_BODY_BYTES,
+} from '@agentos/core';
+
 import { ApiClient, MAX_RESPONSE_BYTES } from './api-client.js';
 
 const MAX_REQUEST_BYTES = 64 * 1024;
-const MAX_CONFIGURATION_REQUEST_BYTES = 512 * 1024;
 
 function bodyWithSerializedSize(size: number): { value: string } {
   const empty = { value: '' };
@@ -110,7 +114,7 @@ describe('ApiClient', () => {
 
   it.each([
     ['/api/features', MAX_REQUEST_BYTES],
-    ['/api/configuration/apply', MAX_CONFIGURATION_REQUEST_BYTES],
+    ['/api/configuration/apply', MAX_CONFIGURATION_APPLY_BODY_BYTES],
   ] as const)(
     'enforces the exact UTF-8 JSON request ceiling for %s',
     async (path, limit) => {
@@ -150,6 +154,44 @@ describe('ApiClient', () => {
       expect(oversizedFetch).not.toHaveBeenCalled();
     },
   );
+
+  it('enforces the canonical configuration ceiling before making an apply request', async () => {
+    const fetch = vi.fn(async () => Response.json({ ok: true }));
+    const client = new ApiClient({
+      url: 'https://control.example',
+      token: 'secret-token',
+      fetch,
+    });
+    const exactCanonical = `"${'é'.repeat(
+      (MAX_CANONICAL_CONFIG_BYTES - 2) / 2,
+    )}"`;
+    expect(new TextEncoder().encode(exactCanonical).byteLength).toBe(
+      MAX_CANONICAL_CONFIG_BYTES,
+    );
+    const requestBody = {
+      canonicalConfig: exactCanonical,
+      digest: 'a'.repeat(64),
+      expectedRevision: null,
+      expectedDigest: null,
+    };
+    expect(
+      new TextEncoder().encode(JSON.stringify(requestBody)).byteLength,
+    ).toBeLessThan(MAX_CONFIGURATION_APPLY_BODY_BYTES);
+
+    await expect(
+      client.request('POST', '/api/configuration/apply', requestBody),
+    ).resolves.toEqual({ ok: true });
+
+    await expect(
+      client.request('POST', '/api/configuration/apply', {
+        ...requestBody,
+        canonicalConfig: `${exactCanonical}a`,
+      }),
+    ).rejects.toThrow(
+      `canonical configuration is too large (maximum ${MAX_CANONICAL_CONFIG_BYTES} bytes)`,
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 
   it('serializes a request body exactly once', async () => {
     const toJSON = vi.fn(() => ({ value: 'payload' }));

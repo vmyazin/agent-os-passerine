@@ -11,11 +11,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { canonicalConfigHash } from '@agentos/core';
+import { canonicalConfigHash, MAX_CANONICAL_CONFIG_BYTES } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
 import {
   MAX_CONFIG_BYTES,
+  STARTER_CONFIG,
   initConfiguration,
   readConfiguration,
 } from './config-files.js';
@@ -87,6 +88,26 @@ describe('configuration files', () => {
     const large = join(root, 'large.yaml');
     await writeFile(large, Buffer.alloc(MAX_CONFIG_BYTES + 1, 65));
     await expect(readConfiguration(large)).rejects.toThrow('too large');
+  });
+
+  it('accepts quote-heavy source files whose canonical JSON exceeds the source ceiling', async () => {
+    const root = await repository('agentos-quote-heavy-');
+    const path = join(root, 'agent-os.yaml');
+    const source = STARTER_CONFIG.replace(
+      '    environment: default\n',
+      `    prompt: '${'"'.repeat(30_000)}'\n    environment: default\n`,
+    );
+    expect(Buffer.byteLength(source)).toBeLessThanOrEqual(MAX_CONFIG_BYTES);
+    await writeFile(path, source, { mode: 0o600 });
+
+    const loaded = await readConfiguration(path);
+
+    expect(Buffer.byteLength(loaded.canonical)).toBeGreaterThan(
+      MAX_CONFIG_BYTES,
+    );
+    expect(Buffer.byteLength(loaded.canonical)).toBeLessThanOrEqual(
+      MAX_CANONICAL_CONFIG_BYTES,
+    );
   });
 
   it('revalidates parent directories at the read and write boundary', async () => {

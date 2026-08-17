@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
+export const MAX_AGENT_OS_CONFIG_SOURCE_BYTES = 56 * 1024;
+export const MAX_CANONICAL_CONFIG_BYTES = 384 * 1024;
+export const MAX_CONFIGURATION_APPLY_BODY_BYTES = 512 * 1024;
+
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/workflows/**',
   'CODEOWNERS',

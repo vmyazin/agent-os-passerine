@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { MAX_CONFIGURATION_APPLY_BODY_BYTES } from '@agentos/core';
+
 import { AuthError } from '../auth/auth';
 import { ServiceError } from '../application/control-plane-service';
 
 export const MAX_BODY_BYTES = 64 * 1024;
-export const MAX_CONFIG_APPLY_BODY_BYTES = 512 * 1024;
+export const MAX_CONFIG_APPLY_BODY_BYTES = MAX_CONFIGURATION_APPLY_BODY_BYTES;
 
 export interface ApiContract<TBody = unknown> {
   readonly authorize?: () => void;

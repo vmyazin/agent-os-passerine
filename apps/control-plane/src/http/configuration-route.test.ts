@@ -2,6 +2,9 @@ import {
   canonicalConfigHash,
   canonicalConfigJson,
   loadAgentOsConfig,
+  MAX_AGENT_OS_CONFIG_SOURCE_BYTES,
+  MAX_CANONICAL_CONFIG_BYTES,
+  MAX_CONFIGURATION_APPLY_BODY_BYTES,
 } from '@agentos/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -210,7 +213,7 @@ describe('configuration API routes', () => {
   });
 
   it('accepts quote-heavy canonical configuration bodies above the ordinary API limit', async () => {
-    const prompt = '"\n'.repeat(12_000);
+    const prompt = '"'.repeat(40_000);
     const largeConfig = {
       ...config,
       agents: {
@@ -224,11 +227,16 @@ describe('configuration API routes', () => {
       expectedDigest: null,
     };
     const encoded = JSON.stringify(requestBody);
+    expect(Buffer.byteLength(requestBody.canonicalConfig)).toBeGreaterThan(
+      MAX_AGENT_OS_CONFIG_SOURCE_BYTES,
+    );
     expect(Buffer.byteLength(requestBody.canonicalConfig)).toBeLessThanOrEqual(
-      56 * 1024,
+      MAX_CANONICAL_CONFIG_BYTES,
     );
     expect(Buffer.byteLength(encoded)).toBeGreaterThan(64 * 1024);
-    expect(Buffer.byteLength(encoded)).toBeLessThan(512 * 1024);
+    expect(Buffer.byteLength(encoded)).toBeLessThan(
+      MAX_CONFIGURATION_APPLY_BODY_BYTES,
+    );
 
     const response = await POST(
       request('/api/configuration/apply', {
@@ -238,6 +246,30 @@ describe('configuration API routes', () => {
       }),
     );
     expect(response.status).toBe(201);
+  });
+
+  it('rejects canonical configuration above its UTF-8 byte ceiling', async () => {
+    const canonicalConfig = `"${'é'.repeat(MAX_CANONICAL_CONFIG_BYTES / 2)}"`;
+    expect(Buffer.byteLength(canonicalConfig)).toBeGreaterThan(
+      MAX_CANONICAL_CONFIG_BYTES,
+    );
+    const encoded = JSON.stringify({ ...body, canonicalConfig });
+    expect(Buffer.byteLength(encoded)).toBeLessThan(
+      MAX_CONFIGURATION_APPLY_BODY_BYTES,
+    );
+
+    const response = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'oversized-canonical-config' },
+        body: encoded,
+      }),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'validation_error' },
+    });
   });
 
   it('allows only one apply against the same active configuration', async () => {

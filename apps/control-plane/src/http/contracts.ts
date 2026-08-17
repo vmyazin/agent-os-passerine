@@ -1,4 +1,7 @@
+import { MAX_CANONICAL_CONFIG_BYTES } from '@agentos/core';
 import { z } from 'zod';
+
+const utf8 = new TextEncoder();
 
 const digest = z.string().trim().min(1).max(256);
 const id = z
@@ -29,7 +32,10 @@ export const configurationApplySchema = z
     canonicalConfig: z
       .string()
       .min(2)
-      .max(56 * 1024),
+      .refine(
+        (value) => utf8.encode(value).byteLength <= MAX_CANONICAL_CONFIG_BYTES,
+        `canonical configuration is too large (maximum ${MAX_CANONICAL_CONFIG_BYTES} bytes)`,
+      ),
     digest: z.string().regex(/^[a-f0-9]{64}$/),
     expectedRevision: z.number().int().positive().nullable(),
     expectedDigest: z

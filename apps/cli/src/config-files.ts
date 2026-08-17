@@ -16,6 +16,8 @@ import {
   canonicalConfigHash,
   canonicalConfigJson,
   loadAgentOsConfig,
+  MAX_AGENT_OS_CONFIG_SOURCE_BYTES,
+  MAX_CANONICAL_CONFIG_BYTES,
   type AgentOsConfig,
 } from '@agentos/core';
 
@@ -25,7 +27,7 @@ import {
   findWorkspaceRoot,
 } from './workspace.js';
 
-export const MAX_CONFIG_BYTES = 56 * 1024;
+export const MAX_CONFIG_BYTES = MAX_AGENT_OS_CONFIG_SOURCE_BYTES;
 
 async function assertCanonicalParent(path: string): Promise<void> {
   const parent = dirname(path);
@@ -208,18 +210,27 @@ export async function readConfiguration(path: string): Promise<{
   readonly digest: string;
 }> {
   const yaml = await readBounded(path);
+  let config: AgentOsConfig;
   try {
-    const config = loadAgentOsConfig(yaml);
-    return {
-      config,
-      canonical: canonicalConfigJson(config),
-      digest: canonicalConfigHash(config),
-    };
+    config = loadAgentOsConfig(yaml);
   } catch (error) {
     throw new CliError(
       `invalid configuration: ${formatValidationError(error)}`,
     );
   }
+  const canonical = canonicalConfigJson(config);
+  if (
+    new TextEncoder().encode(canonical).byteLength > MAX_CANONICAL_CONFIG_BYTES
+  ) {
+    throw new CliError(
+      `canonical configuration is too large (maximum ${MAX_CANONICAL_CONFIG_BYTES} bytes)`,
+    );
+  }
+  return {
+    config,
+    canonical,
+    digest: canonicalConfigHash(config),
+  };
 }
 
 export async function initConfiguration(

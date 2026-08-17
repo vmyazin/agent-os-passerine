@@ -1,8 +1,14 @@
+import {
+  MAX_CANONICAL_CONFIG_BYTES,
+  MAX_CONFIGURATION_APPLY_BODY_BYTES,
+} from '@agentos/core';
+
 import { CliError } from './args.js';
 
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_REQUEST_BYTES = 64 * 1024;
-export const MAX_CONFIGURATION_REQUEST_BYTES = 512 * 1024;
+export const MAX_CONFIGURATION_REQUEST_BYTES =
+  MAX_CONFIGURATION_APPLY_BODY_BYTES;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const BEARER_TOKEN = /^[A-Za-z0-9._~+/-]+=*$/;
 const REMOTE_CODES = new Set([
@@ -167,6 +173,22 @@ export class ApiClient {
           throw new RequestValidationError(
             'request body is not JSON serializable',
           );
+        if (url.pathname === '/api/configuration/apply') {
+          const serializedValue = JSON.parse(serializedBody) as unknown;
+          const canonicalConfig =
+            typeof serializedValue === 'object' && serializedValue !== null
+              ? (serializedValue as Record<string, unknown>).canonicalConfig
+              : undefined;
+          if (
+            typeof canonicalConfig === 'string' &&
+            new TextEncoder().encode(canonicalConfig).byteLength >
+              MAX_CANONICAL_CONFIG_BYTES
+          ) {
+            throw new RequestValidationError(
+              `canonical configuration is too large (maximum ${MAX_CANONICAL_CONFIG_BYTES} bytes)`,
+            );
+          }
+        }
         const limit =
           url.pathname === '/api/configuration/apply'
             ? MAX_CONFIGURATION_REQUEST_BYTES
