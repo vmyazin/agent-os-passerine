@@ -197,6 +197,35 @@ export interface WorkflowRunUpdate {
 export interface RunListFilter {
   readonly projectId?: ProjectId;
   readonly status?: RunStatus;
+  readonly limit?: number;
+  readonly after?: TimestampListCursor<WorkflowRunId>;
+}
+
+export interface TimestampListCursor<Id extends string> {
+  readonly at: IsoTimestamp;
+  readonly id: Id;
+}
+
+export interface ListPage<Cursor> {
+  readonly limit?: number;
+  readonly after?: Cursor;
+}
+
+export interface StepRunListCursor {
+  readonly stepKey: string;
+  readonly attempt: number;
+}
+
+export interface ExternalSessionListFilter extends ListPage<
+  TimestampListCursor<ExternalSessionId>
+> {
+  readonly provider?: string;
+}
+
+export interface ApprovalListFilter extends ListPage<
+  TimestampListCursor<ApprovalId>
+> {
+  readonly status?: Approval['status'];
 }
 
 export interface StepRun {
@@ -335,14 +364,22 @@ export interface GoalProgress {
 export interface DomainRepository {
   createProject(project: Project): Promise<Project>;
   getProject(id: ProjectId): Promise<Project | undefined>;
-  listProjects(): Promise<readonly Project[]>;
+  listProjects(
+    page?: ListPage<TimestampListCursor<ProjectId>>,
+  ): Promise<readonly Project[]>;
 
   createConfigRevision(revision: ConfigRevision): Promise<ConfigRevision>;
   getConfigRevision(id: ConfigRevisionId): Promise<ConfigRevision | undefined>;
-  listConfigRevisions(projectId: ProjectId): Promise<readonly ConfigRevision[]>;
+  listConfigRevisions(
+    projectId: ProjectId,
+    page?: ListPage<number>,
+  ): Promise<readonly ConfigRevision[]>;
   createConfigSnapshot(snapshot: ConfigSnapshot): Promise<ConfigSnapshot>;
   getConfigSnapshot(id: ConfigSnapshotId): Promise<ConfigSnapshot | undefined>;
-  listConfigSnapshots(runId: WorkflowRunId): Promise<readonly ConfigSnapshot[]>;
+  listConfigSnapshots(
+    runId: WorkflowRunId,
+    page?: ListPage<TimestampListCursor<ConfigSnapshotId>>,
+  ): Promise<readonly ConfigSnapshot[]>;
 
   createRun(run: WorkflowRun): Promise<WorkflowRun>;
   getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined>;
@@ -351,7 +388,10 @@ export interface DomainRepository {
 
   upsertStepRun(step: StepRun): Promise<StepRun>;
   getStepRun(id: StepRunId): Promise<StepRun | undefined>;
-  listStepRuns(runId: WorkflowRunId): Promise<readonly StepRun[]>;
+  listStepRuns(
+    runId: WorkflowRunId,
+    page?: ListPage<StepRunListCursor>,
+  ): Promise<readonly StepRun[]>;
 
   createExternalSession(session: ExternalSession): Promise<ExternalSession>;
   getExternalSession(
@@ -359,11 +399,15 @@ export interface DomainRepository {
   ): Promise<ExternalSession | undefined>;
   listExternalSessions(
     runId: WorkflowRunId,
+    filter?: ExternalSessionListFilter,
   ): Promise<readonly ExternalSession[]>;
 
   createApproval(approval: Approval): Promise<Approval>;
   getApproval(id: ApprovalId): Promise<Approval | undefined>;
-  listApprovals(runId: WorkflowRunId): Promise<readonly Approval[]>;
+  listApprovals(
+    runId: WorkflowRunId,
+    filter?: ApprovalListFilter,
+  ): Promise<readonly Approval[]>;
   consumeApproval(
     request: ConsumeApprovalRequest,
   ): Promise<Approval | undefined>;
@@ -373,23 +417,39 @@ export interface DomainRepository {
   listInboxMessages(
     runId: WorkflowRunId,
     status?: InboxMessage['status'],
+    page?: ListPage<TimestampListCursor<InboxMessageId>>,
   ): Promise<readonly InboxMessage[]>;
   replyInboxMessage(request: ReplyInboxMessageRequest): Promise<InboxMessage>;
 
   appendEvent(event: DomainEvent): Promise<DomainEvent>;
-  listEvents(runId: WorkflowRunId): Promise<readonly DomainEvent[]>;
+  listEvents(
+    runId: WorkflowRunId,
+    page?: ListPage<number>,
+  ): Promise<readonly DomainEvent[]>;
 
   createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord>;
   getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined>;
-  listArtifacts(runId: WorkflowRunId): Promise<readonly ArtifactRecord[]>;
+  listArtifacts(
+    runId: WorkflowRunId,
+    page?: ListPage<TimestampListCursor<ArtifactId>>,
+  ): Promise<readonly ArtifactRecord[]>;
 
   appendUsage(usage: UsageRecordEntry): Promise<UsageRecordEntry>;
-  listUsage(runId: WorkflowRunId): Promise<readonly UsageRecordEntry[]>;
+  listUsage(
+    runId: WorkflowRunId,
+    page?: ListPage<TimestampListCursor<UsageId>>,
+  ): Promise<readonly UsageRecordEntry[]>;
 
   claimWebhook(receipt: WebhookReceipt): Promise<WebhookClaim>;
 
   createGoalCriterion(criterion: GoalCriterion): Promise<GoalCriterion>;
-  listGoalCriteria(runId: WorkflowRunId): Promise<readonly GoalCriterion[]>;
+  listGoalCriteria(
+    runId: WorkflowRunId,
+    page?: ListPage<number>,
+  ): Promise<readonly GoalCriterion[]>;
   appendGoalProgress(progress: GoalProgress): Promise<GoalProgress>;
-  listGoalProgress(runId: WorkflowRunId): Promise<readonly GoalProgress[]>;
+  listGoalProgress(
+    runId: WorkflowRunId,
+    page?: ListPage<TimestampListCursor<GoalProgressId>>,
+  ): Promise<readonly GoalProgress[]>;
 }

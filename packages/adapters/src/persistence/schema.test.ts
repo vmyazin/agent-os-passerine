@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   approvals,
+  artifacts,
+  configRevisions,
+  configSnapshots,
   domainEvents,
+  externalSessions,
   inboxMessages,
   projects,
   stepRuns,
@@ -42,6 +46,23 @@ describe('Drizzle persistence schema', () => {
     expect(
       getTableConfig(domainEvents).indexes.map((index) => index.config.name),
     ).toContain('domain_events_order_idx');
+    expect(
+      getTableConfig(configRevisions).indexes.map((index) => index.config.name),
+    ).toContain('config_revisions_project_created_idx');
+    expect(
+      getTableConfig(configSnapshots).indexes.map((index) => index.config.name),
+    ).toContain('config_snapshots_run_created_idx');
+    expect(
+      getTableConfig(externalSessions).indexes.map(
+        (index) => index.config.name,
+      ),
+    ).toContain('external_sessions_run_provider_created_idx');
+    expect(
+      getTableConfig(approvals).indexes.map((index) => index.config.name),
+    ).toContain('approvals_run_status_created_idx');
+    expect(
+      getTableConfig(usageRecords).indexes.map((index) => index.config.name),
+    ).toContain('usage_records_run_recorded_idx');
   });
 
   it('uses database enums for state machines', () => {
@@ -55,5 +76,24 @@ describe('Drizzle persistence schema', () => {
         (column) => column.name === 'status',
       )?.columnType,
     ).toContain('Enum');
+  });
+
+  it('bounds number-mode BIGINT columns to JavaScript safe integers', () => {
+    expect(
+      getTableConfig(domainEvents).checks.map((item) => item.name),
+    ).toContain('domain_events_sequence_safe_integer');
+    expect(getTableConfig(artifacts).checks.map((item) => item.name)).toContain(
+      'artifacts_size_safe_integer',
+    );
+    for (const name of [
+      'usage_input_safe_integer',
+      'usage_output_safe_integer',
+      'usage_runtime_safe_integer',
+      'usage_cost_safe_integer',
+    ]) {
+      expect(
+        getTableConfig(usageRecords).checks.map((item) => item.name),
+      ).toContain(name);
+    }
   });
 });

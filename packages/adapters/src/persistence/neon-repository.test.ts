@@ -23,11 +23,17 @@ const source = readFileSync(
   'utf8',
 );
 
-function repositoryWithRows(rows: readonly Record<string, unknown>[]) {
+function repositoryWithRows(
+  rows: readonly Record<string, unknown>[],
+  claimToken = 'test-claim-token',
+) {
   const execute = vi.fn().mockResolvedValue({ rows });
   return {
     execute,
-    repository: new NeonDomainRepository({ execute } as never),
+    repository: new NeonDomainRepository(
+      { execute } as never,
+      () => claimToken,
+    ),
   };
 }
 
@@ -128,7 +134,9 @@ describe('NeonDomainRepository', () => {
       payload: null,
       occurredAt: isoTimestamp('2026-08-16T12:00:00.000Z'),
     } as const;
-    const replay = repositoryWithRows([{ ...event, payloadPresent: true }]);
+    const replay = repositoryWithRows([
+      { ...event, sequence: '1', payloadPresent: true },
+    ]);
 
     await expect(replay.repository.appendEvent(event)).resolves.toEqual(event);
     expect(replay.execute).toHaveBeenCalledTimes(1);
@@ -144,6 +152,16 @@ describe('NeonDomainRepository', () => {
       EventFingerprintConflictError,
     );
     expect(conflict.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts postgres-js array results through the integration database path', async () => {
+    const event = eventWithSequence(91);
+    const execute = vi
+      .fn()
+      .mockResolvedValue([{ ...event, sequence: '91', payloadPresent: false }]);
+    const repository = new NeonDomainRepository({ execute } as never);
+
+    await expect(repository.appendEvent(event)).resolves.toEqual(event);
   });
 
   it('maps a duplicate event sequence to the domain conflict atomically', async () => {
@@ -187,6 +205,20 @@ describe('NeonDomainRepository', () => {
       repository.appendEvent(eventWithSequence(2)),
     ).rejects.toBeInstanceOf(EventSequenceConflictError);
     expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps postgres-js constraint_name errors from the integration path', async () => {
+    const postgresError = Object.assign(new Error('duplicate sequence'), {
+      code: '23505',
+      constraint_name: 'domain_events_run_sequence_unique',
+    });
+    const query = vi.fn().mockRejectedValue(postgresError);
+    const database = drizzle({ client: { query } as never, schema });
+    const repository = new NeonDomainRepository(database);
+
+    await expect(
+      repository.appendEvent(eventWithSequence(4)),
+    ).rejects.toBeInstanceOf(EventSequenceConflictError);
   });
 
   it('stops safely on cyclic or hostile error cause chains', async () => {
@@ -356,6 +388,31 @@ describe('NeonDomainRepository', () => {
     expectJsonNullParameters(query, 0);
   });
 
+  it('pins opaque cursor comparisons and ordering to bytewise collation', async () => {
+    const { query, repository } = repositoryRecordingGeneratedQueries();
+    const at = isoTimestamp('2026-08-17T12:00:00.000Z');
+
+    await recordGeneratedQuery(query, () =>
+      repository.listProjects({
+        limit: 2,
+        after: { at, id: persistenceId('project', 'Z') },
+      }),
+    );
+    expect(query.mock.calls.at(-1)?.[0]).toMatch(/id" collate "C"/);
+
+    await recordGeneratedQuery(query, () =>
+      repository.listStepRuns(runId, {
+        limit: 2,
+        after: { stepKey: 'Z', attempt: 1 },
+      }),
+    );
+    expect(
+      ((query.mock.calls.at(-1)?.[0] as string | undefined) ?? '').match(
+        /step_key" collate "C"/g,
+      ),
+    ).toHaveLength(3);
+  });
+
   it('uses a single atomic statement to resolve usage idempotency', async () => {
     const usage = {
       idempotencyId: persistenceId('usage', 'usage-1'),
@@ -367,12 +424,21 @@ describe('NeonDomainRepository', () => {
       microdollars: 4,
       recordedAt: isoTimestamp('2026-08-16T12:00:00.000Z'),
     } as const;
-    const replay = repositoryWithRows([usage]);
+    const replay = repositoryWithRows([
+      {
+        ...usage,
+        inputTokens: '1',
+        outputTokens: '2',
+        runtimeMs: '3',
+        microdollars: '4',
+      },
+    ]);
     await expect(replay.repository.appendUsage(usage)).resolves.toEqual(usage);
     expect(replay.execute).toHaveBeenCalledTimes(1);
     expect(executedSql(replay.execute)).toMatch(
       /insert into "usage_records"[\s\S]*on conflict[\s\S]*do update[\s\S]*returning/,
     );
+    expect(executedSql(replay.execute)).not.toContain('::float8');
 
     const conflict = repositoryWithRows([{ ...usage, microdollars: 99 }]);
     await expect(conflict.repository.appendUsage(usage)).rejects.toBeInstanceOf(
@@ -410,17 +476,23 @@ describe('NeonDomainRepository', () => {
       receivedAt: isoTimestamp('2026-08-16T12:00:00.000Z'),
       expiresAt: isoTimestamp('2026-08-23T12:00:00.000Z'),
     } as const;
-    const claimed = repositoryWithRows([{ ...receipt, claimed: true }]);
+    const claimed = repositoryWithRows([
+      { ...receipt, claimToken: 'test-claim-token' },
+    ]);
     await expect(claimed.repository.claimWebhook(receipt)).resolves.toEqual({
       claimed: true,
       receipt,
     });
     expect(claimed.execute).toHaveBeenCalledTimes(1);
     expect(executedSql(claimed.execute)).toMatch(
-      /insert into "webhook_receipts"[\s\S]*on conflict[\s\S]*do update[\s\S]*xmax[\s\S]*returning|returning[\s\S]*xmax/,
+      /insert into "webhook_receipts"[\s\S]*"claim_token"[\s\S]*on conflict[\s\S]*do update[\s\S]*returning/,
     );
+    expect(executedSql(claimed.execute)).not.toContain('xmax');
 
-    const replay = repositoryWithRows([{ ...receipt, claimed: false }]);
+    const replay = repositoryWithRows(
+      [{ ...receipt, claimToken: 'original-claim-token' }],
+      'replay-claim-token',
+    );
     await expect(replay.repository.claimWebhook(receipt)).resolves.toEqual({
       claimed: false,
       receipt,

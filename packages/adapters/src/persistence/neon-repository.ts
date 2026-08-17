@@ -1,8 +1,11 @@
+import { randomUUID } from 'node:crypto';
+
 import { neon, types } from '@neondatabase/serverless';
 import { isoTimestampEpochMicroseconds } from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
+  ApprovalListFilter,
   ArtifactId,
   ArtifactRecord,
   ConfigRevision,
@@ -14,17 +17,23 @@ import type {
   DomainRepository,
   ExternalSession,
   ExternalSessionId,
+  ExternalSessionListFilter,
   GoalCriterion,
   GoalProgress,
+  GoalProgressId,
   InboxMessage,
   InboxMessageId,
   JsonValue,
+  ListPage,
   Project,
   ProjectId,
   ReplyInboxMessageRequest,
   RunListFilter,
   StepRun,
   StepRunId,
+  StepRunListCursor,
+  TimestampListCursor,
+  UsageId,
   UsageRecordEntry,
   WebhookClaim,
   WebhookReceipt,
@@ -32,7 +41,8 @@ import type {
   WorkflowRunId,
   WorkflowRunUpdate,
 } from '@agentos/core';
-import { and, asc, eq, gt, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
+import type { PgColumn } from 'drizzle-orm/pg-core';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
 
 import {
@@ -89,7 +99,16 @@ import {
   usageRecords,
   workflowRuns,
 } from './schema.js';
-import { assertValidUsage } from './validation.js';
+import {
+  assertNonNegativeSafeInteger,
+  assertValidArtifact,
+  assertValidConfigRevision,
+  assertValidEvent,
+  assertValidGoalCriterion,
+  assertValidStepRun,
+  assertValidUsage,
+} from './validation.js';
+import { boundedListLimit } from './pagination.js';
 
 type Database = NeonHttpDatabase<typeof schema>;
 
@@ -97,6 +116,21 @@ function one<T>(rows: readonly T[], description: string): T {
   const row = rows[0];
   if (row === undefined) throw new Error(`${description} was not returned`);
   return row;
+}
+
+function executionRows(
+  result: unknown,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (Array.isArray(result)) {
+    return result as readonly Readonly<Record<string, unknown>>[];
+  }
+  if (typeof result === 'object' && result !== null) {
+    const rows = Reflect.get(result, 'rows');
+    if (Array.isArray(rows)) {
+      return rows as readonly Readonly<Record<string, unknown>>[];
+    }
+  }
+  throw new TypeError('Database execution did not return rows');
 }
 
 function mappedOne<T>(
@@ -127,6 +161,30 @@ function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
     isoTimestampEpochMicroseconds(row.recordedAt) ===
       isoTimestampEpochMicroseconds(usage.recordedAt)
   );
+}
+
+function databaseSafeInteger(value: unknown, field: string): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  assertNonNegativeSafeInteger(parsed, field);
+  return parsed;
+}
+
+function afterTimestamp(
+  timestampColumn: PgColumn,
+  idColumn: PgColumn,
+  cursor: TimestampListCursor<string> | undefined,
+) {
+  const orderedId = bytewiseText(idColumn);
+  return cursor === undefined
+    ? undefined
+    : or(
+        gt(timestampColumn, cursor.at),
+        and(eq(timestampColumn, cursor.at), gt(orderedId, cursor.id)),
+      );
+}
+
+function bytewiseText(column: PgColumn) {
+  return sql`${column} collate "C"`;
 }
 
 function jsonbValue(value: JsonValue) {
@@ -163,7 +221,9 @@ function isPostgresConstraintError(
     let cause: unknown;
     try {
       code = Reflect.get(current, 'code');
-      currentConstraint = Reflect.get(current, 'constraint');
+      currentConstraint =
+        Reflect.get(current, 'constraint') ??
+        Reflect.get(current, 'constraint_name');
       cause = Reflect.get(current, 'cause');
     } catch {
       return false;
@@ -185,7 +245,10 @@ const timestampTypeParsers = {
 };
 
 export class NeonDomainRepository implements DomainRepository {
-  public constructor(private readonly database: Database) {}
+  public constructor(
+    private readonly database: Database,
+    private readonly createClaimToken: () => string = randomUUID,
+  ) {}
 
   async createProject(project: Project): Promise<Project> {
     return mappedOne(
@@ -207,12 +270,16 @@ export class NeonDomainRepository implements DomainRepository {
     return row === undefined ? undefined : mapProjectRow(row);
   }
 
-  async listProjects(): Promise<readonly Project[]> {
+  async listProjects(
+    page: ListPage<TimestampListCursor<ProjectId>> = {},
+  ): Promise<readonly Project[]> {
     return mappedRows(
       await this.database
         .select(projectSelection)
         .from(projects)
-        .orderBy(asc(projects.createdAt)),
+        .where(afterTimestamp(projects.createdAt, projects.id, page.after))
+        .orderBy(asc(projects.createdAt), asc(bytewiseText(projects.id)))
+        .limit(boundedListLimit(page.limit)),
       mapProjectRow,
     );
   }
@@ -220,6 +287,7 @@ export class NeonDomainRepository implements DomainRepository {
   async createConfigRevision(
     revision: ConfigRevision,
   ): Promise<ConfigRevision> {
+    assertValidConfigRevision(revision);
     return mappedOne(
       await this.database
         .insert(configRevisions)
@@ -243,13 +311,22 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listConfigRevisions(
     projectId: ProjectId,
+    page: ListPage<number> = {},
   ): Promise<readonly ConfigRevision[]> {
     return mappedRows(
       await this.database
         .select(configRevisionSelection)
         .from(configRevisions)
-        .where(eq(configRevisions.projectId, projectId))
-        .orderBy(asc(configRevisions.revision)),
+        .where(
+          and(
+            eq(configRevisions.projectId, projectId),
+            page.after === undefined
+              ? undefined
+              : gt(configRevisions.revision, page.after),
+          ),
+        )
+        .orderBy(asc(configRevisions.revision))
+        .limit(boundedListLimit(page.limit)),
       mapConfigRevisionRow,
     );
   }
@@ -280,13 +357,27 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listConfigSnapshots(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<ConfigSnapshotId>> = {},
   ): Promise<readonly ConfigSnapshot[]> {
     return mappedRows(
       await this.database
         .select(configSnapshotSelection)
         .from(configSnapshots)
-        .where(eq(configSnapshots.runId, runId))
-        .orderBy(asc(configSnapshots.createdAt)),
+        .where(
+          and(
+            eq(configSnapshots.runId, runId),
+            afterTimestamp(
+              configSnapshots.createdAt,
+              configSnapshots.id,
+              page.after,
+            ),
+          ),
+        )
+        .orderBy(
+          asc(configSnapshots.createdAt),
+          asc(bytewiseText(configSnapshots.id)),
+        )
+        .limit(boundedListLimit(page.limit)),
       mapConfigSnapshotRow,
     );
   }
@@ -329,9 +420,18 @@ export class NeonDomainRepository implements DomainRepository {
             filter.status === undefined
               ? undefined
               : eq(workflowRuns.status, filter.status),
+            afterTimestamp(
+              workflowRuns.createdAt,
+              workflowRuns.id,
+              filter.after,
+            ),
           ),
         )
-        .orderBy(asc(workflowRuns.createdAt)),
+        .orderBy(
+          asc(workflowRuns.createdAt),
+          asc(bytewiseText(workflowRuns.id)),
+        )
+        .limit(boundedListLimit(filter.limit)),
       mapWorkflowRunRow,
     );
   }
@@ -356,6 +456,7 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async upsertStepRun(step: StepRun): Promise<StepRun> {
+    assertValidStepRun(step);
     const rows = await this.database
       .insert(stepRuns)
       .values({
@@ -391,13 +492,30 @@ export class NeonDomainRepository implements DomainRepository {
     return row === undefined ? undefined : mapStepRunRow(row);
   }
 
-  async listStepRuns(runId: WorkflowRunId): Promise<readonly StepRun[]> {
+  async listStepRuns(
+    runId: WorkflowRunId,
+    page: ListPage<StepRunListCursor> = {},
+  ): Promise<readonly StepRun[]> {
     return mappedRows(
       await this.database
         .select(stepRunSelection)
         .from(stepRuns)
-        .where(eq(stepRuns.runId, runId))
-        .orderBy(asc(stepRuns.stepKey), asc(stepRuns.attempt)),
+        .where(
+          and(
+            eq(stepRuns.runId, runId),
+            page.after === undefined
+              ? undefined
+              : or(
+                  gt(bytewiseText(stepRuns.stepKey), page.after.stepKey),
+                  and(
+                    eq(bytewiseText(stepRuns.stepKey), page.after.stepKey),
+                    gt(stepRuns.attempt, page.after.attempt),
+                  ),
+                ),
+          ),
+        )
+        .orderBy(asc(bytewiseText(stepRuns.stepKey)), asc(stepRuns.attempt))
+        .limit(boundedListLimit(page.limit)),
       mapStepRunRow,
     );
   }
@@ -428,13 +546,30 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listExternalSessions(
     runId: WorkflowRunId,
+    filter: ExternalSessionListFilter = {},
   ): Promise<readonly ExternalSession[]> {
     return mappedRows(
       await this.database
         .select(externalSessionSelection)
         .from(externalSessions)
-        .where(eq(externalSessions.runId, runId))
-        .orderBy(asc(externalSessions.createdAt)),
+        .where(
+          and(
+            eq(externalSessions.runId, runId),
+            filter.provider === undefined
+              ? undefined
+              : eq(externalSessions.provider, filter.provider),
+            afterTimestamp(
+              externalSessions.createdAt,
+              externalSessions.id,
+              filter.after,
+            ),
+          ),
+        )
+        .orderBy(
+          asc(externalSessions.createdAt),
+          asc(bytewiseText(externalSessions.id)),
+        )
+        .limit(boundedListLimit(filter.limit)),
       mapExternalSessionRow,
     );
   }
@@ -459,13 +594,25 @@ export class NeonDomainRepository implements DomainRepository {
     return row === undefined ? undefined : mapApprovalRow(row);
   }
 
-  async listApprovals(runId: WorkflowRunId): Promise<readonly Approval[]> {
+  async listApprovals(
+    runId: WorkflowRunId,
+    filter: ApprovalListFilter = {},
+  ): Promise<readonly Approval[]> {
     return mappedRows(
       await this.database
         .select(approvalSelection)
         .from(approvals)
-        .where(eq(approvals.runId, runId))
-        .orderBy(asc(approvals.createdAt)),
+        .where(
+          and(
+            eq(approvals.runId, runId),
+            filter.status === undefined
+              ? undefined
+              : eq(approvals.status, filter.status),
+            afterTimestamp(approvals.createdAt, approvals.id, filter.after),
+          ),
+        )
+        .orderBy(asc(approvals.createdAt), asc(bytewiseText(approvals.id)))
+        .limit(boundedListLimit(filter.limit)),
       mapApprovalRow,
     );
   }
@@ -518,6 +665,7 @@ export class NeonDomainRepository implements DomainRepository {
   async listInboxMessages(
     runId: WorkflowRunId,
     status?: InboxMessage['status'],
+    page: ListPage<TimestampListCursor<InboxMessageId>> = {},
   ): Promise<readonly InboxMessage[]> {
     return mappedRows(
       await this.database
@@ -527,9 +675,18 @@ export class NeonDomainRepository implements DomainRepository {
           and(
             eq(inboxMessages.runId, runId),
             status === undefined ? undefined : eq(inboxMessages.status, status),
+            afterTimestamp(
+              inboxMessages.createdAt,
+              inboxMessages.id,
+              page.after,
+            ),
           ),
         )
-        .orderBy(asc(inboxMessages.createdAt)),
+        .orderBy(
+          asc(inboxMessages.createdAt),
+          asc(bytewiseText(inboxMessages.id)),
+        )
+        .limit(boundedListLimit(page.limit)),
       mapInboxMessageRow,
     );
   }
@@ -561,6 +718,7 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async appendEvent(event: DomainEvent): Promise<DomainEvent> {
+    assertValidEvent(event);
     let result: { readonly rows: readonly Record<string, unknown>[] };
     try {
       result = await this.database.execute<Record<string, unknown>>(sql`
@@ -574,7 +732,7 @@ export class NeonDomainRepository implements DomainRepository {
           "run_id" as "runId",
           "event_id" as "eventId",
           "fingerprint",
-          "sequence"::float8 as "sequence",
+          "sequence"::text as "sequence",
           "type",
           "payload",
           ("payload" is not null) as "payloadPresent",
@@ -588,25 +746,41 @@ export class NeonDomainRepository implements DomainRepository {
       }
       throw error;
     }
-    const existing = mapDomainEventRow(one(result.rows, 'Event'));
+    const eventRow = one(executionRows(result), 'Event');
+    const existing = mapDomainEventRow({
+      ...eventRow,
+      sequence: databaseSafeInteger(eventRow.sequence, 'sequence'),
+    });
     if (existing.fingerprint !== event.fingerprint) {
       throw new EventFingerprintConflictError(event.runId, event.eventId);
     }
     return existing;
   }
 
-  async listEvents(runId: WorkflowRunId): Promise<readonly DomainEvent[]> {
+  async listEvents(
+    runId: WorkflowRunId,
+    page: ListPage<number> = {},
+  ): Promise<readonly DomainEvent[]> {
     return mappedRows(
       await this.database
         .select(domainEventSelection)
         .from(domainEvents)
-        .where(eq(domainEvents.runId, runId))
-        .orderBy(asc(domainEvents.sequence)),
+        .where(
+          and(
+            eq(domainEvents.runId, runId),
+            page.after === undefined
+              ? undefined
+              : gt(domainEvents.sequence, page.after),
+          ),
+        )
+        .orderBy(asc(domainEvents.sequence))
+        .limit(boundedListLimit(page.limit)),
       mapDomainEventRow,
     );
   }
 
   async createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord> {
+    assertValidArtifact(artifact);
     return mappedOne(
       await this.database
         .insert(artifacts)
@@ -628,13 +802,20 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listArtifacts(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<ArtifactId>> = {},
   ): Promise<readonly ArtifactRecord[]> {
     return mappedRows(
       await this.database
         .select(artifactSelection)
         .from(artifacts)
-        .where(eq(artifacts.runId, runId))
-        .orderBy(asc(artifacts.createdAt)),
+        .where(
+          and(
+            eq(artifacts.runId, runId),
+            afterTimestamp(artifacts.createdAt, artifacts.id, page.after),
+          ),
+        )
+        .orderBy(asc(artifacts.createdAt), asc(bytewiseText(artifacts.id)))
+        .limit(boundedListLimit(page.limit)),
       mapArtifactRow,
     );
   }
@@ -653,56 +834,81 @@ export class NeonDomainRepository implements DomainRepository {
         "run_id" as "runId",
         "step_run_id" as "stepRunId",
         "model",
-        "input_tokens"::float8 as "inputTokens",
-        "output_tokens"::float8 as "outputTokens",
-        "runtime_ms"::float8 as "runtimeMs",
-        "microdollars"::float8 as "microdollars",
+        "input_tokens"::text as "inputTokens",
+        "output_tokens"::text as "outputTokens",
+        "runtime_ms"::text as "runtimeMs",
+        "microdollars"::text as "microdollars",
         to_char("recorded_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "recordedAt"
     `);
-    const existing = mapUsageRecordRow(one(result.rows, 'Usage record'));
+    const usageRow = one(executionRows(result), 'Usage record');
+    const existing = mapUsageRecordRow({
+      ...usageRow,
+      inputTokens: databaseSafeInteger(usageRow.inputTokens, 'inputTokens'),
+      outputTokens: databaseSafeInteger(usageRow.outputTokens, 'outputTokens'),
+      runtimeMs: databaseSafeInteger(usageRow.runtimeMs, 'runtimeMs'),
+      microdollars: databaseSafeInteger(usageRow.microdollars, 'microdollars'),
+    });
     if (!usageMatches(existing, usage)) {
       throw new IdempotencyConflictError('Usage record', usage.idempotencyId);
     }
     return existing;
   }
 
-  async listUsage(runId: WorkflowRunId): Promise<readonly UsageRecordEntry[]> {
+  async listUsage(
+    runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<UsageId>> = {},
+  ): Promise<readonly UsageRecordEntry[]> {
     return mappedRows(
       await this.database
         .select(usageRecordSelection)
         .from(usageRecords)
-        .where(eq(usageRecords.runId, runId))
-        .orderBy(asc(usageRecords.recordedAt)),
+        .where(
+          and(
+            eq(usageRecords.runId, runId),
+            afterTimestamp(
+              usageRecords.recordedAt,
+              usageRecords.idempotencyId,
+              page.after,
+            ),
+          ),
+        )
+        .orderBy(
+          asc(usageRecords.recordedAt),
+          asc(bytewiseText(usageRecords.idempotencyId)),
+        )
+        .limit(boundedListLimit(page.limit)),
       mapUsageRecordRow,
     );
   }
 
   async claimWebhook(receipt: WebhookReceipt): Promise<WebhookClaim> {
+    const claimToken = this.createClaimToken();
     const result = await this.database.execute<Record<string, unknown>>(sql`
       insert into "webhook_receipts"
-        ("source", "delivery_id", "fingerprint", "received_at", "expires_at")
+        ("source", "delivery_id", "fingerprint", "claim_token", "received_at", "expires_at")
       values
-        (${receipt.source}, ${receipt.deliveryId}, ${receipt.fingerprint}, ${receipt.receivedAt}, ${receipt.expiresAt})
+        (${receipt.source}, ${receipt.deliveryId}, ${receipt.fingerprint}, ${claimToken}, ${receipt.receivedAt}, ${receipt.expiresAt})
       on conflict ("source", "delivery_id") do update
         set "fingerprint" = "webhook_receipts"."fingerprint"
       returning
         "source",
         "delivery_id" as "deliveryId",
         "fingerprint",
+        "claim_token" as "claimToken",
         to_char("received_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "receivedAt",
-        to_char("expires_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expiresAt",
-        (xmax = 0) as "claimed"
+        to_char("expires_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "expiresAt"
     `);
-    const raw = one(result.rows, 'Webhook receipt');
-    const { claimed, ...receiptRow } = raw;
+    const raw = one(executionRows(result), 'Webhook receipt');
+    const { claimToken: storedClaimToken, ...receiptRow } = raw;
     const existing = mapWebhookReceiptRow(receiptRow);
     if (existing.fingerprint !== receipt.fingerprint) {
       throw new IdempotencyConflictError('Webhook receipt', receipt.deliveryId);
     }
-    return { claimed: claimed === true, receipt: existing };
+    return { claimed: storedClaimToken === claimToken, receipt: existing };
   }
 
   async createGoalCriterion(criterion: GoalCriterion): Promise<GoalCriterion> {
+    assertValidGoalCriterion(criterion);
     return mappedOne(
       await this.database
         .insert(goalCriteria)
@@ -715,13 +921,22 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listGoalCriteria(
     runId: WorkflowRunId,
+    page: ListPage<number> = {},
   ): Promise<readonly GoalCriterion[]> {
     return mappedRows(
       await this.database
         .select(goalCriterionSelection)
         .from(goalCriteria)
-        .where(eq(goalCriteria.runId, runId))
-        .orderBy(asc(goalCriteria.ordinal)),
+        .where(
+          and(
+            eq(goalCriteria.runId, runId),
+            page.after === undefined
+              ? undefined
+              : gt(goalCriteria.ordinal, page.after),
+          ),
+        )
+        .orderBy(asc(goalCriteria.ordinal))
+        .limit(boundedListLimit(page.limit)),
       mapGoalCriterionRow,
     );
   }
@@ -742,13 +957,27 @@ export class NeonDomainRepository implements DomainRepository {
 
   async listGoalProgress(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<GoalProgressId>> = {},
   ): Promise<readonly GoalProgress[]> {
     return mappedRows(
       await this.database
         .select(goalProgressSelection)
         .from(goalProgress)
-        .where(eq(goalProgress.runId, runId))
-        .orderBy(asc(goalProgress.recordedAt)),
+        .where(
+          and(
+            eq(goalProgress.runId, runId),
+            afterTimestamp(
+              goalProgress.recordedAt,
+              goalProgress.id,
+              page.after,
+            ),
+          ),
+        )
+        .orderBy(
+          asc(goalProgress.recordedAt),
+          asc(bytewiseText(goalProgress.id)),
+        )
+        .limit(boundedListLimit(page.limit)),
       mapGoalProgressRow,
     );
   }

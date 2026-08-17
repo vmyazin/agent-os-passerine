@@ -74,4 +74,36 @@ describe('domain persistence migration', () => {
     expect(migration).toContain('"microdollars" bigint not null');
     expect(migration).toContain('check ("usage_records"."microdollars" >= 0)');
   });
+
+  it('backfills stable webhook claim tokens before enforcing not-null', () => {
+    expect(migration).toContain(
+      'alter table "webhook_receipts" add column "claim_token" text;',
+    );
+    expect(migration).toContain('update "webhook_receipts"');
+    expect(migration).toContain('alter column "claim_token" set not null');
+  });
+
+  it('bounds bigint values and indexes every production list path', () => {
+    expect(migration).toContain('9007199254740991');
+    for (const index of [
+      'projects_created_idx',
+      'config_revisions_project_created_idx',
+      'config_snapshots_run_created_idx',
+      'external_sessions_run_created_idx',
+      'external_sessions_run_provider_created_idx',
+      'approvals_run_created_idx',
+      'approvals_run_status_created_idx',
+      'inbox_messages_run_created_idx',
+      'inbox_messages_run_status_created_idx',
+      'artifacts_run_created_idx',
+      'usage_records_run_recorded_idx',
+      'workflow_runs_created_idx',
+      'workflow_runs_project_created_idx',
+      'workflow_runs_status_created_idx',
+      'step_runs_run_order_idx',
+    ]) {
+      expect(migration).toContain(`index "${index}"`);
+    }
+    expect(migration).toContain('collate "c"');
+  });
 });

@@ -2,6 +2,7 @@ import { isoTimestamp, isoTimestampEpochMicroseconds } from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
+  ApprovalListFilter,
   ArtifactId,
   ArtifactRecord,
   ConfigRevision,
@@ -13,16 +14,22 @@ import type {
   DomainRepository,
   ExternalSession,
   ExternalSessionId,
+  ExternalSessionListFilter,
   GoalCriterion,
   GoalProgress,
+  GoalProgressId,
   InboxMessage,
   InboxMessageId,
+  ListPage,
   Project,
   ProjectId,
   ReplyInboxMessageRequest,
   RunListFilter,
   StepRun,
   StepRunId,
+  StepRunListCursor,
+  TimestampListCursor,
+  UsageId,
   UsageRecordEntry,
   WebhookClaim,
   WebhookReceipt,
@@ -36,7 +43,15 @@ import {
   EventSequenceConflictError,
   IdempotencyConflictError,
 } from './errors.js';
-import { assertValidUsage } from './validation.js';
+import { boundedListLimit } from './pagination.js';
+import {
+  assertValidArtifact,
+  assertValidConfigRevision,
+  assertValidEvent,
+  assertValidGoalCriterion,
+  assertValidStepRun,
+  assertValidUsage,
+} from './validation.js';
 
 export {
   EventFingerprintConflictError,
@@ -84,22 +99,65 @@ function insertUnique<T>(
   return copy(stored);
 }
 
+function compareTimestamped(
+  leftAt: string,
+  leftId: string,
+  rightAt: string,
+  rightId: string,
+): number {
+  const instantOrder =
+    isoTimestampEpochMicroseconds(isoTimestamp(leftAt)) -
+    isoTimestampEpochMicroseconds(isoTimestamp(rightAt));
+  return instantOrder === 0n
+    ? compareOpaqueText(leftId, rightId)
+    : instantOrder < 0n
+      ? -1
+      : 1;
+}
+
+const textEncoder = new TextEncoder();
+
+function compareOpaqueText(left: string, right: string): number {
+  const leftBytes = textEncoder.encode(left);
+  const rightBytes = textEncoder.encode(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function isAfterTimestamp(
+  at: string,
+  id: string,
+  cursor: TimestampListCursor<string> | undefined,
+): boolean {
+  return (
+    cursor === undefined || compareTimestamped(at, id, cursor.at, cursor.id) > 0
+  );
+}
+
 export class InMemoryDomainRepository implements DomainRepository {
   readonly #projects = new Map<string, Project>();
   readonly #configRevisions = new Map<string, ConfigRevision>();
+  readonly #configRevisionKeys = new Map<string, string>();
   readonly #configSnapshots = new Map<string, ConfigSnapshot>();
   readonly #runs = new Map<string, WorkflowRun>();
   readonly #stepRuns = new Map<string, StepRun>();
   readonly #stepKeys = new Map<string, string>();
   readonly #externalSessions = new Map<string, ExternalSession>();
+  readonly #externalSessionKeys = new Map<string, string>();
   readonly #approvals = new Map<string, Approval>();
   readonly #inboxMessages = new Map<string, InboxMessage>();
   readonly #events = new Map<string, DomainEvent>();
   readonly #eventSequences = new Map<string, string>();
   readonly #artifacts = new Map<string, ArtifactRecord>();
+  readonly #artifactKeys = new Map<string, string>();
   readonly #usage = new Map<string, UsageRecordEntry>();
   readonly #webhooks = new Map<string, WebhookReceipt>();
   readonly #goalCriteria = new Map<string, GoalCriterion>();
+  readonly #goalCriterionKeys = new Map<string, string>();
   readonly #goalProgress = new Map<string, GoalProgress>();
 
   async createProject(project: Project): Promise<Project> {
@@ -111,19 +169,45 @@ export class InMemoryDomainRepository implements DomainRepository {
     return value === undefined ? undefined : copy(value);
   }
 
-  async listProjects(): Promise<readonly Project[]> {
-    return copy([...this.#projects.values()]);
+  async listProjects(
+    page: ListPage<TimestampListCursor<ProjectId>> = {},
+  ): Promise<readonly Project[]> {
+    return copy(
+      [...this.#projects.values()]
+        .filter((project) =>
+          isAfterTimestamp(project.createdAt, project.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
+    );
   }
 
   async createConfigRevision(
     revision: ConfigRevision,
   ): Promise<ConfigRevision> {
-    return insertUnique(
+    requireEntry(this.#projects, revision.projectId, 'Project');
+    assertValidConfigRevision(revision);
+    const key = `${revision.projectId}\u0000${revision.revision}`;
+    if (this.#configRevisionKeys.has(key)) {
+      throw new Error(
+        `Config revision ${revision.revision} for project ${revision.projectId} already exists`,
+      );
+    }
+    const created = insertUnique(
       this.#configRevisions,
       revision.id,
       revision,
       'Config revision',
     );
+    this.#configRevisionKeys.set(key, revision.id);
+    return created;
   }
 
   async getConfigRevision(
@@ -135,17 +219,29 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listConfigRevisions(
     projectId: ProjectId,
+    page: ListPage<number> = {},
   ): Promise<readonly ConfigRevision[]> {
     return copy(
       [...this.#configRevisions.values()]
-        .filter((revision) => revision.projectId === projectId)
-        .sort((left, right) => left.revision - right.revision),
+        .filter(
+          (revision) =>
+            revision.projectId === projectId &&
+            (page.after === undefined || revision.revision > page.after),
+        )
+        .sort((left, right) => left.revision - right.revision)
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async createConfigSnapshot(
     snapshot: ConfigSnapshot,
   ): Promise<ConfigSnapshot> {
+    requireEntry(this.#runs, snapshot.runId, 'Run');
+    requireEntry(
+      this.#configRevisions,
+      snapshot.configRevisionId,
+      'Config revision',
+    );
     return insertUnique(
       this.#configSnapshots,
       snapshot.id,
@@ -163,15 +259,36 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listConfigSnapshots(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<ConfigSnapshotId>> = {},
   ): Promise<readonly ConfigSnapshot[]> {
     return copy(
-      [...this.#configSnapshots.values()].filter(
-        (snapshot) => snapshot.runId === runId,
-      ),
+      [...this.#configSnapshots.values()]
+        .filter(
+          (snapshot) =>
+            snapshot.runId === runId &&
+            isAfterTimestamp(snapshot.createdAt, snapshot.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async createRun(run: WorkflowRun): Promise<WorkflowRun> {
+    requireEntry(this.#projects, run.projectId, 'Project');
+    if (run.configRevisionId !== undefined) {
+      requireEntry(
+        this.#configRevisions,
+        run.configRevisionId,
+        'Config revision',
+      );
+    }
     return insertUnique(this.#runs, run.id, run, 'Run');
   }
 
@@ -182,12 +299,23 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listRuns(filter: RunListFilter = {}): Promise<readonly WorkflowRun[]> {
     return copy(
-      [...this.#runs.values()].filter(
-        (run) =>
-          (filter.projectId === undefined ||
-            run.projectId === filter.projectId) &&
-          (filter.status === undefined || run.status === filter.status),
-      ),
+      [...this.#runs.values()]
+        .filter(
+          (run) =>
+            (filter.projectId === undefined ||
+              run.projectId === filter.projectId) &&
+            (filter.status === undefined || run.status === filter.status) &&
+            isAfterTimestamp(run.createdAt, run.id, filter.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(filter.limit)),
     );
   }
 
@@ -204,6 +332,15 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async upsertStepRun(step: StepRun): Promise<StepRun> {
     assertPersistenceTimestamps(step);
+    requireEntry(this.#runs, step.runId, 'Run');
+    assertValidStepRun(step);
+    if (step.externalSessionId !== undefined) {
+      requireEntry(
+        this.#externalSessions,
+        step.externalSessionId,
+        'External session',
+      );
+    }
     const key = `${step.runId}\u0000${step.stepKey}\u0000${step.attempt}`;
     const existingId = this.#stepKeys.get(key);
     if (existingId === undefined) {
@@ -227,27 +364,50 @@ export class InMemoryDomainRepository implements DomainRepository {
     return value === undefined ? undefined : copy(value);
   }
 
-  async listStepRuns(runId: WorkflowRunId): Promise<readonly StepRun[]> {
+  async listStepRuns(
+    runId: WorkflowRunId,
+    page: ListPage<StepRunListCursor> = {},
+  ): Promise<readonly StepRun[]> {
     return copy(
       [...this.#stepRuns.values()]
-        .filter((step) => step.runId === runId)
+        .filter(
+          (step) =>
+            step.runId === runId &&
+            (page.after === undefined ||
+              compareOpaqueText(step.stepKey, page.after.stepKey) > 0 ||
+              (step.stepKey === page.after.stepKey &&
+                step.attempt > page.after.attempt)),
+        )
         .sort((left, right) =>
           left.stepKey === right.stepKey
             ? left.attempt - right.attempt
-            : left.stepKey.localeCompare(right.stepKey),
-        ),
+            : compareOpaqueText(left.stepKey, right.stepKey),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async createExternalSession(
     session: ExternalSession,
   ): Promise<ExternalSession> {
-    return insertUnique(
+    requireEntry(this.#runs, session.runId, 'Run');
+    if (session.stepRunId !== undefined) {
+      requireEntry(this.#stepRuns, session.stepRunId, 'Step run');
+    }
+    const key = `${session.provider}\u0000${session.externalId}`;
+    if (this.#externalSessionKeys.has(key)) {
+      throw new Error(
+        `External session ${session.provider}/${session.externalId} already exists`,
+      );
+    }
+    const created = insertUnique(
       this.#externalSessions,
       session.id,
       session,
       'External session',
     );
+    this.#externalSessionKeys.set(key, session.id);
+    return created;
   }
 
   async getExternalSession(
@@ -259,15 +419,31 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listExternalSessions(
     runId: WorkflowRunId,
+    filter: ExternalSessionListFilter = {},
   ): Promise<readonly ExternalSession[]> {
     return copy(
-      [...this.#externalSessions.values()].filter(
-        (session) => session.runId === runId,
-      ),
+      [...this.#externalSessions.values()]
+        .filter(
+          (session) =>
+            session.runId === runId &&
+            (filter.provider === undefined ||
+              session.provider === filter.provider) &&
+            isAfterTimestamp(session.createdAt, session.id, filter.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(filter.limit)),
     );
   }
 
   async createApproval(approval: Approval): Promise<Approval> {
+    requireEntry(this.#runs, approval.runId, 'Run');
     return insertUnique(this.#approvals, approval.id, approval, 'Approval');
   }
 
@@ -276,11 +452,28 @@ export class InMemoryDomainRepository implements DomainRepository {
     return value === undefined ? undefined : copy(value);
   }
 
-  async listApprovals(runId: WorkflowRunId): Promise<readonly Approval[]> {
+  async listApprovals(
+    runId: WorkflowRunId,
+    filter: ApprovalListFilter = {},
+  ): Promise<readonly Approval[]> {
     return copy(
-      [...this.#approvals.values()].filter(
-        (approval) => approval.runId === runId,
-      ),
+      [...this.#approvals.values()]
+        .filter(
+          (approval) =>
+            approval.runId === runId &&
+            (filter.status === undefined ||
+              approval.status === filter.status) &&
+            isAfterTimestamp(approval.createdAt, approval.id, filter.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(filter.limit)),
     );
   }
 
@@ -310,6 +503,10 @@ export class InMemoryDomainRepository implements DomainRepository {
   }
 
   async createInboxMessage(message: InboxMessage): Promise<InboxMessage> {
+    requireEntry(this.#runs, message.runId, 'Run');
+    if (message.stepRunId !== undefined) {
+      requireEntry(this.#stepRuns, message.stepRunId, 'Step run');
+    }
     return insertUnique(
       this.#inboxMessages,
       message.id,
@@ -326,13 +523,25 @@ export class InMemoryDomainRepository implements DomainRepository {
   async listInboxMessages(
     runId: WorkflowRunId,
     status?: InboxMessage['status'],
+    page: ListPage<TimestampListCursor<InboxMessageId>> = {},
   ): Promise<readonly InboxMessage[]> {
     return copy(
-      [...this.#inboxMessages.values()].filter(
-        (message) =>
-          message.runId === runId &&
-          (status === undefined || message.status === status),
-      ),
+      [...this.#inboxMessages.values()]
+        .filter(
+          (message) =>
+            message.runId === runId &&
+            (status === undefined || message.status === status) &&
+            isAfterTimestamp(message.createdAt, message.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
@@ -360,6 +569,8 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async appendEvent(event: DomainEvent): Promise<DomainEvent> {
     assertPersistenceTimestamps(event);
+    assertValidEvent(event);
+    requireEntry(this.#runs, event.runId, 'Run');
     const key = `${event.runId}\u0000${event.eventId}`;
     const existing = this.#events.get(key);
     if (existing !== undefined) {
@@ -378,16 +589,42 @@ export class InMemoryDomainRepository implements DomainRepository {
     return copy(stored);
   }
 
-  async listEvents(runId: WorkflowRunId): Promise<readonly DomainEvent[]> {
+  async listEvents(
+    runId: WorkflowRunId,
+    page: ListPage<number> = {},
+  ): Promise<readonly DomainEvent[]> {
     return copy(
       [...this.#events.values()]
-        .filter((event) => event.runId === runId)
-        .sort((left, right) => left.sequence - right.sequence),
+        .filter(
+          (event) =>
+            event.runId === runId &&
+            (page.after === undefined || event.sequence > page.after),
+        )
+        .sort((left, right) => left.sequence - right.sequence)
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord> {
-    return insertUnique(this.#artifacts, artifact.id, artifact, 'Artifact');
+    requireEntry(this.#runs, artifact.runId, 'Run');
+    if (artifact.stepRunId !== undefined) {
+      requireEntry(this.#stepRuns, artifact.stepRunId, 'Step run');
+    }
+    assertValidArtifact(artifact);
+    const key = `${artifact.runId}\u0000${artifact.key}`;
+    if (this.#artifactKeys.has(key)) {
+      throw new Error(
+        `Artifact key ${artifact.key} for run ${artifact.runId} already exists`,
+      );
+    }
+    const created = insertUnique(
+      this.#artifacts,
+      artifact.id,
+      artifact,
+      'Artifact',
+    );
+    this.#artifactKeys.set(key, artifact.id);
+    return created;
   }
 
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
@@ -397,17 +634,34 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listArtifacts(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<ArtifactId>> = {},
   ): Promise<readonly ArtifactRecord[]> {
     return copy(
-      [...this.#artifacts.values()].filter(
-        (artifact) => artifact.runId === runId,
-      ),
+      [...this.#artifacts.values()]
+        .filter(
+          (artifact) =>
+            artifact.runId === runId &&
+            isAfterTimestamp(artifact.createdAt, artifact.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async appendUsage(usage: UsageRecordEntry): Promise<UsageRecordEntry> {
     assertPersistenceTimestamps(usage);
     assertValidUsage(usage);
+    requireEntry(this.#runs, usage.runId, 'Run');
+    if (usage.stepRunId !== undefined) {
+      requireEntry(this.#stepRuns, usage.stepRunId, 'Step run');
+    }
     const existing = this.#usage.get(usage.idempotencyId);
     if (existing !== undefined) {
       if (!same(existing, usage)) {
@@ -420,9 +674,26 @@ export class InMemoryDomainRepository implements DomainRepository {
     return copy(stored);
   }
 
-  async listUsage(runId: WorkflowRunId): Promise<readonly UsageRecordEntry[]> {
+  async listUsage(
+    runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<UsageId>> = {},
+  ): Promise<readonly UsageRecordEntry[]> {
     return copy(
-      [...this.#usage.values()].filter((usage) => usage.runId === runId),
+      [...this.#usage.values()]
+        .filter(
+          (usage) =>
+            usage.runId === runId &&
+            isAfterTimestamp(usage.recordedAt, usage.idempotencyId, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.recordedAt,
+            left.idempotencyId,
+            right.recordedAt,
+            right.idempotencyId,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
@@ -445,25 +716,45 @@ export class InMemoryDomainRepository implements DomainRepository {
   }
 
   async createGoalCriterion(criterion: GoalCriterion): Promise<GoalCriterion> {
-    return insertUnique(
+    requireEntry(this.#runs, criterion.runId, 'Run');
+    assertValidGoalCriterion(criterion);
+    const key = `${criterion.runId}\u0000${criterion.ordinal}`;
+    if (this.#goalCriterionKeys.has(key)) {
+      throw new Error(
+        `Goal criterion ordinal ${criterion.ordinal} for run ${criterion.runId} already exists`,
+      );
+    }
+    const created = insertUnique(
       this.#goalCriteria,
       criterion.id,
       criterion,
       'Goal criterion',
     );
+    this.#goalCriterionKeys.set(key, criterion.id);
+    return created;
   }
 
   async listGoalCriteria(
     runId: WorkflowRunId,
+    page: ListPage<number> = {},
   ): Promise<readonly GoalCriterion[]> {
     return copy(
       [...this.#goalCriteria.values()]
-        .filter((criterion) => criterion.runId === runId)
-        .sort((left, right) => left.ordinal - right.ordinal),
+        .filter(
+          (criterion) =>
+            criterion.runId === runId &&
+            (page.after === undefined || criterion.ordinal > page.after),
+        )
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 
   async appendGoalProgress(progress: GoalProgress): Promise<GoalProgress> {
+    requireEntry(this.#runs, progress.runId, 'Run');
+    if (progress.criterionId !== undefined) {
+      requireEntry(this.#goalCriteria, progress.criterionId, 'Goal criterion');
+    }
     return insertUnique(
       this.#goalProgress,
       progress.id,
@@ -474,11 +765,24 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async listGoalProgress(
     runId: WorkflowRunId,
+    page: ListPage<TimestampListCursor<GoalProgressId>> = {},
   ): Promise<readonly GoalProgress[]> {
     return copy(
       [...this.#goalProgress.values()]
-        .filter((progress) => progress.runId === runId)
-        .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt)),
+        .filter(
+          (progress) =>
+            progress.runId === runId &&
+            isAfterTimestamp(progress.recordedAt, progress.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.recordedAt,
+            left.id,
+            right.recordedAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
     );
   }
 }

@@ -35,6 +35,7 @@ const instantType = customType<{
 });
 const instant = (name: string) => instantType(name);
 const json = (name: string) => jsonb(name).$type<JsonValue>();
+const bytewise = (column: AnyPgColumn) => sql`${column} collate "C"`;
 
 export const runStatus = pgEnum('run_status', [
   'pending',
@@ -62,13 +63,19 @@ export const goalStatus = pgEnum('goal_status', [
   'failed',
 ]);
 
-export const projects = pgTable('projects', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  repository: text('repository'),
-  createdAt: instant('created_at').notNull(),
-  updatedAt: instant('updated_at').notNull(),
-});
+export const projects = pgTable(
+  'projects',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    repository: text('repository'),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    index('projects_created_idx').on(table.createdAt, bytewise(table.id)),
+  ],
+);
 
 export const configRevisions = pgTable(
   'config_revisions',
@@ -93,6 +100,11 @@ export const configRevisions = pgTable(
       table.revision,
     ),
     check('config_revisions_revision_positive', sql`${table.revision} > 0`),
+    index('config_revisions_project_created_idx').on(
+      table.projectId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
   ],
 );
 
@@ -123,30 +135,52 @@ export const workflowRuns = pgTable(
       table.projectId,
       table.status,
       table.createdAt,
+      bytewise(table.id),
     ),
     index('workflow_runs_cleanup_idx')
       .on(table.cleanupAt)
       .where(sql`${table.cleanupAt} is not null`),
+    index('workflow_runs_created_idx').on(table.createdAt, bytewise(table.id)),
+    index('workflow_runs_project_created_idx').on(
+      table.projectId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+    index('workflow_runs_status_created_idx').on(
+      table.status,
+      table.createdAt,
+      bytewise(table.id),
+    ),
   ],
 );
 
-export const configSnapshots = pgTable('config_snapshots', {
-  id: text('id').primaryKey(),
-  runId: text('run_id')
-    .notNull()
-    .references(() => workflowRuns.id, { onDelete: 'cascade' }),
-  configRevisionId: text('config_revision_id')
-    .notNull()
-    .references(() => configRevisions.id, { onDelete: 'restrict' }),
-  config: json('config').notNull(),
-  configDigest: text('config_digest').notNull(),
-  modelDigest: text('model_digest').notNull(),
-  promptDigest: text('prompt_digest').notNull(),
-  environmentDigest: text('environment_digest').notNull(),
-  policyDigest: text('policy_digest').notNull(),
-  repositorySha: text('repository_sha').notNull(),
-  createdAt: instant('created_at').notNull(),
-});
+export const configSnapshots = pgTable(
+  'config_snapshots',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    configRevisionId: text('config_revision_id')
+      .notNull()
+      .references(() => configRevisions.id, { onDelete: 'restrict' }),
+    config: json('config').notNull(),
+    configDigest: text('config_digest').notNull(),
+    modelDigest: text('model_digest').notNull(),
+    promptDigest: text('prompt_digest').notNull(),
+    environmentDigest: text('environment_digest').notNull(),
+    policyDigest: text('policy_digest').notNull(),
+    repositorySha: text('repository_sha').notNull(),
+    createdAt: instant('created_at').notNull(),
+  },
+  (table) => [
+    index('config_snapshots_run_created_idx').on(
+      table.runId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+  ],
+);
 
 export const stepRuns = pgTable(
   'step_runs',
@@ -181,6 +215,11 @@ export const stepRuns = pgTable(
     index('step_runs_cleanup_idx')
       .on(table.cleanupAt)
       .where(sql`${table.cleanupAt} is not null`),
+    index('step_runs_run_order_idx').on(
+      table.runId,
+      bytewise(table.stepKey),
+      table.attempt,
+    ),
   ],
 );
 
@@ -210,21 +249,48 @@ export const externalSessions = pgTable(
     index('external_sessions_cleanup_idx')
       .on(table.cleanupAt)
       .where(sql`${table.cleanupAt} is not null`),
+    index('external_sessions_run_created_idx').on(
+      table.runId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+    index('external_sessions_run_provider_created_idx').on(
+      table.runId,
+      table.provider,
+      table.createdAt,
+      bytewise(table.id),
+    ),
   ],
 );
 
-export const approvals = pgTable('approvals', {
-  id: text('id').primaryKey(),
-  runId: text('run_id')
-    .notNull()
-    .references(() => workflowRuns.id, { onDelete: 'cascade' }),
-  scope: text('scope').notNull(),
-  fingerprint: text('fingerprint').notNull(),
-  status: approvalStatus('status').notNull(),
-  createdAt: instant('created_at').notNull(),
-  expiresAt: instant('expires_at').notNull(),
-  consumedAt: instant('consumed_at'),
-});
+export const approvals = pgTable(
+  'approvals',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    status: approvalStatus('status').notNull(),
+    createdAt: instant('created_at').notNull(),
+    expiresAt: instant('expires_at').notNull(),
+    consumedAt: instant('consumed_at'),
+  },
+  (table) => [
+    index('approvals_run_created_idx').on(
+      table.runId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+    index('approvals_run_status_created_idx').on(
+      table.runId,
+      table.status,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+  ],
+);
 
 export const inboxMessages = pgTable(
   'inbox_messages',
@@ -244,8 +310,19 @@ export const inboxMessages = pgTable(
   },
   (table) => [
     index('inbox_messages_pending_idx')
-      .on(table.runId, table.createdAt)
+      .on(table.runId, table.createdAt, bytewise(table.id))
       .where(sql`${table.status} = 'pending'`),
+    index('inbox_messages_run_created_idx').on(
+      table.runId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+    index('inbox_messages_run_status_created_idx').on(
+      table.runId,
+      table.status,
+      table.createdAt,
+      bytewise(table.id),
+    ),
   ],
 );
 
@@ -266,6 +343,10 @@ export const domainEvents = pgTable(
     primaryKey({ columns: [table.runId, table.eventId] }),
     unique('domain_events_run_sequence_unique').on(table.runId, table.sequence),
     check('domain_events_sequence_nonnegative', sql`${table.sequence} >= 0`),
+    check(
+      'domain_events_sequence_safe_integer',
+      sql`${table.sequence} <= 9007199254740991`,
+    ),
     index('domain_events_order_idx').on(table.runId, table.sequence),
   ],
 );
@@ -294,9 +375,18 @@ export const artifacts = pgTable(
       'artifacts_size_nonnegative',
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
     ),
+    check(
+      'artifacts_size_safe_integer',
+      sql`${table.sizeBytes} is null or ${table.sizeBytes} <= 9007199254740991`,
+    ),
     index('artifacts_cleanup_idx')
       .on(table.cleanupAt)
       .where(sql`${table.cleanupAt} is not null`),
+    index('artifacts_run_created_idx').on(
+      table.runId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
   ],
 );
 
@@ -319,9 +409,30 @@ export const usageRecords = pgTable(
   },
   (table) => [
     check('usage_input_nonnegative', sql`${table.inputTokens} >= 0`),
+    check(
+      'usage_input_safe_integer',
+      sql`${table.inputTokens} <= 9007199254740991`,
+    ),
     check('usage_output_nonnegative', sql`${table.outputTokens} >= 0`),
+    check(
+      'usage_output_safe_integer',
+      sql`${table.outputTokens} <= 9007199254740991`,
+    ),
     check('usage_runtime_nonnegative', sql`${table.runtimeMs} >= 0`),
+    check(
+      'usage_runtime_safe_integer',
+      sql`${table.runtimeMs} <= 9007199254740991`,
+    ),
     check('usage_cost_nonnegative', sql`${table.microdollars} >= 0`),
+    check(
+      'usage_cost_safe_integer',
+      sql`${table.microdollars} <= 9007199254740991`,
+    ),
+    index('usage_records_run_recorded_idx').on(
+      table.runId,
+      table.recordedAt,
+      bytewise(table.idempotencyId),
+    ),
   ],
 );
 
@@ -331,6 +442,7 @@ export const webhookReceipts = pgTable(
     source: text('source').notNull(),
     deliveryId: text('delivery_id').notNull(),
     fingerprint: text('fingerprint').notNull(),
+    claimToken: text('claim_token').notNull(),
     receivedAt: instant('received_at').notNull(),
     expiresAt: instant('expires_at').notNull(),
   },
@@ -374,6 +486,10 @@ export const goalProgress = pgTable(
     recordedAt: instant('recorded_at').notNull(),
   },
   (table) => [
-    index('goal_progress_order_idx').on(table.runId, table.recordedAt),
+    index('goal_progress_order_idx').on(
+      table.runId,
+      table.recordedAt,
+      bytewise(table.id),
+    ),
   ],
 );

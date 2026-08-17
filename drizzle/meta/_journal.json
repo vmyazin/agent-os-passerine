@@ -15,6 +15,27 @@
       "when": 1786948912688,
       "tag": "0001_link_step_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786953131820,
+      "tag": "0002_harden_persistence_parity",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786953330204,
+      "tag": "0003_complete_list_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786953799740,
+      "tag": "0004_explicit_cursor_collation",
+      "breakpoints": true
     }
   ]
 }
