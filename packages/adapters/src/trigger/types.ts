@@ -1,7 +1,11 @@
 import type {
   ArtifactMetadata,
   ArtifactStore,
+  CommandCriterion,
+  ConfigSnapshot,
   DomainRepository,
+  EvidenceSubmission,
+  IsoTimestamp,
   JsonValue,
   RuntimeAgent,
   RuntimeEnvironment,
@@ -9,6 +13,7 @@ import type {
   RuntimeHandle,
   RuntimeFileResource,
   RuntimeUsage,
+  VerifierRegistry,
 } from '@agentos/core';
 
 export const FEATURE_WORKFLOW_TASK_ID = 'agentos-feature-workflow-v1';
@@ -75,6 +80,58 @@ export interface FeatureWorkflowResult {
     | 'failed';
   readonly draftPullRequestUrl?: string;
   readonly reason?: string;
+}
+
+export interface GoalFailureSummary {
+  readonly criterionId: string;
+  readonly code: string;
+}
+
+export interface GoalStepRequest {
+  readonly parentRunId: string;
+  readonly projectId: string;
+  readonly childRunId: string;
+  readonly step: number;
+  readonly criteria: readonly CommandCriterion[];
+  readonly snapshot: ConfigSnapshot;
+  readonly priorFailures: readonly GoalFailureSummary[];
+}
+
+export interface GoalStepResult {
+  readonly childRunId: string;
+  readonly status: FeatureWorkflowResult['status'];
+  readonly evidence: readonly EvidenceSubmission[];
+  readonly draftPullRequestUrl?: string;
+  readonly reason?: string;
+}
+
+export interface GoalStepRunner {
+  run(request: GoalStepRequest): Promise<GoalStepResult>;
+}
+
+export interface GoalWorkflowResult {
+  readonly status: 'succeeded' | 'failed' | 'cancelled';
+  readonly completedSteps: number;
+  readonly maxSteps: number;
+  readonly reason?: 'stuck' | 'step_limit' | 'crashed' | 'cancelled' | 'failed';
+  readonly criteria: readonly {
+    readonly id: string;
+    readonly status: 'pending' | 'passed' | 'failed';
+    readonly code?: string;
+  }[];
+  readonly children: readonly {
+    readonly step: number;
+    readonly runId: string;
+    readonly status?: string;
+    readonly draftPullRequestUrl?: string;
+  }[];
+}
+
+export interface DurableGoalWorkflowDependencies {
+  readonly repository: DomainRepository;
+  readonly stepRunner: GoalStepRunner;
+  readonly verifierRegistry: VerifierRegistry;
+  readonly clock: () => IsoTimestamp;
 }
 
 export interface WorkflowApprovalWaiter {
