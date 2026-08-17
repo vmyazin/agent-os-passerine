@@ -18,17 +18,18 @@ export default function RootLayout({
           Skip to content
         </a>
         <header className="site-header">
-          <span aria-label="Agent OS home" className="wordmark">
+          <a aria-label="Agent OS home" className="wordmark" href="/">
             Agent OS
-          </span>
+          </a>
           <nav aria-label="Primary navigation">
-            <a aria-current="page" href="/">
-              Overview
-            </a>
+            <a href="/">Overview</a>
+            <a href="/runs">Runs</a>
+            <a href="/inbox">Inbox</a>
+            <a href="/configuration">Configuration</a>
           </nav>
         </header>
         <main id="main-content">{children}</main>
-        <footer>Agent OS control plane foundation</footer>
+        <footer>Agent OS control plane</footer>
       </body>
     </html>
   );
