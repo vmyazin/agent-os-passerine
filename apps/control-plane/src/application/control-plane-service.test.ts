@@ -28,6 +28,47 @@ const feature = {
   policyDigest: 'policy',
 };
 
+const goalCriteria = [
+  {
+    id: 'tests',
+    type: 'command' as const,
+    description: 'Tests pass',
+    required: true,
+    command: 'pnpm test',
+  },
+  {
+    id: 'typecheck',
+    type: 'command' as const,
+    description: 'Typecheck passes',
+    required: true,
+    command: 'pnpm typecheck',
+  },
+];
+
+async function applyGoalConfiguration(
+  service: ControlPlaneService,
+  key: string,
+) {
+  const config = loadAgentOsConfig(`
+version: 1
+project: { name: Goal Project }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+  return service.applyConfiguration(key, {
+    canonicalConfig: canonicalConfigJson(config),
+    digest: canonicalConfigHash(config),
+    expectedRevision: null,
+    expectedDigest: null,
+  });
+}
+
 describe('ControlPlaneService', () => {
   it('binds an applied workflow configuration to the trusted selected-repository head', async () => {
     const repository = new InMemoryDomainRepository();
@@ -424,6 +465,180 @@ runtime: { provider: local }
     await expect(
       service.createFeatureRun('same-key', { ...feature, title: 'Different' }),
     ).rejects.toBeInstanceOf(ServiceError);
+  });
+
+  it('binds goals to one snapshot and deterministic immutable criteria before dispatch', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn(async ({ runId }: { runId: string }) => {
+      await expect(
+        repository.listConfigSnapshots(persistenceId('run', runId)),
+      ).resolves.toHaveLength(1);
+      await expect(
+        repository.listGoalCriteria(persistenceId('run', runId)),
+      ).resolves.toHaveLength(2);
+    });
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      {
+        requestStart,
+        requestApprovalResume: vi.fn(),
+      },
+      { resolve: vi.fn(async () => 'a'.repeat(40)) },
+    );
+    const applied = await applyGoalConfiguration(service, 'goal-config');
+    const input = {
+      projectId: applied.projectId,
+      title: 'Finish the bounded goal',
+      description: 'Run trusted checks after each feature attempt.',
+      ...applied.provenance,
+      criteria: goalCriteria,
+    };
+
+    const created = await service.createGoalRun('goal-key', input);
+    const runId = persistenceId('run', created.id);
+    const raw = await repository.getRun(runId);
+    const snapshots = await repository.listConfigSnapshots(runId);
+    const persistedCriteria = await repository.listGoalCriteria(runId);
+
+    expect(raw).toMatchObject({
+      pipeline: 'goal',
+      configRevisionId: expect.any(String),
+      input: { criteria: goalCriteria },
+    });
+    expect(snapshots).toHaveLength(1);
+    expect(persistedCriteria.map((criterion) => criterion.definition)).toEqual(
+      goalCriteria,
+    );
+    expect(
+      new Set(persistedCriteria.map((criterion) => criterion.id)),
+    ).toHaveProperty('size', 2);
+    expect(requestStart).toHaveBeenCalledWith({
+      idempotencyKey: `workflow-start:${created.id}`,
+      runId: created.id,
+    });
+
+    await expect(service.createGoalRun('goal-key', input)).resolves.toEqual(
+      created,
+    );
+    await expect(repository.listConfigSnapshots(runId)).resolves.toHaveLength(
+      1,
+    );
+    await expect(repository.listGoalCriteria(runId)).resolves.toEqual(
+      persistedCriteria,
+    );
+  });
+
+  it('rejects goal provenance that does not match an applied revision', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      {
+        requestStart,
+        requestApprovalResume: vi.fn(),
+      },
+      { resolve: vi.fn(async () => 'a'.repeat(40)) },
+    );
+    const applied = await applyGoalConfiguration(service, 'mismatch-config');
+
+    await expect(
+      service.createGoalRun('mismatched-goal', {
+        projectId: applied.projectId,
+        title: 'Mismatched goal',
+        description: 'This must not start.',
+        ...applied.provenance,
+        repositorySha: 'f'.repeat(40),
+        criteria: goalCriteria,
+      }),
+    ).rejects.toMatchObject({
+      code: 'config_snapshot_required',
+      status: 409,
+    });
+    expect(requestStart).not.toHaveBeenCalled();
+  });
+
+  it('finds exact goal provenance beyond the first revision page', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'many-goal-revisions');
+    await repository.createProject({
+      id: projectId,
+      name: 'Many goal revisions',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let revision = 1; revision <= 101; revision += 1) {
+      await repository.createConfigRevision({
+        id: persistenceId(
+          'configRevision',
+          `goal-revision-${String(revision)}`,
+        ),
+        projectId,
+        revision,
+        config: null,
+        configDigest: `config-${String(revision)}`,
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: 'a'.repeat(40),
+        createdAt: now,
+      });
+    }
+
+    await expect(
+      createService(repository).createGoalRun('deep-revision-goal', {
+        projectId,
+        title: 'Use revision 101',
+        description: 'Provenance lookup must paginate.',
+        repositorySha: 'a'.repeat(40),
+        configDigest: 'config-101',
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        criteria: goalCriteria,
+      }),
+    ).resolves.toMatchObject({ pipeline: 'goal' });
+  });
+
+  it('does not dispatch a goal until every deterministic criterion is durable', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      {
+        requestStart,
+        requestApprovalResume: vi.fn(),
+      },
+      { resolve: vi.fn(async () => 'a'.repeat(40)) },
+    );
+    const applied = await applyGoalConfiguration(service, 'partial-config');
+    const original =
+      repository.createGoalCriterionIdempotently.bind(repository);
+    vi.spyOn(repository, 'createGoalCriterionIdempotently').mockImplementation(
+      async (criterion) => {
+        if (criterion.ordinal === 1)
+          throw new Error('injected criterion failure');
+        return original(criterion);
+      },
+    );
+
+    await expect(
+      service.createGoalRun('partial-goal', {
+        projectId: applied.projectId,
+        title: 'Partially persisted goal',
+        description: 'Dispatch waits for all records.',
+        ...applied.provenance,
+        criteria: goalCriteria,
+      }),
+    ).rejects.toThrow('injected criterion failure');
+    expect(requestStart).not.toHaveBeenCalled();
   });
 
   it('redacts secrets and hidden reasoning from run projections', async () => {

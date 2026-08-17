@@ -431,6 +431,7 @@ export interface GoalCriterion {
   readonly runId: WorkflowRunId;
   readonly ordinal: number;
   readonly description: string;
+  readonly definition: JsonValue;
   readonly status: 'pending' | 'satisfied' | 'failed';
   readonly createdAt: IsoTimestamp;
 }
@@ -439,6 +440,7 @@ export interface GoalProgress {
   readonly id: GoalProgressId;
   readonly runId: WorkflowRunId;
   readonly criterionId?: GoalCriterionId;
+  readonly step: number;
   readonly status: 'pending' | 'satisfied' | 'failed';
   readonly detail?: string;
   readonly payload?: JsonValue;
@@ -607,11 +609,15 @@ export interface DomainRepository {
   claimWebhook(receipt: WebhookReceipt): Promise<WebhookClaim>;
 
   createGoalCriterion(criterion: GoalCriterion): Promise<GoalCriterion>;
+  createGoalCriterionIdempotently(
+    criterion: GoalCriterion,
+  ): Promise<GoalCriterion>;
   listGoalCriteria(
     runId: WorkflowRunId,
     page?: ListPage<number>,
   ): Promise<readonly GoalCriterion[]>;
   appendGoalProgress(progress: GoalProgress): Promise<GoalProgress>;
+  appendGoalProgressIdempotently(progress: GoalProgress): Promise<GoalProgress>;
   listGoalProgress(
     runId: WorkflowRunId,
     page?: ListPage<TimestampListCursor<GoalProgressId>>,

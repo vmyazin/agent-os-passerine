@@ -8,6 +8,8 @@ import {
   configSnapshots,
   domainEvents,
   externalSessions,
+  goalCriteria,
+  goalProgress,
   inboxMessages,
   projects,
   stepRuns,
@@ -76,6 +78,18 @@ describe('Drizzle persistence schema', () => {
         (column) => column.name === 'status',
       )?.columnType,
     ).toContain('Enum');
+  });
+
+  it('stores immutable goal definitions and bounds progress to three steps', () => {
+    expect(
+      getTableConfig(goalCriteria).columns.map((column) => column.name),
+    ).toContain('definition');
+    expect(
+      getTableConfig(goalProgress).columns.map((column) => column.name),
+    ).toContain('step');
+    expect(
+      getTableConfig(goalProgress).checks.map((item) => item.name),
+    ).toContain('goal_progress_step_between_1_and_3');
   });
 
   it('bounds number-mode BIGINT columns to JavaScript safe integers', () => {

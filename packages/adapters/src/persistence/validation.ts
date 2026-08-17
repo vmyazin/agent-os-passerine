@@ -1,8 +1,10 @@
+import { canonicalJsonValue } from '@agentos/core';
 import type {
   ArtifactRecord,
   ConfigRevision,
   DomainEvent,
   GoalCriterion,
+  GoalProgress,
   StepRun,
   UsageRecordEntry,
 } from '@agentos/core';
@@ -74,4 +76,43 @@ export function assertValidStepRun(step: StepRun): void {
 
 export function assertValidGoalCriterion(criterion: GoalCriterion): void {
   assertPostgresInteger(criterion.ordinal, 'ordinal', false);
+}
+
+export function assertValidGoalProgress(progress: GoalProgress): void {
+  assertPostgresInteger(progress.step, 'step', true);
+  if (progress.step > 3) throw new TypeError('step must be between 1 and 3');
+}
+
+export function sameGoalCriterion(
+  existing: GoalCriterion,
+  requested: GoalCriterion,
+): boolean {
+  return (
+    existing.id === requested.id &&
+    existing.runId === requested.runId &&
+    existing.ordinal === requested.ordinal &&
+    existing.description === requested.description &&
+    existing.status === requested.status &&
+    canonicalJsonValue(existing.definition) ===
+      canonicalJsonValue(requested.definition)
+  );
+}
+
+export function sameGoalProgress(
+  existing: GoalProgress,
+  requested: GoalProgress,
+): boolean {
+  return (
+    existing.id === requested.id &&
+    existing.runId === requested.runId &&
+    existing.criterionId === requested.criterionId &&
+    existing.step === requested.step &&
+    existing.status === requested.status &&
+    existing.detail === requested.detail &&
+    (existing.payload === undefined
+      ? requested.payload === undefined
+      : requested.payload !== undefined &&
+        canonicalJsonValue(existing.payload) ===
+          canonicalJsonValue(requested.payload))
+  );
 }

@@ -492,6 +492,7 @@ describe('NeonDomainRepository', () => {
       repository.appendGoalProgress({
         id: persistenceId('goalProgress', 'progress-json'),
         runId,
+        step: 1,
         status: 'pending',
         payload: null,
         recordedAt: createdAt,

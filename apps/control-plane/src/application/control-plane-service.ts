@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type {
   Approval,
   AgentOsConfig,
+  CommandCriterion,
   ConfigRevision,
   DomainEvent,
   DomainEventDraft,
@@ -46,6 +47,10 @@ export interface CreateRunInput extends PersistenceDigests {
   readonly projectId: string;
   readonly title: string;
   readonly description: string;
+}
+
+export interface CreateGoalRunInput extends CreateRunInput {
+  readonly criteria: readonly CommandCriterion[];
 }
 
 /** Durable intents live in the run/approval event rows; this port delivers them. */
@@ -286,7 +291,41 @@ function projectInboxMessage(message: InboxMessage): InboxProjection {
   };
 }
 
-function inputForRun(idempotencyKey: string, input: CreateRunInput): JsonValue {
+function goalDefinitions(
+  criteria: readonly CommandCriterion[],
+): readonly JsonValue[] {
+  if (criteria.length < 1 || criteria.length > 20)
+    throw new ServiceError(
+      'invalid_goal_criteria',
+      'goal criteria must contain between 1 and 20 command checks',
+      422,
+    );
+  const ids = new Set<string>();
+  return criteria.map((criterion) => {
+    if (
+      criterion.type !== 'command' ||
+      typeof criterion.id !== 'string' ||
+      criterion.id.trim().length === 0 ||
+      typeof criterion.description !== 'string' ||
+      criterion.description.trim().length === 0 ||
+      typeof criterion.command !== 'string' ||
+      criterion.command.trim().length === 0 ||
+      ids.has(criterion.id)
+    )
+      throw new ServiceError(
+        'invalid_goal_criteria',
+        'goal command criteria must be complete and have unique IDs',
+        422,
+      );
+    ids.add(criterion.id);
+    return JSON.parse(canonicalJsonValue(criterion)) as JsonValue;
+  });
+}
+
+function inputForRun(
+  idempotencyKey: string,
+  input: CreateRunInput | CreateGoalRunInput,
+): JsonValue {
   return {
     idempotencyKey,
     title: input.title,
@@ -299,6 +338,9 @@ function inputForRun(idempotencyKey: string, input: CreateRunInput): JsonValue {
       environmentDigest: input.environmentDigest,
       policyDigest: input.policyDigest,
     },
+    ...('criteria' in input
+      ? { criteria: goalDefinitions(input.criteria) }
+      : {}),
   };
 }
 
@@ -583,27 +625,30 @@ export class ControlPlaneService {
     return this.createRun('feature', idempotencyKey, input);
   }
 
-  createGoalRun(idempotencyKey: string, input: CreateRunInput) {
+  createGoalRun(idempotencyKey: string, input: CreateGoalRunInput) {
     return this.createRun('goal', idempotencyKey, input);
   }
 
   private async createRun(
     pipeline: 'feature' | 'goal',
     idempotencyKey: string,
-    input: CreateRunInput,
+    input: CreateRunInput | CreateGoalRunInput,
   ): Promise<RunProjection> {
     const id = this.generateId('run', `${pipeline}:${idempotencyKey}`);
     const runInput = inputForRun(idempotencyKey, input);
     const now = this.clock();
     let configRevision: ConfigRevision | undefined;
-    if (pipeline === 'feature' && this.workflowDispatch !== undefined) {
-      const revisions = await this.repository.listConfigRevisions(
-        persistenceId('project', input.projectId),
-        { limit: 100 },
-      );
-      configRevision = [...revisions]
-        .reverse()
-        .find(
+    if (
+      pipeline === 'goal' ||
+      (pipeline === 'feature' && this.workflowDispatch !== undefined)
+    ) {
+      let after: number | undefined;
+      while (configRevision === undefined) {
+        const revisions = await this.repository.listConfigRevisions(
+          persistenceId('project', input.projectId),
+          { ...(after === undefined ? {} : { after }), limit: 100 },
+        );
+        configRevision = revisions.find(
           (candidate) =>
             candidate.configDigest === input.configDigest &&
             candidate.modelDigest === input.modelDigest &&
@@ -612,10 +657,14 @@ export class ControlPlaneService {
             candidate.policyDigest === input.policyDigest &&
             candidate.repositorySha === input.repositorySha,
         );
+        const last = revisions.at(-1);
+        if (configRevision !== undefined || last === undefined) break;
+        after = last.revision;
+      }
       if (configRevision === undefined)
         throw new ServiceError(
           'config_snapshot_required',
-          'feature provenance does not match an applied configuration revision',
+          `${pipeline} provenance does not match an applied configuration revision`,
           409,
         );
     }
@@ -635,37 +684,67 @@ export class ControlPlaneService {
         },
         fingerprint({ pipeline, projectId: input.projectId, input: runInput }),
       );
-      if (pipeline === 'feature') {
-        if (configRevision !== undefined) {
-          const snapshots = await this.repository.listConfigSnapshots(
-            created.id,
-            { limit: 2 },
+      if (configRevision !== undefined) {
+        const snapshots = await this.repository.listConfigSnapshots(
+          created.id,
+          {
+            limit: 2,
+          },
+        );
+        if (snapshots.length === 0) {
+          await this.repository.createConfigSnapshot({
+            id: this.generateId('configSnapshot', `${pipeline}:${created.id}`),
+            runId: created.id,
+            configRevisionId: configRevision.id,
+            config: configRevision.config,
+            configDigest: configRevision.configDigest,
+            modelDigest: configRevision.modelDigest,
+            promptDigest: configRevision.promptDigest,
+            environmentDigest: configRevision.environmentDigest,
+            policyDigest: configRevision.policyDigest,
+            repositorySha: configRevision.repositorySha,
+            createdAt: now,
+          });
+        } else if (
+          snapshots.length !== 1 ||
+          snapshots[0]!.configRevisionId !== configRevision.id
+        ) {
+          throw new ServiceError(
+            'config_snapshot_conflict',
+            `${pipeline} run config snapshot conflicts with its provenance`,
+            409,
           );
-          if (snapshots.length === 0) {
-            await this.repository.createConfigSnapshot({
-              id: this.generateId('configSnapshot', `feature:${created.id}`),
-              runId: created.id,
-              configRevisionId: configRevision.id,
-              config: configRevision.config,
-              configDigest: configRevision.configDigest,
-              modelDigest: configRevision.modelDigest,
-              promptDigest: configRevision.promptDigest,
-              environmentDigest: configRevision.environmentDigest,
-              policyDigest: configRevision.policyDigest,
-              repositorySha: configRevision.repositorySha,
-              createdAt: now,
-            });
-          } else if (
-            snapshots.length !== 1 ||
-            snapshots[0]!.configRevisionId !== configRevision.id
-          ) {
-            throw new ServiceError(
-              'config_snapshot_conflict',
-              'feature run config snapshot conflicts with its provenance',
-              409,
-            );
-          }
         }
+      }
+      if (pipeline === 'goal') {
+        const goalInput = input as CreateGoalRunInput;
+        const definitions = goalDefinitions(goalInput.criteria);
+        for (const [ordinal, definition] of definitions.entries()) {
+          const source = goalInput.criteria[ordinal]!;
+          await this.repository.createGoalCriterionIdempotently({
+            id: this.generateId(
+              'goalCriterion',
+              `goal:${created.id}:criterion:${String(ordinal)}`,
+            ),
+            runId: created.id,
+            ordinal,
+            description: source.description,
+            definition,
+            status: 'pending',
+            createdAt: now,
+          });
+        }
+        const persisted = await this.repository.listGoalCriteria(created.id, {
+          limit: 21,
+        });
+        if (persisted.length !== definitions.length)
+          throw new ServiceError(
+            'goal_criteria_conflict',
+            'goal run criteria conflict with its immutable definition',
+            409,
+          );
+      }
+      if (pipeline === 'feature' || pipeline === 'goal') {
         try {
           await this.workflowDispatch?.requestStart({
             idempotencyKey: `workflow-start:${created.id}`,

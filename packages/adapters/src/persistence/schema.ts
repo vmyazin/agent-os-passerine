@@ -666,6 +666,7 @@ export const goalCriteria = pgTable(
       .references(() => workflowRuns.id, { onDelete: 'cascade' }),
     ordinal: integer('ordinal').notNull(),
     description: text('description').notNull(),
+    definition: json('definition').notNull(),
     status: goalStatus('status').notNull(),
     createdAt: instant('created_at').notNull(),
   },
@@ -685,12 +686,17 @@ export const goalProgress = pgTable(
     criterionId: text('criterion_id').references(() => goalCriteria.id, {
       onDelete: 'cascade',
     }),
+    step: integer('step').notNull(),
     status: goalStatus('status').notNull(),
     detail: text('detail'),
     payload: json('payload'),
     recordedAt: instant('recorded_at').notNull(),
   },
   (table) => [
+    check(
+      'goal_progress_step_between_1_and_3',
+      sql`${table.step} between 1 and 3`,
+    ),
     index('goal_progress_order_idx').on(
       table.runId,
       table.recordedAt,

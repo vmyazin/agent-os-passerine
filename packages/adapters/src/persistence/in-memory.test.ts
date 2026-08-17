@@ -390,6 +390,12 @@ describe('InMemoryDomainRepository', () => {
       runId: run.id,
       ordinal: 0,
       description: 'All tests pass',
+      definition: {
+        id: 'tests',
+        type: 'command',
+        description: 'All tests pass',
+        command: 'pnpm test',
+      },
       status: 'pending',
       createdAt: isoTimestamp('2026-08-16T12:02:00.000Z'),
     };
@@ -398,6 +404,7 @@ describe('InMemoryDomainRepository', () => {
       id: progressId,
       runId: run.id,
       criterionId: criterion.id,
+      step: 1,
       status: 'satisfied',
       detail: 'Verified by CI',
       recordedAt: isoTimestamp('2026-08-16T12:05:00.000Z'),

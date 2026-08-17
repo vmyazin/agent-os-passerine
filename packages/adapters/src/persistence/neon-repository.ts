@@ -134,8 +134,11 @@ import {
   assertValidArtifact,
   assertValidConfigRevision,
   assertValidGoalCriterion,
+  assertValidGoalProgress,
   assertValidStepRun,
   assertValidUsage,
+  sameGoalCriterion,
+  sameGoalProgress,
 } from './validation.js';
 import { boundedListLimit } from './pagination.js';
 
@@ -1668,6 +1671,24 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
+  async createGoalCriterionIdempotently(
+    criterion: GoalCriterion,
+  ): Promise<GoalCriterion> {
+    assertValidGoalCriterion(criterion);
+    const rows = await this.database
+      .insert(goalCriteria)
+      .values(criterion)
+      .onConflictDoUpdate({
+        target: goalCriteria.id,
+        set: { id: criterion.id },
+      })
+      .returning(goalCriterionSelection);
+    const existing = mapGoalCriterionRow(one(rows, 'Goal criterion'));
+    if (!sameGoalCriterion(existing, criterion))
+      throw new IdempotencyConflictError('Goal criterion', criterion.id);
+    return existing;
+  }
+
   async listGoalCriteria(
     runId: WorkflowRunId,
     page: ListPage<number> = {},
@@ -1691,6 +1712,7 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async appendGoalProgress(progress: GoalProgress): Promise<GoalProgress> {
+    assertValidGoalProgress(progress);
     return mappedOne(
       await this.database
         .insert(goalProgress)
@@ -1702,6 +1724,27 @@ export class NeonDomainRepository implements DomainRepository {
       'Goal progress',
       mapGoalProgressRow,
     );
+  }
+
+  async appendGoalProgressIdempotently(
+    progress: GoalProgress,
+  ): Promise<GoalProgress> {
+    assertValidGoalProgress(progress);
+    const rows = await this.database
+      .insert(goalProgress)
+      .values({
+        ...progress,
+        payload: optionalJsonbValue(progress.payload),
+      })
+      .onConflictDoUpdate({
+        target: goalProgress.id,
+        set: { id: progress.id },
+      })
+      .returning(goalProgressSelection);
+    const existing = mapGoalProgressRow(one(rows, 'Goal progress'));
+    if (!sameGoalProgress(existing, progress))
+      throw new IdempotencyConflictError('Goal progress', progress.id);
+    return existing;
   }
 
   async listGoalProgress(

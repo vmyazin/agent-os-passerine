@@ -246,6 +246,12 @@ export function repositoryParityContract(
             runId: missingRun,
             ordinal: 0,
             description: 'fk',
+            definition: {
+              id: 'fk',
+              type: 'command',
+              description: 'fk',
+              command: 'true',
+            },
             status: 'pending' as const,
             createdAt: at,
           }),
@@ -253,6 +259,7 @@ export function repositoryParityContract(
           repository.appendGoalProgress({
             id: persistenceId('goalProgress', 'fk-progress-run'),
             runId: missingRun,
+            step: 1,
             status: 'pending' as const,
             recordedAt: at,
           }),
@@ -302,6 +309,7 @@ export function repositoryParityContract(
           id: persistenceId('goalProgress', 'fk-progress-criterion'),
           runId: ids.runId,
           criterionId: missingCriterion,
+          step: 1,
           status: 'pending',
           recordedAt: at,
         }),
@@ -387,6 +395,12 @@ export function repositoryParityContract(
         runId: ids.runId,
         ordinal: 0,
         description: 'one',
+        definition: {
+          id: 'one',
+          type: 'command',
+          description: 'one',
+          command: 'true',
+        },
         status: 'pending',
         createdAt: at,
       });
@@ -395,6 +409,12 @@ export function repositoryParityContract(
         runId: ids.runId,
         ordinal: 0,
         description: 'two',
+        definition: {
+          id: 'two',
+          type: 'command',
+          description: 'two',
+          command: 'true',
+        },
         status: 'pending' as const,
         createdAt: at,
       };
@@ -407,6 +427,112 @@ export function repositoryParityContract(
           ordinal: 1,
         }),
       ).resolves.toMatchObject({ ordinal: 1 });
+    });
+
+    it('persists canonical goal definitions and idempotent bounded progress', async () => {
+      const repository = await createRepository();
+      const { runId } = await seed(
+        repository,
+        `${implementation}-durable-goal`,
+      );
+      type DurableCriterion = Parameters<
+        DomainRepository['createGoalCriterion']
+      >[0] & {
+        readonly definition: {
+          readonly id: string;
+          readonly type: 'command';
+          readonly description: string;
+          readonly command: string;
+        };
+      };
+      type DurableProgress = Parameters<
+        DomainRepository['appendGoalProgress']
+      >[0] & { readonly step: number };
+      const durable = repository as DomainRepository & {
+        createGoalCriterionIdempotently(
+          criterion: DurableCriterion,
+        ): Promise<DurableCriterion>;
+        appendGoalProgressIdempotently(
+          progress: DurableProgress,
+        ): Promise<DurableProgress>;
+      };
+      const criterion: DurableCriterion = {
+        id: persistenceId('goalCriterion', `${implementation}-criterion`),
+        runId,
+        ordinal: 0,
+        description: 'Tests pass',
+        definition: {
+          id: 'tests',
+          type: 'command',
+          description: 'Tests pass',
+          command: 'pnpm test',
+        },
+        status: 'pending',
+        createdAt: at,
+      };
+
+      const createdCriterion =
+        await durable.createGoalCriterionIdempotently(criterion);
+      await expect(
+        durable.createGoalCriterionIdempotently({
+          ...criterion,
+          definition: {
+            command: 'pnpm test',
+            description: 'Tests pass',
+            type: 'command',
+            id: 'tests',
+          },
+        }),
+      ).resolves.toEqual(createdCriterion);
+      await expect(
+        durable.createGoalCriterionIdempotently({
+          ...criterion,
+          definition: {
+            id: 'tests',
+            type: 'command',
+            description: 'Tests pass',
+            command: 'pnpm test:changed',
+          },
+        }),
+      ).rejects.toThrow(/conflict|different/i);
+
+      const progress: DurableProgress = {
+        id: persistenceId('goalProgress', `${implementation}-progress`),
+        runId,
+        criterionId: criterion.id,
+        step: 1,
+        status: 'failed',
+        detail: 'Tests failed',
+        payload: { code: 'test_failure', attempt: 1 },
+        recordedAt: at,
+      };
+      const createdProgress =
+        await durable.appendGoalProgressIdempotently(progress);
+      await expect(
+        durable.appendGoalProgressIdempotently({
+          ...progress,
+          payload: { attempt: 1, code: 'test_failure' },
+        }),
+      ).resolves.toEqual(createdProgress);
+      await expect(
+        durable.appendGoalProgressIdempotently({
+          ...progress,
+          detail: 'Different result',
+        }),
+      ).rejects.toThrow(/conflict|different/i);
+
+      for (const step of [0, 4]) {
+        await expect(
+          durable.appendGoalProgressIdempotently({
+            ...progress,
+            id: persistenceId(
+              'goalProgress',
+              `${implementation}-invalid-step-${String(step)}`,
+            ),
+            step,
+          }),
+        ).rejects.toThrow(/step/i);
+      }
     });
 
     it('allocates monotonically increasing event sequences in the repository', async () => {
@@ -710,6 +836,12 @@ export function repositoryParityContract(
           runId: ids.runId,
           ordinal: outsideInteger,
           description: 'large',
+          definition: {
+            id: 'large',
+            type: 'command',
+            description: 'large',
+            command: 'true',
+          },
           status: 'pending',
           createdAt: at,
         }),

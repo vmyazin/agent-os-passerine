@@ -25,6 +25,34 @@ export const createRunSchema = z
   })
   .strict();
 
+export const goalCommandCriterionSchema = z
+  .object({
+    id,
+    type: z.literal('command'),
+    description: z.string().trim().min(1).max(1_000),
+    required: z.boolean().optional(),
+    command: z.string().trim().min(1).max(10_000),
+    cwd: z.string().trim().min(1).max(1_024).optional(),
+    timeoutMs: z.number().int().positive().max(3_600_000).optional(),
+  })
+  .strict();
+
+export const createGoalRunSchema = createRunSchema
+  .extend({ criteria: z.array(goalCommandCriterionSchema).min(1).max(20) })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = new Set<string>();
+    for (const [index, criterion] of value.criteria.entries()) {
+      if (ids.has(criterion.id))
+        context.addIssue({
+          code: 'custom',
+          path: ['criteria', index, 'id'],
+          message: 'goal criterion IDs must be unique',
+        });
+      ids.add(criterion.id);
+    }
+  });
+
 export const emptyMutationSchema = z.object({}).strict();
 export const approvalDecisionSchema = z.object({ scopeHash: digest }).strict();
 export const configurationApplySchema = z

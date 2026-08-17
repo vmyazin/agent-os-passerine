@@ -67,8 +67,11 @@ import {
   assertValidConfigRevision,
   assertValidEvent,
   assertValidGoalCriterion,
+  assertValidGoalProgress,
   assertValidStepRun,
   assertValidUsage,
+  sameGoalCriterion,
+  sameGoalProgress,
 } from './validation.js';
 
 export {
@@ -1489,6 +1492,20 @@ export class InMemoryDomainRepository implements DomainRepository {
     return created;
   }
 
+  async createGoalCriterionIdempotently(
+    criterion: GoalCriterion,
+  ): Promise<GoalCriterion> {
+    requireEntry(this.#runs, criterion.runId, 'Run');
+    assertValidGoalCriterion(criterion);
+    const existing = this.#goalCriteria.get(criterion.id);
+    if (existing !== undefined) {
+      if (!sameGoalCriterion(existing, criterion))
+        throw new IdempotencyConflictError('Goal criterion', criterion.id);
+      return copy(existing);
+    }
+    return this.createGoalCriterion(criterion);
+  }
+
   async listGoalCriteria(
     runId: WorkflowRunId,
     page: ListPage<number> = {},
@@ -1507,6 +1524,7 @@ export class InMemoryDomainRepository implements DomainRepository {
 
   async appendGoalProgress(progress: GoalProgress): Promise<GoalProgress> {
     requireEntry(this.#runs, progress.runId, 'Run');
+    assertValidGoalProgress(progress);
     if (progress.criterionId !== undefined) {
       requireEntry(this.#goalCriteria, progress.criterionId, 'Goal criterion');
     }
@@ -1516,6 +1534,22 @@ export class InMemoryDomainRepository implements DomainRepository {
       progress,
       'Goal progress',
     );
+  }
+
+  async appendGoalProgressIdempotently(
+    progress: GoalProgress,
+  ): Promise<GoalProgress> {
+    requireEntry(this.#runs, progress.runId, 'Run');
+    assertValidGoalProgress(progress);
+    if (progress.criterionId !== undefined)
+      requireEntry(this.#goalCriteria, progress.criterionId, 'Goal criterion');
+    const existing = this.#goalProgress.get(progress.id);
+    if (existing !== undefined) {
+      if (!sameGoalProgress(existing, progress))
+        throw new IdempotencyConflictError('Goal progress', progress.id);
+      return copy(existing);
+    }
+    return this.appendGoalProgress(progress);
   }
 
   async listGoalProgress(

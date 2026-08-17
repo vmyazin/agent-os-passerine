@@ -149,6 +149,7 @@ export const mapArtifactRow = (row: SqlRow): ArtifactRecord => mapRow(row);
 export const mapUsageRecordRow = (row: SqlRow): UsageRecordEntry => mapRow(row);
 export const mapWebhookReceiptRow = (row: SqlRow): WebhookReceipt =>
   mapRow(row);
-export const mapGoalCriterionRow = (row: SqlRow): GoalCriterion => mapRow(row);
+export const mapGoalCriterionRow = (row: SqlRow): GoalCriterion =>
+  mapRow(row, { requiredJson: ['definition'] });
 export const mapGoalProgressRow = (row: SqlRow): GoalProgress =>
   mapRow(row, { optionalJson: { payload: 'payloadPresent' } });
