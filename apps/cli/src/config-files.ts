@@ -1,5 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import { link, mkdir, open, rename, stat, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  link,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import {
@@ -12,6 +21,18 @@ import {
 import { CliError } from './args.js';
 
 export const MAX_CONFIG_BYTES = 56 * 1024;
+
+async function assertCanonicalParent(path: string): Promise<void> {
+  const parent = dirname(path);
+  try {
+    if ((await realpath(parent)) !== parent) {
+      throw new CliError('configuration path contains a symbolic link');
+    }
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`cannot inspect configuration path: ${path}`);
+  }
+}
 
 export const STARTER_CONFIG = `version: 1
 project:
@@ -78,7 +99,8 @@ runtime:
 async function readBounded(path: string): Promise<string> {
   let handle;
   try {
-    handle = await open(path, 'r');
+    await assertCanonicalParent(path);
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = await handle.stat();
     if (!info.isFile())
       throw new CliError(`configuration is not a file: ${path}`);
@@ -178,14 +200,23 @@ export async function initConfiguration(
   }
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
+  await assertCanonicalParent(path);
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   let handle;
   try {
-    handle = await open(temporary, 'wx', 0o600);
+    handle = await open(
+      temporary,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_WRONLY |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
     await handle.writeFile(STARTER_CONFIG, 'utf8');
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await assertCanonicalParent(path);
     if (force) {
       await rename(temporary, path);
     } else {

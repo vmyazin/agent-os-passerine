@@ -262,20 +262,32 @@ export function loadAgentOsConfig(yaml: string): AgentOsConfig {
   return parseAgentOsConfig(parseYaml(yaml));
 }
 
+export function compareCanonicalKeys(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .sort(([left], [right]) => compareCanonicalKeys(left, right))
         .map(([key, entry]) => [key, canonicalize(entry)]),
     );
   }
   return value;
 }
 
+export function canonicalJsonValue(value: unknown): string {
+  const serialized = JSON.stringify(canonicalize(value));
+  if (serialized === undefined) {
+    throw new TypeError('value is not JSON serializable');
+  }
+  return serialized;
+}
+
 export function canonicalConfigJson(config: AgentOsConfig): string {
-  return JSON.stringify(canonicalize(parseAgentOsConfig(config)));
+  return canonicalJsonValue(parseAgentOsConfig(config));
 }
 
 export function canonicalConfigHash(config: AgentOsConfig): string {

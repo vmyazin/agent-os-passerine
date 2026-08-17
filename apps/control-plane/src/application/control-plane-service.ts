@@ -19,6 +19,7 @@ import type {
 import {
   canonicalConfigHash,
   canonicalConfigJson,
+  canonicalJsonValue,
   loadAgentOsConfig,
   persistenceId,
 } from '@agentos/core';
@@ -113,19 +114,8 @@ function safeStrings(
     : undefined;
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function fingerprint(value: unknown): string {
-  return createHash('sha256').update(canonical(value)).digest('hex');
+  return createHash('sha256').update(canonicalJsonValue(value)).digest('hex');
 }
 
 function configurationProjection(
@@ -134,7 +124,7 @@ function configurationProjection(
 ): ConfigurationProjection {
   return {
     ...(includeCanonical
-      ? { canonicalConfig: canonical(revision.config) }
+      ? { canonicalConfig: canonicalJsonValue(revision.config) }
       : {}),
     projectId: revision.projectId,
     digest: revision.configDigest,
@@ -432,10 +422,9 @@ export class ControlPlaneService {
       );
     }
     const now = this.clock();
-    const projectId = this.generateId(
-      'project',
-      `configuration:${config.project.name}`,
-    );
+    const active = await this.repository.getLatestConfigRevision();
+    const projectId =
+      active?.projectId ?? this.generateId('project', 'configuration');
     try {
       const revision = await this.repository.applyConfigRevision(
         {
@@ -692,7 +681,10 @@ export class ControlPlaneService {
         `event:${message.runId}:inbox:${idempotencyKey}`,
       );
       const existing = await this.repository.getEvent(message.runId, eventId);
-      if (!existing || canonical(message.reply) !== canonical(reply)) {
+      if (
+        !existing ||
+        canonicalJsonValue(message.reply) !== canonicalJsonValue(reply)
+      ) {
         throw new ServiceError(
           'idempotency_conflict',
           'reply key conflict',

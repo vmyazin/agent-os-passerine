@@ -145,7 +145,12 @@ describe('NeonDomainRepository', () => {
     ).resolves.toEqual(recorded);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(executedSql(execute)).toContain('pg_advisory_xact_lock');
-    expect(executedSql(execute)).toContain('on conflict ("id")');
+    expect(executedSql(execute)).toContain('"existing_revision"');
+    expect(executedSql(execute)).toContain('where not exists');
+    expect(executedSql(execute)).toContain('"name" = excluded."name"');
+    expect(executedSql(execute)).not.toContain(
+      '"created_at" = excluded."created_at"',
+    );
 
     const conflict = repositoryWithRows([
       { ...recorded, config: { version: 2 } },
@@ -153,6 +158,21 @@ describe('NeonDomainRepository', () => {
     await expect(
       conflict.applyConfigRevision(project, revision),
     ).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+    const retryExecute = vi
+      .fn()
+      .mockRejectedValueOnce({
+        code: '23505',
+        constraint: 'config_revisions_project_revision_unique',
+      })
+      .mockResolvedValueOnce({ rows: [{ ...recorded, revision: 2 }] });
+    const concurrent = new NeonDomainRepository({
+      execute: retryExecute,
+    } as never);
+    await expect(
+      concurrent.applyConfigRevision(project, revision),
+    ).resolves.toMatchObject({ revision: 2 });
+    expect(retryExecute).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed before constructing a client when database configuration is absent', () => {

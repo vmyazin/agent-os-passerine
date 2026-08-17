@@ -153,6 +153,109 @@ runtime: { provider: local }
     });
   });
 
+  it('creates successive and concurrent immutable revisions as the clock advances', async () => {
+    const repository = new InMemoryDomainRepository();
+    let clock = isoTimestamp('2026-08-17T12:00:00.000Z');
+    const service = new ControlPlaneService(repository, () => clock, ids);
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Advancing Project, repository: https://example.com/one.git }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const first = await service.applyConfiguration('revision-1', {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+    });
+    clock = isoTimestamp('2026-08-17T12:01:00.000Z');
+    const changed = {
+      ...config,
+      project: {
+        ...config.project,
+        name: 'Renamed Project',
+        repository: 'https://example.com/two.git',
+      },
+      budgets: { ...config.budgets, concurrency: 2 },
+    };
+    const second = await service.applyConfiguration('revision-2', {
+      canonicalConfig: canonicalConfigJson(changed),
+      digest: canonicalConfigHash(changed),
+    });
+
+    expect(second).toMatchObject({ projectId: first.projectId, revision: 2 });
+    await expect(
+      repository.getProject(persistenceId('project', first.projectId)),
+    ).resolves.toMatchObject({
+      createdAt: '2026-08-17T12:00:00.000Z',
+      updatedAt: '2026-08-17T12:01:00.000Z',
+      name: 'Renamed Project',
+      repository: 'https://example.com/two.git',
+    });
+
+    clock = isoTimestamp('2026-08-17T12:02:00.000Z');
+    const concurrent = await Promise.all(
+      Array.from({ length: 8 }, (_value, index) =>
+        service.applyConfiguration(`concurrent-${String(index)}`, {
+          canonicalConfig: canonicalConfigJson(changed),
+          digest: canonicalConfigHash(changed),
+        }),
+      ),
+    );
+    expect(
+      concurrent.map((entry) => entry.revision).sort((a, b) => a - b),
+    ).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+    const revisions = await repository.listConfigRevisions(
+      persistenceId('project', first.projectId),
+      { limit: 100 },
+    );
+    expect(revisions).toHaveLength(10);
+    expect(new Set(revisions.map((entry) => entry.id))).toHaveProperty(
+      'size',
+      10,
+    );
+  });
+
+  it('uses one project identity for concurrent first configuration applies', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const firstConfig = loadAgentOsConfig(`
+version: 1
+project: { name: First Project }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const secondConfig = {
+      ...firstConfig,
+      project: { ...firstConfig.project, name: 'Second Project' },
+    };
+    const applied = await Promise.all(
+      [firstConfig, secondConfig].map((entry, index) =>
+        service.applyConfiguration(`first-${String(index)}`, {
+          canonicalConfig: canonicalConfigJson(entry),
+          digest: canonicalConfigHash(entry),
+        }),
+      ),
+    );
+
+    expect(new Set(applied.map((entry) => entry.projectId))).toHaveProperty(
+      'size',
+      1,
+    );
+    expect(applied.map((entry) => entry.revision).sort()).toEqual([1, 2]);
+  });
+
   it('creates a feature idempotently across service restarts', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({

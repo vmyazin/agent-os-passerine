@@ -89,4 +89,27 @@ describe('ApiClient', () => {
       expect(String(error)).not.toContain('never-print-this-token');
     }
   });
+
+  it('normalizes untrusted remote error codes before exposing them', async () => {
+    const client = new ApiClient({
+      url: 'https://control.example',
+      token: 'local-token',
+      fetch: async () =>
+        Response.json(
+          {
+            error: {
+              code: 'Bearer stolen-server-token',
+              message: 'api_key=remote-secret',
+              details: ['token=another-secret'],
+            },
+          },
+          { status: 500 },
+        ),
+    });
+
+    await expect(client.request('GET', '/api/runs')).rejects.toMatchObject({
+      code: 'remote_error',
+      message: expect.not.stringContaining('stolen-server-token'),
+    });
+  });
 });

@@ -21,4 +21,18 @@ describe('CLI output', () => {
     expect(output).toContain('run_1');
     expect(output).not.toContain(String.fromCharCode(27));
   });
+
+  it('orders non-ASCII JSON keys without consulting the host locale', () => {
+    const original = String.prototype.localeCompare;
+    String.prototype.localeCompare = () => {
+      throw new Error('locale-dependent ordering used');
+    };
+    try {
+      expect(renderResult({ ä: 1, z: 2, a: 3 }, true)).toBe(
+        '{"a":3,"z":2,"ä":1}\n',
+      );
+    } finally {
+      String.prototype.localeCompare = original;
+    }
+  });
 });

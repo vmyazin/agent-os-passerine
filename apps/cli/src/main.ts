@@ -8,6 +8,7 @@ import { executeRemoteCommand } from './commands.js';
 import { initConfiguration, readConfiguration } from './config-files.js';
 import { renderResult } from './output.js';
 import type { ApiRequest, Command } from './types.js';
+import { resolveConfigurationPath } from './workspace.js';
 
 export const VERSION = '0.0.0';
 export const MAX_INPUT_BYTES = 64 * 1024;
@@ -20,8 +21,13 @@ Usage:
   agentos config apply [--config PATH] --idempotency-key KEY
   agentos feature start --project-id ID --title TEXT --description TEXT --repository-sha SHA --config-digest DIGEST --model-digest DIGEST --prompt-digest DIGEST --environment-digest DIGEST --policy-digest DIGEST --idempotency-key KEY
   agentos goal start --project-id ID --title TEXT --description TEXT --repository-sha SHA --config-digest DIGEST --model-digest DIGEST --prompt-digest DIGEST --environment-digest DIGEST --policy-digest DIGEST --idempotency-key KEY
-  agentos runs list|show ID|cancel ID
-  agentos inbox list|reply ID|approve ID|reject ID
+  agentos runs list
+  agentos runs show ID
+  agentos runs cancel ID --idempotency-key KEY
+  agentos inbox list
+  agentos inbox reply ID (--reply TEXT | --file PATH | stdin) --idempotency-key KEY
+  agentos inbox approve ID --scope-hash HASH --idempotency-key KEY
+  agentos inbox reject ID --scope-hash HASH --idempotency-key KEY
 
 Global options:
   --url URL       Control-plane URL (or AGENTOS_URL)
@@ -37,6 +43,7 @@ export interface CliIo {
   readonly env: NodeJS.ProcessEnv;
   readonly fetch?: typeof globalThis.fetch | undefined;
   readonly readStdin: () => Promise<string>;
+  readonly cwd?: string | undefined;
 }
 
 function connection(command: Command, io: CliIo): ApiClient {
@@ -140,14 +147,25 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
     case 'version':
       return undefined;
     case 'init':
-      return initConfiguration(command.config, command.force);
+      return initConfiguration(
+        await resolveConfigurationPath(command.config, io.cwd ?? process.cwd()),
+        command.force,
+      );
     case 'config.validate': {
-      const loaded = await readConfiguration(command.config);
-      return { valid: true, path: command.config, digest: loaded.digest };
+      const path = await resolveConfigurationPath(
+        command.config,
+        io.cwd ?? process.cwd(),
+      );
+      const loaded = await readConfiguration(path);
+      return { valid: true, path, digest: loaded.digest };
     }
     case 'config.plan': {
+      const path = await resolveConfigurationPath(
+        command.config,
+        io.cwd ?? process.cwd(),
+      );
       const [loaded, currentValue] = await Promise.all([
-        readConfiguration(command.config),
+        readConfiguration(path),
         remote(connection(command, io)).request({
           method: 'GET',
           path: '/api/configuration',
@@ -168,7 +186,11 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
       );
     }
     case 'config.apply': {
-      const loaded = await readConfiguration(command.config);
+      const path = await resolveConfigurationPath(
+        command.config,
+        io.cwd ?? process.cwd(),
+      );
+      const loaded = await readConfiguration(path);
       return remote(connection(command, io)).request({
         method: 'POST',
         path: '/api/configuration/apply',

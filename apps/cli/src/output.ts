@@ -1,9 +1,11 @@
+import { canonicalJsonValue } from '@agentos/core';
+
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
         .map(([key, entry]) => [key, canonical(entry)]),
     );
   }
@@ -51,7 +53,7 @@ function table(rows: readonly Record<string, unknown>[]): string {
 }
 
 export function renderResult(value: unknown, json: boolean): string {
-  if (json) return `${JSON.stringify(canonical(value))}\n`;
+  if (json) return `${canonicalJsonValue(value)}\n`;
   if (
     Array.isArray(value) &&
     value.every(

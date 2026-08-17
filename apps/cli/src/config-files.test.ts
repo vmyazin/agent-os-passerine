@@ -1,7 +1,13 @@
-import { stat } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  realpath,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 import { canonicalConfigHash } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
@@ -14,7 +20,7 @@ import {
 
 describe('configuration files', () => {
   it('writes the approved v1 starter atomically with owner-only permissions', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-init-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-init-')));
     const path = join(root, 'agentos', 'agent-os.yaml');
 
     const result = await initConfiguration(path, false);
@@ -32,7 +38,9 @@ describe('configuration files', () => {
   });
 
   it('refuses overwrite unless force is explicit', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-overwrite-'));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-overwrite-')),
+    );
     const path = join(root, 'agent-os.yaml');
     await writeFile(path, 'keep-me', { mode: 0o600 });
 
@@ -45,7 +53,7 @@ describe('configuration files', () => {
   });
 
   it('allows only one concurrent non-force initializer to create the target', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-race-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-race-')));
     const path = join(root, 'agent-os.yaml');
 
     const results = await Promise.allSettled([
@@ -65,7 +73,9 @@ describe('configuration files', () => {
   });
 
   it('reports validation paths and rejects oversized files before parsing', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-invalid-'));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-invalid-')),
+    );
     const invalid = join(root, 'invalid.yaml');
     await writeFile(invalid, 'version: 1\nproject: {}\n', 'utf8');
     await expect(readConfiguration(invalid)).rejects.toThrow('project.name');
@@ -73,5 +83,26 @@ describe('configuration files', () => {
     const large = join(root, 'large.yaml');
     await writeFile(large, Buffer.alloc(MAX_CONFIG_BYTES + 1, 65));
     await expect(readConfiguration(large)).rejects.toThrow('too large');
+  });
+
+  it('revalidates parent directories at the read and write boundary', async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-operation-boundary-')),
+    );
+    const outside = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-operation-outside-')),
+    );
+    await writeFile(join(outside, 'agent-os.yaml'), 'version: 1\n');
+    await symlink(outside, join(root, 'linked'));
+
+    await expect(
+      readConfiguration(join(root, 'linked', 'agent-os.yaml')),
+    ).rejects.toThrow('symbolic link');
+    await expect(
+      initConfiguration(join(root, 'linked', 'new.yaml'), true),
+    ).rejects.toThrow('symbolic link');
+    await expect(readFile(join(outside, 'new.yaml'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 });

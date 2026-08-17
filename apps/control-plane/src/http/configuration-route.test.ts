@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GET } from '../../app/api/configuration/route';
 import { POST } from '../../app/api/configuration/apply/route';
 import { GET as getInbox } from '../../app/api/inbox/route';
+import { authConfigFromEnv, issueSession, SESSION_COOKIE } from '../auth/auth';
 import { resetControlPlaneServiceForTests } from '../application/runtime';
 import {
   repositoryFromEnv,
@@ -87,6 +88,46 @@ describe('configuration API routes', () => {
 
     const active = await GET(request('/api/configuration'));
     await expect(active.json()).resolves.toEqual({ active: projected });
+
+    const session = issueSession(
+      authConfigFromEnv(process.env),
+      'operator',
+      new Date(),
+    );
+    const browserHeaders = {
+      cookie: `${SESSION_COOKIE}=${session}`,
+      origin: 'https://control.example',
+      'sec-fetch-site': 'same-origin',
+      'content-type': 'application/json',
+    };
+    const browserGet = await GET(
+      new Request('https://control.example/api/configuration', {
+        headers: browserHeaders,
+      }),
+    );
+    expect(browserGet.status).toBe(200);
+    const browserProjection = await browserGet.json();
+    expect(browserProjection.active).toMatchObject({
+      projectId: projected.projectId,
+      digest: projected.digest,
+      revision: 1,
+    });
+    expect(browserProjection.active).not.toHaveProperty('canonicalConfig');
+
+    const browserPost = await POST(
+      new Request('https://control.example/api/configuration/apply', {
+        method: 'POST',
+        headers: {
+          ...browserHeaders,
+          'idempotency-key': 'browser-key',
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(browserPost.status).toBe(403);
+    await expect(browserPost.json()).resolves.toMatchObject({
+      error: { code: 'cli_authentication_required' },
+    });
   });
 
   it('lists messages and pending approvals with their required scope hashes', async () => {
@@ -144,6 +185,18 @@ describe('configuration API routes', () => {
     const first = await apply(body);
     const replay = await apply(body);
     expect(await replay.json()).toEqual(await first.json());
+
+    const unauthenticated = await POST(
+      new Request('https://control.example/api/configuration/apply', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'unauthenticated',
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(unauthenticated.status).toBe(401);
 
     const missingKey = await apply(body, '');
     expect(missingKey.status).toBe(400);

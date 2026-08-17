@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import { neon, types } from '@neondatabase/serverless';
-import { isoTimestampEpochMicroseconds } from '@agentos/core';
+import {
+  canonicalJsonValue,
+  isoTimestampEpochMicroseconds,
+} from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
@@ -171,7 +174,8 @@ function configRevisionMatches(
   return (
     existing.id === requested.id &&
     existing.projectId === requested.projectId &&
-    canonicalJson(existing.config) === canonicalJson(requested.config) &&
+    canonicalJsonValue(existing.config) ===
+      canonicalJsonValue(requested.config) &&
     existing.configDigest === requested.configDigest &&
     existing.modelDigest === requested.modelDigest &&
     existing.promptDigest === requested.promptDigest &&
@@ -179,17 +183,6 @@ function configRevisionMatches(
     existing.policyDigest === requested.policyDigest &&
     existing.repositorySha === requested.repositorySha
   );
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function databaseSafeInteger(value: unknown, field: string): number {
@@ -239,6 +232,29 @@ function hasDatabaseError(error: unknown, message: string): boolean {
       if (
         Reflect.get(current, 'code') === 'P0001' &&
         String(Reflect.get(current, 'message')).includes(message)
+      ) {
+        return true;
+      }
+      current = Reflect.get(current, 'cause');
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function hasUniqueConstraint(error: unknown, constraint: string): boolean {
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (typeof current !== 'object' || current === null || seen.has(current))
+      return false;
+    seen.add(current);
+    try {
+      if (
+        Reflect.get(current, 'code') === '23505' &&
+        (Reflect.get(current, 'constraint') === constraint ||
+          String(Reflect.get(current, 'message')).includes(constraint))
       ) {
         return true;
       }
@@ -318,17 +334,31 @@ export class NeonDomainRepository implements DomainRepository {
     revision: ConfigRevisionDraft,
   ): Promise<ConfigRevision> {
     let result: unknown;
-    try {
-      result = await this.database.execute<Record<string, unknown>>(sql`
-        with "configuration_lock" as materialized (
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      try {
+        result = await this.database.execute<Record<string, unknown>>(sql`
+        with "idempotency_lock" as materialized (
+          select pg_advisory_xact_lock(hashtextextended(${revision.id}, 0)) as "held"
+        ),
+        "configuration_lock" as materialized (
           select pg_advisory_xact_lock(hashtextextended(${project.id}, 0)) as "held"
+          from "idempotency_lock"
+        ),
+        "existing_revision" as materialized (
+          select "existing".*
+          from "config_revisions" as "existing", "configuration_lock"
+          where "existing"."id" = ${revision.id}
         ),
         "project_row" as (
           insert into "projects" ("id", "name", "repository", "created_at", "updated_at")
           select ${project.id}, ${project.name}, ${project.repository ?? null},
                  ${project.createdAt}, ${project.updatedAt}
           from "configuration_lock"
-          on conflict ("id") do update set "id" = excluded."id"
+          where not exists (select 1 from "existing_revision")
+          on conflict ("id") do update set
+            "name" = excluded."name",
+            "repository" = excluded."repository",
+            "updated_at" = excluded."updated_at"
           returning "id"
         ),
         "next_revision" as materialized (
@@ -336,7 +366,7 @@ export class NeonDomainRepository implements DomainRepository {
           from "config_revisions", "project_row"
           where "project_id" = ${project.id}
         ),
-        "revision_row" as (
+        "inserted_revision" as (
           insert into "config_revisions" (
             "id", "project_id", "revision", "config", "config_digest",
             "model_digest", "prompt_digest", "environment_digest",
@@ -348,8 +378,12 @@ export class NeonDomainRepository implements DomainRepository {
                  ${revision.environmentDigest}, ${revision.policyDigest},
                  ${revision.repositorySha}, ${revision.createdAt}
           from "project_row", "next_revision"
-          on conflict ("id") do update set "id" = excluded."id"
           returning *
+        ),
+        "revision_row" as (
+          select * from "existing_revision"
+          union all
+          select * from "inserted_revision"
         )
         select
           "id", "project_id" as "projectId", "revision", "config",
@@ -360,12 +394,24 @@ export class NeonDomainRepository implements DomainRepository {
           to_char("created_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "createdAt"
         from "revision_row"
       `);
-    } catch (error) {
-      if (hasDatabaseError(error, 'config_revisions_project_revision_unique')) {
-        throw new IdempotencyConflictError('Config revision', revision.id);
+        break;
+      } catch (error) {
+        const serializationConflict =
+          hasUniqueConstraint(
+            error,
+            'config_revisions_project_revision_unique',
+          ) || hasUniqueConstraint(error, 'config_revisions_pkey');
+        if (serializationConflict && attempt < 31) continue;
+        if (serializationConflict) {
+          throw new Error('configuration revision could not be serialized', {
+            cause: error,
+          });
+        }
+        throw error;
       }
-      throw error;
     }
+    if (result === undefined)
+      throw new Error('configuration revision was not returned');
     const created = mapConfigRevisionRow(
       one(executionRows(result), 'Config revision'),
     );

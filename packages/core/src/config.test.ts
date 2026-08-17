@@ -5,6 +5,7 @@ import {
   canonicalConfigJson,
   canonicalConfigHash,
   loadAgentOsConfig,
+  canonicalJsonValue,
   semanticConfigDiff,
 } from './config.js';
 
@@ -75,6 +76,21 @@ describe('Agent OS configuration', () => {
     };
 
     expect(canonicalConfigHash(reordered)).toBe(canonicalConfigHash(config));
+  });
+
+  it('orders non-ASCII keys by code unit without consulting the locale', () => {
+    const localeCompare = vi
+      .spyOn(String.prototype, 'localeCompare')
+      .mockImplementation(() => {
+        throw new Error('locale-dependent ordering used');
+      });
+    try {
+      expect(canonicalJsonValue({ ä: 1, z: 2, a: 3 })).toBe(
+        '{"a":3,"z":2,"ä":1}',
+      );
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 
   it('returns deterministic semantic changes without reporting key order', () => {

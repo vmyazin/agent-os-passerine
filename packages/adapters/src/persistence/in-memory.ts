@@ -1,4 +1,8 @@
-import { isoTimestamp, isoTimestampEpochMicroseconds } from '@agentos/core';
+import {
+  canonicalJsonValue,
+  isoTimestamp,
+  isoTimestampEpochMicroseconds,
+} from '@agentos/core';
 import type {
   Approval,
   ApprovalId,
@@ -75,7 +79,8 @@ function configRevisionMatches(
   return (
     existing.id === requested.id &&
     existing.projectId === requested.projectId &&
-    same(existing.config, requested.config) &&
+    canonicalJsonValue(existing.config) ===
+      canonicalJsonValue(requested.config) &&
     existing.configDigest === requested.configDigest &&
     existing.modelDigest === requested.modelDigest &&
     existing.promptDigest === requested.promptDigest &&
@@ -90,7 +95,7 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
       .join(',')}}`;
   }
@@ -257,9 +262,18 @@ export class InMemoryDomainRepository implements DomainRepository {
       return copy(existing);
     }
     const existingProject = this.#projects.get(project.id);
-    if (existingProject !== undefined && !same(existingProject, project)) {
-      throw new IdempotencyConflictError('Project', project.id);
-    }
+    const storedProject: Project =
+      existingProject === undefined
+        ? project
+        : {
+            id: existingProject.id,
+            name: project.name,
+            ...(project.repository === undefined
+              ? {}
+              : { repository: project.repository }),
+            createdAt: existingProject.createdAt,
+            updatedAt: project.updatedAt,
+          };
     const nextRevision =
       Math.max(
         0,
@@ -271,8 +285,7 @@ export class InMemoryDomainRepository implements DomainRepository {
     assertValidConfigRevision(created);
     const key = `${project.id}\u0000${String(nextRevision)}`;
     this.failBeforeCommit('applyConfigRevision');
-    if (existingProject === undefined)
-      this.#projects.set(project.id, copy(project));
+    this.#projects.set(project.id, copy(storedProject));
     this.#configRevisions.set(created.id, copy(created));
     this.#configRevisionKeys.set(key, created.id);
     return copy(created);

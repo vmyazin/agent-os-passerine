@@ -2,6 +2,25 @@ import { CliError } from './args.js';
 
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const REMOTE_CODES = new Set([
+  'approval_already_decided',
+  'approval_expired',
+  'approval_invalid',
+  'approval_scope_mismatch',
+  'authentication_required',
+  'cli_authentication_required',
+  'configuration_digest_mismatch',
+  'configuration_invalid',
+  'configuration_not_canonical',
+  'idempotency_conflict',
+  'idempotency_key_required',
+  'invalid_api_token',
+  'invalid_json',
+  'invalid_state',
+  'not_found',
+  'payload_too_large',
+  'validation_error',
+]);
 
 export class ApiError extends CliError {
   constructor(
@@ -26,7 +45,18 @@ function redact(value: string, token: string): string {
   return value
     .replace(new RegExp(escaped, 'g'), '[REDACTED]')
     .replace(/\b(Basic|Bearer)\s+[^\s,;"']+/gi, '$1 [REDACTED]')
+    .replace(
+      /\b((?:x-)?api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+/gi,
+      '$1=[REDACTED]',
+    )
+    .replace(/\b(?:sk-|gh[pousr]_)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]')
     .replace(/([?&](?:token|api[_-]?key|secret)=)[^&\s]+/gi, '$1[REDACTED]');
+}
+
+function remoteCode(value: unknown): string {
+  return typeof value === 'string' && REMOTE_CODES.has(value)
+    ? value
+    : 'remote_error';
 }
 
 function checkedBaseUrl(raw: string): URL {
@@ -152,19 +182,12 @@ export class ApiClient {
       const envelope = parsed as {
         error?: { code?: unknown; message?: unknown };
       } | null;
-      const code =
-        typeof envelope?.error?.code === 'string'
-          ? envelope.error.code
-          : 'http_error';
+      const code = remoteCode(envelope?.error?.code);
       const message =
         typeof envelope?.error?.message === 'string'
           ? envelope.error.message
           : `request failed with HTTP ${response.status}`;
-      throw new ApiError(
-        redact(`${code}: ${message}`, this.#token),
-        response.status,
-        code,
-      );
+      throw new ApiError(redact(message, this.#token), response.status, code);
     }
     return parsed;
   }

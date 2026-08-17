@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,7 @@ function capture(
     readonly fetch?: typeof fetch;
     readonly env?: NodeJS.ProcessEnv;
     readonly stdin?: () => Promise<string>;
+    readonly cwd?: string;
   } = {},
 ) {
   const stdout: string[] = [];
@@ -22,6 +23,7 @@ function capture(
       stderr: (value: string) => stderr.push(value),
       env: options.env ?? {},
       fetch: options.fetch,
+      cwd: options.cwd,
       readStdin: options.stdin ?? (async () => ''),
     },
     stdout,
@@ -50,14 +52,23 @@ describe('runCli', () => {
     const version = capture();
     await expect(runCli(['--version'], version.io)).resolves.toBe(0);
     expect(version.stdout.join('')).toMatch(/^agentos \d+\.\d+\.\d+\n$/);
+    for (const required of [
+      'runs cancel ID --idempotency-key KEY',
+      'inbox reply ID (--reply TEXT | --file PATH | stdin) --idempotency-key KEY',
+      'inbox approve ID --scope-hash HASH --idempotency-key KEY',
+      'inbox reject ID --scope-hash HASH --idempotency-key KEY',
+    ]) {
+      expect(help.stdout.join('')).toContain(required);
+    }
   });
 
   it('validates locally and produces semantic no-op plans against the server', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-plan-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-plan-')));
     const path = join(root, 'agent-os.yaml');
+    await writeFile(join(root, '.git'), 'gitdir: test\n');
     await writeFile(path, STARTER_CONFIG);
 
-    const validate = capture();
+    const validate = capture({ cwd: root });
     await expect(
       runCli(['--json', 'config', 'validate', '--config', path], validate.io),
     ).resolves.toBe(0);
@@ -79,6 +90,7 @@ describe('runCli', () => {
     );
     const plan = capture({
       fetch,
+      cwd: root,
       env: {
         AGENTOS_URL: 'https://control.example',
         AGENTOS_API_TOKEN: 'token',
@@ -94,8 +106,11 @@ describe('runCli', () => {
   });
 
   it('applies canonical configuration and resolves reply content from bounded stdin', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'agentos-apply-'));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-apply-')),
+    );
     const path = join(root, 'agent-os.yaml');
+    await writeFile(join(root, '.git'), 'gitdir: test\n');
     await writeFile(path, STARTER_CONFIG);
     const requests: { url: string; init: RequestInit | undefined }[] = [];
     const fetch = vi.fn(
@@ -106,6 +121,7 @@ describe('runCli', () => {
     );
     const shared = {
       fetch: fetch as typeof globalThis.fetch,
+      cwd: root,
       env: {
         AGENTOS_URL: 'https://control.example',
         AGENTOS_API_TOKEN: 'token',
@@ -153,5 +169,31 @@ describe('runCli', () => {
     expect(code).toBe(3);
     expect(failure.stderr.join('')).toContain('[REDACTED]');
     expect(failure.stderr.join('')).not.toContain('super-secret-token');
+  });
+
+  it('never emits an untrusted remote error code in JSON output', async () => {
+    const failure = capture({
+      env: {
+        AGENTOS_URL: 'https://control.example',
+        AGENTOS_API_TOKEN: 'local-token',
+      },
+      fetch: vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'token=server-secret',
+              message: 'request rejected',
+            },
+          },
+          { status: 400 },
+        ),
+      ),
+    });
+
+    expect(await runCli(['--json', 'runs', 'list'], failure.io)).toBe(3);
+    expect(JSON.parse(failure.stderr.join(''))).toMatchObject({
+      error: { code: 'remote_error' },
+    });
+    expect(failure.stderr.join('')).not.toContain('server-secret');
   });
 });
