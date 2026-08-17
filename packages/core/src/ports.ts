@@ -110,6 +110,15 @@ export interface DraftPublication {
   readonly id: string;
   readonly url: string;
   readonly draft: true;
+  readonly attestation: RepositoryPublisherAttestation;
+}
+
+export interface RepositoryPublisherAttestation {
+  readonly source: 'repository-publisher';
+  readonly scopeHash: string;
+  readonly actionHash: string;
+  readonly baseSha: string;
+  readonly patchHash: string;
 }
 
 export interface RepositoryPublisher {

@@ -1,4 +1,8 @@
-import type { DraftPublication } from './ports.js';
+import { isDuplicateEvent, recordProcessedEvent } from './events.js';
+import type {
+  DraftPublication,
+  RepositoryPublisherAttestation,
+} from './ports.js';
 
 export type FeatureWorkflowPhase =
   | 'specification'
@@ -26,9 +30,11 @@ export interface FeatureWorkflowState {
   readonly maxRetries: number;
   readonly retryCount: number;
   readonly processedEventIds: readonly string[];
+  readonly processedEventFingerprints?: Readonly<Record<string, string>>;
   readonly publication?: DraftPublication;
   readonly failureReason?: string;
   readonly blockedFromStatus?: 'running' | 'awaiting_approval';
+  readonly publicationBinding?: Omit<RepositoryPublisherAttestation, 'source'>;
 }
 
 interface WorkflowEventBase {
@@ -71,6 +77,7 @@ export type FeatureWorkflowEvent =
 
 export interface FeatureWorkflowOptions {
   readonly maxRetries: number;
+  readonly publicationBinding?: Omit<RepositoryPublisherAttestation, 'source'>;
 }
 
 export function createFeatureWorkflow(
@@ -85,6 +92,10 @@ export function createFeatureWorkflow(
     maxRetries: options.maxRetries,
     retryCount: 0,
     processedEventIds: [],
+    processedEventFingerprints: {},
+    ...(options.publicationBinding === undefined
+      ? {}
+      : { publicationBinding: options.publicationBinding }),
   };
 }
 
@@ -103,7 +114,7 @@ function withProcessed(
   return {
     ...state,
     ...changes,
-    processedEventIds: [...state.processedEventIds, event.id],
+    ...recordProcessedEvent(state, event),
   };
 }
 
@@ -139,7 +150,7 @@ export function reduceFeatureWorkflow(
   state: FeatureWorkflowState,
   event: FeatureWorkflowEvent,
 ): FeatureWorkflowState {
-  if (state.processedEventIds.includes(event.id)) return state;
+  if (isDuplicateEvent(state, event)) return state;
   if (terminalStatuses.has(state.status)) {
     throw new Error(
       `Terminal feature workflow state ${state.status} cannot transition`,
@@ -186,10 +197,13 @@ export function reduceFeatureWorkflow(
       status: state.blockedFromStatus ?? 'running',
       maxRetries: state.maxRetries,
       retryCount: state.retryCount,
-      processedEventIds: [...state.processedEventIds, event.id],
+      ...recordProcessedEvent(state, event),
       ...(state.publication === undefined
         ? {}
         : { publication: state.publication }),
+      ...(state.publicationBinding === undefined
+        ? {}
+        : { publicationBinding: state.publicationBinding }),
     };
   }
   if (state.status === 'blocked') {
@@ -252,6 +266,30 @@ export function reduceFeatureWorkflow(
       assertPhase(state, 'draft_publication', event);
       if (event.publication.draft !== true)
         throw new Error('Only draft publications may complete the workflow');
+      if (
+        event.publication.attestation?.source !== 'repository-publisher' ||
+        [
+          event.publication.attestation.scopeHash,
+          event.publication.attestation.actionHash,
+          event.publication.attestation.baseSha,
+          event.publication.attestation.patchHash,
+        ].some((value) => typeof value !== 'string' || value.trim() === '')
+      )
+        throw new Error('A trusted publisher attestation is required');
+      if (
+        state.publicationBinding === undefined ||
+        event.publication.attestation.scopeHash !==
+          state.publicationBinding.scopeHash ||
+        event.publication.attestation.actionHash !==
+          state.publicationBinding.actionHash ||
+        event.publication.attestation.baseSha !==
+          state.publicationBinding.baseSha ||
+        event.publication.attestation.patchHash !==
+          state.publicationBinding.patchHash
+      )
+        throw new Error(
+          'Publisher attestation does not match workflow binding',
+        );
       return withProcessed(state, event, {
         status: 'succeeded',
         publication: event.publication,

@@ -18,6 +18,15 @@ function requireNonNegativeInteger(value: number, label: string): bigint {
   return BigInt(value);
 }
 
+function ownValue<T>(
+  record: Readonly<Record<string, T>>,
+  key: string,
+): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key)
+    ? record[key]
+    : undefined;
+}
+
 function divideUp(numerator: bigint, denominator: bigint): bigint {
   if (numerator === 0n) return 0n;
   return (numerator + denominator - 1n) / denominator;
@@ -65,6 +74,13 @@ export interface UsageLedger {
   readonly dailySpentMicrodollars: Microdollars;
   readonly workflowSpentMicrodollars: Readonly<Record<string, Microdollars>>;
   readonly activeWorkflowIds: readonly string[];
+  readonly reservations: Readonly<Record<string, BudgetReservation>>;
+}
+
+export interface BudgetReservation {
+  readonly id: string;
+  readonly workflowId: string;
+  readonly microdollars: Microdollars;
 }
 
 export function createUsageLedger(day: string): UsageLedger {
@@ -75,6 +91,7 @@ export function createUsageLedger(day: string): UsageLedger {
     dailySpentMicrodollars: 0,
     workflowSpentMicrodollars: {},
     activeWorkflowIds: [],
+    reservations: {},
   };
 }
 
@@ -85,7 +102,7 @@ export function recordUsageCost(
 ): UsageLedger {
   const amount = requireNonNegativeInteger(microdollars, 'microdollars');
   const workflowSpent = requireNonNegativeInteger(
-    ledger.workflowSpentMicrodollars[workflowId] ?? 0,
+    ownValue(ledger.workflowSpentMicrodollars, workflowId) ?? 0,
     'workflow spent',
   );
   const dailySpent = requireNonNegativeInteger(
@@ -147,6 +164,10 @@ export interface AdmissionRequest {
   readonly estimatedMicrodollars: Microdollars;
 }
 
+export interface BudgetReservationRequest extends AdmissionRequest {
+  readonly reservationId: string;
+}
+
 export type BudgetDecision =
   | { readonly decision: 'admit'; readonly reason: 'within_limits' }
   | {
@@ -166,13 +187,26 @@ function reservedLimit(limit: number, percent: number): bigint {
   );
 }
 
+function reservationTotal(ledger: UsageLedger, workflowId?: string): bigint {
+  let total = 0n;
+  for (const reservation of Object.values(ledger.reservations)) {
+    if (workflowId === undefined || reservation.workflowId === workflowId) {
+      total += requireNonNegativeInteger(
+        reservation.microdollars,
+        'reservation microdollars',
+      );
+    }
+  }
+  return total;
+}
+
 export function decideBudgetAction(
   ledger: UsageLedger,
   request: AdmissionRequest,
   limits: BudgetLimits,
 ): BudgetDecision {
   const workflowSpent = requireNonNegativeInteger(
-    ledger.workflowSpentMicrodollars[request.workflowId] ?? 0,
+    ownValue(ledger.workflowSpentMicrodollars, request.workflowId) ?? 0,
     'workflow spent',
   );
   const dailySpent = requireNonNegativeInteger(
@@ -191,9 +225,12 @@ export function decideBudgetAction(
     request.estimatedMicrodollars,
     'estimated microdollars',
   );
-  if (workflowSpent >= workflowCap)
+  const workflowCommitted =
+    workflowSpent + reservationTotal(ledger, request.workflowId);
+  const dailyCommitted = dailySpent + reservationTotal(ledger);
+  if (workflowCommitted >= workflowCap)
     return { decision: 'exhaust', reason: 'workflow_cap' };
-  if (dailySpent >= dailyCap)
+  if (dailyCommitted >= dailyCap)
     return { decision: 'exhaust', reason: 'daily_cap' };
   if (!Number.isSafeInteger(limits.concurrency) || limits.concurrency <= 0)
     throw new Error('concurrency must be a positive safe integer');
@@ -207,14 +244,88 @@ export function decideBudgetAction(
   if (reservePercent < 0 || reservePercent > 100)
     throw new Error('admission reserve percent must be between 0 and 100');
   if (
-    workflowSpent + estimate >
+    workflowCommitted + estimate >
       reservedLimit(limits.workflowMicrodollars, reservePercent) ||
-    dailySpent + estimate >
+    dailyCommitted + estimate >
       reservedLimit(limits.dailyMicrodollars, reservePercent)
   ) {
     return { decision: 'cancel', reason: 'admission_reserve' };
   }
   return { decision: 'admit', reason: 'within_limits' };
+}
+
+export type BudgetReservationResult = BudgetDecision & {
+  readonly ledger: UsageLedger;
+};
+
+export function reserveBudget(
+  ledger: UsageLedger,
+  request: BudgetReservationRequest,
+  limits: BudgetLimits,
+): BudgetReservationResult {
+  if (request.reservationId.trim() === '')
+    throw new Error('reservationId must be non-empty');
+  const existing = ownValue(ledger.reservations, request.reservationId);
+  if (existing !== undefined) {
+    if (
+      existing.workflowId !== request.workflowId ||
+      existing.microdollars !== request.estimatedMicrodollars
+    )
+      throw new Error('Reservation ID was reused with different details');
+    return { decision: 'admit', reason: 'within_limits', ledger };
+  }
+  const decision = decideBudgetAction(ledger, request, limits);
+  if (decision.decision !== 'admit') return { ...decision, ledger };
+  const microdollars = toMicrodollars(
+    requireNonNegativeInteger(
+      request.estimatedMicrodollars,
+      'estimated microdollars',
+    ),
+  );
+  return {
+    ...decision,
+    ledger: {
+      ...ledger,
+      reservations: {
+        ...ledger.reservations,
+        [request.reservationId]: {
+          id: request.reservationId,
+          workflowId: request.workflowId,
+          microdollars,
+        },
+      },
+    },
+  };
+}
+
+export function releaseBudgetReservation(
+  ledger: UsageLedger,
+  reservationId: string,
+): UsageLedger {
+  if (ownValue(ledger.reservations, reservationId) === undefined) return ledger;
+  return {
+    ...ledger,
+    reservations: Object.fromEntries(
+      Object.entries(ledger.reservations).filter(
+        ([id]) => id !== reservationId,
+      ),
+    ),
+  };
+}
+
+export function consumeBudgetReservation(
+  ledger: UsageLedger,
+  reservationId: string,
+  actualMicrodollars: Microdollars,
+): UsageLedger {
+  const reservation = ownValue(ledger.reservations, reservationId);
+  if (reservation === undefined)
+    throw new Error(`Unknown budget reservation: ${reservationId}`);
+  return recordUsageCost(
+    releaseBudgetReservation(ledger, reservationId),
+    reservation.workflowId,
+    actualMicrodollars,
+  );
 }
 
 export const calculateCost = calculateUsageCost;

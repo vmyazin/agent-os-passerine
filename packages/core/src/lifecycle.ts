@@ -1,3 +1,5 @@
+import { isDuplicateEvent, recordProcessedEvent } from './events.js';
+
 export const lifecycleStatuses = [
   'queued',
   'running',
@@ -16,6 +18,7 @@ export type TerminalStatus =
 export interface LifecycleState {
   readonly status: LifecycleStatus;
   readonly processedEventIds: readonly string[];
+  readonly processedEventFingerprints?: Readonly<Record<string, string>>;
 }
 
 export type LifecycleEvent =
@@ -73,14 +76,18 @@ const transitions: Readonly<
 };
 
 export function createLifecycleState(): LifecycleState {
-  return { status: 'queued', processedEventIds: [] };
+  return {
+    status: 'queued',
+    processedEventIds: [],
+    processedEventFingerprints: {},
+  };
 }
 
 export function reduceLifecycleState(
   state: LifecycleState,
   event: LifecycleEvent,
 ): LifecycleState {
-  if (state.processedEventIds.includes(event.id)) return state;
+  if (isDuplicateEvent(state, event)) return state;
   if (terminalStatuses.has(state.status)) {
     throw new Error(`Terminal state ${state.status} cannot transition`);
   }
@@ -93,10 +100,7 @@ export function reduceLifecycleState(
       `Illegal transition from ${state.status} using ${event.type}`,
     );
   }
-  return {
-    status: nextStatus,
-    processedEventIds: [...state.processedEventIds, event.id],
-  };
+  return { status: nextStatus, ...recordProcessedEvent(state, event) };
 }
 
 export const reduceRunState = reduceLifecycleState;
@@ -111,6 +115,7 @@ export interface ApprovalState {
   readonly requestedAt: Date;
   readonly expiresAt: Date;
   readonly processedEventIds: readonly string[];
+  readonly processedEventFingerprints?: Readonly<Record<string, string>>;
   readonly actorId?: string;
   readonly reason?: string;
   readonly decidedAt?: Date;
@@ -128,12 +133,14 @@ export type ApprovalEvent =
       readonly id: string;
       readonly type: 'approve';
       readonly actorId: string;
+      readonly scopeHash: string;
       readonly occurredAt: Date;
     }
   | {
       readonly id: string;
       readonly type: 'reject';
       readonly actorId: string;
+      readonly scopeHash: string;
       readonly reason?: string;
       readonly occurredAt: Date;
     }
@@ -142,16 +149,35 @@ export type ApprovalEvent =
 export function createApprovalState(
   request: CreateApprovalRequest,
 ): ApprovalState {
+  if (
+    !Number.isFinite(request.requestedAt.getTime()) ||
+    !Number.isFinite(request.expiresAt.getTime())
+  )
+    throw new Error('Approval timestamps must be valid');
+  if (request.id.trim() === '' || request.scopeHash.trim() === '')
+    throw new Error('Approval ID and scope hash must be non-empty');
   if (request.expiresAt <= request.requestedAt)
     throw new Error('Approval expiry must be after request time');
-  return { ...request, status: 'pending', processedEventIds: [] };
+  return {
+    ...request,
+    status: 'pending',
+    processedEventIds: [],
+    processedEventFingerprints: {},
+  };
 }
 
 export function reduceApproval(
   state: ApprovalState,
   event: ApprovalEvent,
 ): ApprovalState {
-  if (state.processedEventIds.includes(event.id)) return state;
+  if (!Number.isFinite(event.occurredAt.getTime()))
+    throw new Error('Approval event timestamp must be valid');
+  if (
+    (event.type === 'approve' || event.type === 'reject') &&
+    event.scopeHash !== state.scopeHash
+  )
+    throw new Error('Approval decision scope hash does not match request');
+  if (isDuplicateEvent(state, event)) return state;
   if (state.status !== 'pending')
     throw new Error(
       `Terminal approval state ${state.status} cannot transition`,
@@ -162,13 +188,13 @@ export function reduceApproval(
   if (event.type === 'expire' && event.occurredAt < state.expiresAt) {
     throw new Error('Approval cannot expire before its expiry time');
   }
-  const processedEventIds = [...state.processedEventIds, event.id];
+  const processed = recordProcessedEvent(state, event);
   if (event.type === 'expire' || event.occurredAt >= state.expiresAt) {
     return {
       ...state,
       status: 'expired',
       decidedAt: event.occurredAt,
-      processedEventIds,
+      ...processed,
     };
   }
   if (event.type === 'approve') {
@@ -177,7 +203,7 @@ export function reduceApproval(
       status: 'approved',
       actorId: event.actorId,
       decidedAt: event.occurredAt,
-      processedEventIds,
+      ...processed,
     };
   }
   return {
@@ -186,6 +212,6 @@ export function reduceApproval(
     actorId: event.actorId,
     ...(event.reason === undefined ? {} : { reason: event.reason }),
     decidedAt: event.occurredAt,
-    processedEventIds,
+    ...processed,
   };
 }

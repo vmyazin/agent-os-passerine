@@ -159,4 +159,45 @@ describe('Agent OS configuration', () => {
   ])('rejects a broken $invariant', ({ yaml }) => {
     expect(() => loadAgentOsConfig(yaml)).toThrow();
   });
+
+  it.each([
+    ['model', 'toString'],
+    ['agent-environment', 'constructor'],
+    ['pipeline-agent', '__proto__'],
+    ['pipeline-environment', 'toString'],
+  ] as const)('rejects inherited %s reference %s', (kind, inheritedName) => {
+    const config = loadAgentOsConfig(validYaml);
+    const implementer = config.agents.implementer;
+    const feature = config.pipelines.feature;
+    if (implementer === undefined || feature === undefined)
+      throw new Error('fixture is incomplete');
+    const step = feature.steps[0];
+    if (step === undefined) throw new Error('fixture step is missing');
+    const candidate = {
+      ...config,
+      agents: {
+        ...config.agents,
+        implementer:
+          kind === 'model'
+            ? { ...implementer, model: inheritedName }
+            : kind === 'agent-environment'
+              ? { ...implementer, environment: inheritedName }
+              : implementer,
+      },
+      pipelines: {
+        ...config.pipelines,
+        feature: {
+          steps: [
+            kind === 'pipeline-agent'
+              ? { ...step, agent: inheritedName }
+              : kind === 'pipeline-environment'
+                ? { ...step, environment: inheritedName }
+                : step,
+          ],
+        },
+      },
+    };
+
+    expect(AgentOsConfigSchema.safeParse(candidate).success).toBe(false);
+  });
 });

@@ -17,6 +17,10 @@ const Identifier = z.string().min(1);
 const NonNegativeInteger = z.number().int().nonnegative();
 const PositiveInteger = z.number().int().positive();
 
+function hasOwn(record: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
 export const CapabilityPermissionsSchema = z
   .object({
     allow: z.array(Identifier).default([]),
@@ -128,7 +132,7 @@ export const AgentOsConfigSchema = z
   .strict()
   .superRefine((config, context) => {
     for (const [agentName, agent] of Object.entries(config.agents)) {
-      if (!(agent.model in config.models)) {
+      if (!hasOwn(config.models, agent.model)) {
         context.addIssue({
           code: 'custom',
           path: ['agents', agentName, 'model'],
@@ -137,7 +141,7 @@ export const AgentOsConfigSchema = z
       }
       if (
         agent.environment !== undefined &&
-        !(agent.environment in config.environments)
+        !hasOwn(config.environments, agent.environment)
       ) {
         context.addIssue({
           code: 'custom',
@@ -159,7 +163,7 @@ export const AgentOsConfigSchema = z
         } else {
           stepIndexes.set(step.id, stepIndex);
         }
-        if (!(step.agent in config.agents)) {
+        if (!hasOwn(config.agents, step.agent)) {
           context.addIssue({
             code: 'custom',
             path: ['pipelines', pipelineName, 'steps', stepIndex, 'agent'],
@@ -168,7 +172,7 @@ export const AgentOsConfigSchema = z
         }
         if (
           step.environment !== undefined &&
-          !(step.environment in config.environments)
+          !hasOwn(config.environments, step.environment)
         ) {
           context.addIssue({
             code: 'custom',

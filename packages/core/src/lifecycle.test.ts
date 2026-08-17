@@ -45,7 +45,29 @@ describe('run and step state machines', () => {
       type: 'start',
     });
 
-    expect(reduceRunState(running, { id: 'same', type: 'fail' })).toBe(running);
+    expect(reduceRunState(running, { id: 'same', type: 'start' })).toBe(
+      running,
+    );
+  });
+
+  it('rejects empty event IDs and colliding event payloads', () => {
+    expect(() =>
+      reduceRunState(createLifecycleState(), { id: '', type: 'start' }),
+    ).toThrow(/event id/i);
+    const running = reduceRunState(createLifecycleState(), {
+      id: 'collision',
+      type: 'start',
+    });
+    expect(() =>
+      reduceRunState(running, { id: 'collision', type: 'fail' }),
+    ).toThrow(/different/i);
+  });
+
+  it('does not confuse inherited object names with processed event IDs', () => {
+    expect(
+      reduceRunState(createLifecycleState(), { id: 'toString', type: 'start' })
+        .status,
+    ).toBe('running');
   });
 });
 
@@ -64,6 +86,7 @@ describe('approval state machine', () => {
         id: 'event-1',
         type: 'approve',
         actorId: 'operator',
+        scopeHash: 'sha256:scope',
         occurredAt: new Date('2026-01-01T01:00:00Z'),
       }).status,
     ).toBe('approved');
@@ -72,6 +95,7 @@ describe('approval state machine', () => {
         id: 'event-2',
         type: 'reject',
         actorId: 'operator',
+        scopeHash: 'sha256:scope',
         reason: 'unsafe',
         occurredAt: new Date('2026-01-01T01:00:00Z'),
       }).status,
@@ -89,9 +113,8 @@ describe('approval state machine', () => {
     expect(
       reduceApproval(expired, {
         id: 'expiry',
-        type: 'approve',
-        actorId: 'operator',
-        occurredAt: new Date('2026-01-02T01:00:00Z'),
+        type: 'expire',
+        occurredAt: new Date('2026-01-02T00:00:00Z'),
       }),
     ).toBe(expired);
   });
@@ -102,6 +125,7 @@ describe('approval state machine', () => {
         id: 'early-approve',
         type: 'approve',
         actorId: 'operator',
+        scopeHash: 'sha256:scope',
         occurredAt: new Date('2025-12-31T23:59:59Z'),
       }),
     ).toThrow(/before.*request/i);
@@ -113,9 +137,65 @@ describe('approval state machine', () => {
         id: 'early-reject',
         type: 'reject',
         actorId: 'operator',
+        scopeHash: 'sha256:scope',
         reason: 'impossible chronology',
         occurredAt: new Date('2025-12-31T23:59:59Z'),
       }),
     ).toThrow(/before.*request/i);
+  });
+
+  it.each([
+    ['request', new Date(Number.NaN), new Date('2026-01-02T00:00:00Z')],
+    ['expiry', new Date('2026-01-01T00:00:00Z'), new Date(Number.NaN)],
+  ])('rejects invalid %s timestamp', (_label, requestedAt, expiresAt) => {
+    expect(() =>
+      createApprovalState({
+        id: 'approval-invalid-time',
+        scopeHash: 'sha256:scope',
+        requestedAt,
+        expiresAt,
+      }),
+    ).toThrow(/timestamp/i);
+  });
+
+  it('rejects invalid event timestamps', () => {
+    expect(() =>
+      reduceApproval(approval(), {
+        id: 'invalid-time',
+        type: 'expire',
+        occurredAt: new Date(Number.NaN),
+      }),
+    ).toThrow(/timestamp/i);
+  });
+
+  it('rejects a reused approval event ID with a different decision', () => {
+    const approved = reduceApproval(approval(), {
+      id: 'decision',
+      type: 'approve',
+      actorId: 'operator',
+      scopeHash: 'sha256:scope',
+      occurredAt: new Date('2026-01-01T01:00:00Z'),
+    });
+    expect(() =>
+      reduceApproval(approved, {
+        id: 'decision',
+        type: 'reject',
+        actorId: 'operator',
+        scopeHash: 'sha256:scope',
+        occurredAt: new Date('2026-01-01T01:00:00Z'),
+      }),
+    ).toThrow(/different/i);
+  });
+
+  it('binds approval decisions to the requested scope hash', () => {
+    expect(() =>
+      reduceApproval(approval(), {
+        id: 'wrong-scope',
+        type: 'approve',
+        actorId: 'operator',
+        scopeHash: 'sha256:different',
+        occurredAt: new Date('2026-01-01T01:00:00Z'),
+      }),
+    ).toThrow(/scope/i);
   });
 });

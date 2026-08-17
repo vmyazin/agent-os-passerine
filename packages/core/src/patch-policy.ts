@@ -8,6 +8,7 @@ export interface NormalizedChange {
   readonly sizeBytes: number;
   readonly binary: boolean;
   readonly symlink: boolean;
+  readonly metadataTrusted: true;
 }
 
 export interface ChangeManifest {
@@ -29,7 +30,8 @@ export type PatchViolationCode =
   | 'symlink'
   | 'binary'
   | 'oversized'
-  | 'malformed_path';
+  | 'malformed_path'
+  | 'untrusted_metadata';
 
 export interface PatchViolation {
   readonly code: PatchViolationCode;
@@ -60,7 +62,7 @@ function globPatternToRegex(pattern: string): RegExp {
       source += character?.replace(/[|\\{}()[\]^$+?.]/g, '\\$&') ?? '';
     }
   }
-  return new RegExp(`${source}$`);
+  return new RegExp(`${source}$`, 'i');
 }
 
 function normalizeChangePath(path: string): string | undefined {
@@ -100,6 +102,15 @@ export function evaluatePatchPolicy(
   const protectedPaths = policy.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
   const protectedMatchers = protectedPaths.map(globPatternToRegex);
   const maxFileBytes = policy.maxFileBytes ?? 1_000_000;
+  if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0)
+    throw new Error('Maximum file byte limit must be a positive safe integer');
+  if (
+    (policy.allowBinary !== undefined &&
+      typeof policy.allowBinary !== 'boolean') ||
+    (policy.allowSymlinks !== undefined &&
+      typeof policy.allowSymlinks !== 'boolean')
+  )
+    throw new Error('Patch policy allow limits must be boolean');
 
   if (manifest.baseSha !== policy.currentBaseSha) {
     violations.push({
@@ -115,6 +126,20 @@ export function evaluatePatchPolicy(
         code: 'malformed_path',
         path: change.path,
         message: `Malformed repository path: ${change.path}`,
+      });
+      continue;
+    }
+    if (
+      change.metadataTrusted !== true ||
+      typeof change.binary !== 'boolean' ||
+      typeof change.symlink !== 'boolean' ||
+      !Number.isSafeInteger(change.sizeBytes) ||
+      change.sizeBytes < 0
+    ) {
+      violations.push({
+        code: 'untrusted_metadata',
+        path: change.path,
+        message: `Trusted binary, symlink, and size metadata is required: ${change.path}`,
       });
       continue;
     }
@@ -139,11 +164,7 @@ export function evaluatePatchPolicy(
         message: `Binary changes are not allowed: ${change.path}`,
       });
     }
-    if (
-      !Number.isSafeInteger(change.sizeBytes) ||
-      change.sizeBytes < 0 ||
-      change.sizeBytes > maxFileBytes
-    ) {
+    if (change.sizeBytes > maxFileBytes) {
       violations.push({
         code: 'oversized',
         path: change.path,

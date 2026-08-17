@@ -39,7 +39,14 @@ describe('Definition of Done verification', () => {
   it('only accepts passed from a registered verifier', async () => {
     const registry = registerVerifier(createVerifierRegistry(), 'command', {
       id: 'trusted-command-verifier',
-      verify: async () => ({ passed: true, message: 'exit 0' }),
+      verify: async () => ({
+        source: 'registered-verifier',
+        verifierId: 'trusted-command-verifier',
+        criterionId: criterion.id,
+        evidenceId: 'evidence-1',
+        passed: true,
+        message: 'exit 0',
+      }),
     });
     const evidence = submitEvidence({
       id: 'evidence-1',
@@ -54,6 +61,34 @@ describe('Definition of Done verification', () => {
     ).resolves.toMatchObject({
       status: 'passed',
       verifierId: 'trusted-command-verifier',
+    });
+  });
+
+  it('rejects verifier attestations not bound to the criterion and evidence', async () => {
+    const registry = registerVerifier(createVerifierRegistry(), 'command', {
+      id: 'trusted-command-verifier',
+      verify: async () => ({
+        source: 'registered-verifier',
+        verifierId: 'trusted-command-verifier',
+        criterionId: 'different-criterion',
+        evidenceId: 'different-evidence',
+        passed: true,
+        message: 'claimed pass',
+      }),
+    });
+    const evidence = submitEvidence({
+      id: 'evidence-1',
+      criterionId: criterion.id,
+      submittedByAgentId: 'implementer',
+      observedAt: new Date('2026-01-01T00:00:00Z'),
+      payload: { claimedStatus: 'passed' },
+    });
+
+    await expect(
+      verifyCriterion(registry, criterion, evidence),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      code: 'attestation_mismatch',
     });
   });
 

@@ -12,6 +12,13 @@ const event = (
   type: FeatureWorkflowEvent['type'],
 ): FeatureWorkflowEvent => ({ id, type }) as FeatureWorkflowEvent;
 
+const publicationBinding = {
+  scopeHash: 'scope-hash',
+  actionHash: 'action-hash',
+  baseSha: 'base-sha',
+  patchHash: 'patch-hash',
+} as const;
+
 const happyPath: FeatureWorkflowEvent[] = [
   event('1', 'specification_completed'),
   event('2', 'specification_approved'),
@@ -23,13 +30,27 @@ const happyPath: FeatureWorkflowEvent[] = [
   {
     id: '8',
     type: 'draft_published',
-    publication: { id: 'pr-1', url: 'https://example.test/pr/1', draft: true },
+    publication: {
+      id: 'pr-1',
+      url: 'https://example.test/pr/1',
+      draft: true,
+      attestation: {
+        source: 'repository-publisher',
+        scopeHash: 'scope-hash',
+        actionHash: 'action-hash',
+        baseSha: 'base-sha',
+        patchHash: 'patch-hash',
+      },
+    },
   },
 ];
 
 describe('feature workflow reducer', () => {
   it('runs specification through policy validation to draft publication', () => {
-    const completed = replayFeatureWorkflow(happyPath, { maxRetries: 2 });
+    const completed = replayFeatureWorkflow(happyPath, {
+      maxRetries: 2,
+      publicationBinding,
+    });
 
     expect(completed).toMatchObject({
       status: 'succeeded',
@@ -102,7 +123,7 @@ describe('feature workflow reducer', () => {
       retryCount: 1,
     });
     expect(duplicated).toEqual(replayed);
-    expect(reduceFeatureWorkflow(replayed, event('5', 'cancel'))).toBe(
+    expect(reduceFeatureWorkflow(replayed, event('5', 'plan_completed'))).toBe(
       replayed,
     );
   });
@@ -129,6 +150,7 @@ describe('feature workflow reducer', () => {
   it('preserves first-crash recovery metadata across repeated crashes and resumes cleanly', () => {
     let state = replayFeatureWorkflow([event('1', 'specification_completed')], {
       maxRetries: 2,
+      publicationBinding,
     });
     state = reduceFeatureWorkflow(state, {
       id: 'crash-1',
@@ -159,5 +181,67 @@ describe('feature workflow reducer', () => {
 
     state = [...happyPath.slice(1)].reduce(reduceFeatureWorkflow, state);
     expect(state.status).toBe('succeeded');
+  });
+
+  it('rejects empty IDs and same-ID workflow payload collisions', () => {
+    expect(() =>
+      reduceFeatureWorkflow(
+        createFeatureWorkflow({ maxRetries: 2 }),
+        event('', 'specification_completed'),
+      ),
+    ).toThrow(/event id/i);
+    const crashed = reduceFeatureWorkflow(
+      createFeatureWorkflow({ maxRetries: 2 }),
+      { id: 'collision', type: 'crashed', reason: 'first' },
+    );
+    expect(() =>
+      reduceFeatureWorkflow(crashed, {
+        id: 'collision',
+        type: 'crashed',
+        reason: 'different',
+      }),
+    ).toThrow(/different/i);
+  });
+
+  it('bounds the workflow dedupe snapshot window', () => {
+    let state = reduceFeatureWorkflow(
+      createFeatureWorkflow({ maxRetries: 2 }),
+      { id: 'initial-crash', type: 'crashed' },
+    );
+    for (let index = 0; index < 300; index += 1) {
+      state = reduceFeatureWorkflow(state, {
+        id: `repeated-crash-${index}`,
+        type: 'crashed',
+      });
+    }
+
+    expect(state.processedEventIds).toHaveLength(256);
+    expect(Object.keys(state.processedEventFingerprints ?? {})).toHaveLength(
+      256,
+    );
+  });
+
+  it('requires a trusted publisher attestation', () => {
+    const ready = replayFeatureWorkflow(happyPath.slice(0, 7), {
+      maxRetries: 2,
+    });
+    expect(() =>
+      reduceFeatureWorkflow(ready, {
+        id: 'untrusted-publication',
+        type: 'draft_published',
+        publication: {
+          id: 'pr-2',
+          url: 'https://example.test/pr/2',
+          draft: true,
+          attestation: {
+            source: 'agent',
+            scopeHash: 'scope-hash',
+            actionHash: 'action-hash',
+            baseSha: 'base-sha',
+            patchHash: 'patch-hash',
+          },
+        },
+      } as unknown as FeatureWorkflowEvent),
+    ).toThrow(/attestation/i);
   });
 });

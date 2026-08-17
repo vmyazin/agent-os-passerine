@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   calculateUsageCost,
+  consumeBudgetReservation,
   createUsageLedger,
   decideBudgetAction,
   recordUsageCost,
+  releaseBudgetReservation,
+  reserveBudget,
   type BudgetLimits,
 } from './budget.js';
 
@@ -111,5 +114,85 @@ describe('budget decisions', () => {
         limits,
       ).decision,
     ).toBe('exhaust');
+  });
+
+  it('atomically includes outstanding reservations in workflow and day caps', () => {
+    const reservationLimits: BudgetLimits = {
+      workflowMicrodollars: 1_000,
+      dailyMicrodollars: 1_000,
+      concurrency: 2,
+      admissionReservePercent: 80,
+    };
+    const first = reserveBudget(
+      createUsageLedger('2026-08-16'),
+      {
+        reservationId: 'reservation-1',
+        workflowId: 'run-1',
+        estimatedMicrodollars: 800,
+      },
+      reservationLimits,
+    );
+    const second = reserveBudget(
+      first.ledger,
+      {
+        reservationId: 'reservation-2',
+        workflowId: 'run-2',
+        estimatedMicrodollars: 800,
+      },
+      reservationLimits,
+    );
+
+    expect(first.decision).toBe('admit');
+    expect(second.decision).toBe('cancel');
+    expect(Object.keys(second.ledger.reservations)).toEqual(['reservation-1']);
+  });
+
+  it('consumes and releases reservations deterministically', () => {
+    const admitted = reserveBudget(
+      createUsageLedger('2026-08-16'),
+      {
+        reservationId: 'reservation-1',
+        workflowId: 'run-1',
+        estimatedMicrodollars: 500,
+      },
+      limits,
+    );
+    const consumed = consumeBudgetReservation(
+      admitted.ledger,
+      'reservation-1',
+      300,
+    );
+    const admittedAgain = reserveBudget(
+      consumed,
+      {
+        reservationId: 'reservation-2',
+        workflowId: 'run-1',
+        estimatedMicrodollars: 100,
+      },
+      limits,
+    );
+    const released = releaseBudgetReservation(
+      admittedAgain.ledger,
+      'reservation-2',
+    );
+
+    expect(consumed.dailySpentMicrodollars).toBe(300);
+    expect(consumed.reservations).toEqual({});
+    expect(released.reservations).toEqual({});
+    expect(released.dailySpentMicrodollars).toBe(300);
+  });
+
+  it('treats reservation IDs as own keys, not prototype properties', () => {
+    expect(
+      reserveBudget(
+        createUsageLedger('2026-08-16'),
+        {
+          reservationId: 'toString',
+          workflowId: 'run-1',
+          estimatedMicrodollars: 1,
+        },
+        limits,
+      ).decision,
+    ).toBe('admit');
   });
 });

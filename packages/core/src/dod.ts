@@ -62,12 +62,19 @@ export interface VerifierFinding {
   readonly details?: unknown;
 }
 
+export interface VerifierAttestation extends VerifierFinding {
+  readonly source: 'registered-verifier';
+  readonly verifierId: string;
+  readonly criterionId: string;
+  readonly evidenceId: string;
+}
+
 export interface DefinitionOfDoneVerifier {
   readonly id: string;
   verify(
     criterion: DefinitionOfDoneCriterion,
     evidence: EvidenceSubmission,
-  ): Promise<VerifierFinding> | VerifierFinding;
+  ): Promise<VerifierAttestation> | VerifierAttestation;
 }
 
 export type VerifierRegistry = Readonly<
@@ -115,6 +122,7 @@ export type VerificationResult =
       readonly criterionId: string;
       readonly verifierId: string;
       readonly message: string;
+      readonly attestation: VerifierAttestation;
     }
   | {
       readonly status: 'failed';
@@ -169,12 +177,26 @@ export async function verifyCriterion(
     );
   }
   const finding = await verifier.verify(criterion, evidence);
+  if (
+    finding.source !== 'registered-verifier' ||
+    finding.verifierId !== verifier.id ||
+    finding.criterionId !== criterion.id ||
+    finding.evidenceId !== evidence.id
+  ) {
+    return failedResult(
+      criterion.id,
+      verifier.id,
+      'attestation_mismatch',
+      'Verifier attestation is not bound to this criterion and evidence',
+    );
+  }
   if (finding.passed) {
     return {
       status: 'passed',
       criterionId: criterion.id,
       verifierId: verifier.id,
       message: finding.message,
+      attestation: finding,
     };
   }
   return failedResult(
