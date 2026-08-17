@@ -169,6 +169,104 @@ describe('runCli', () => {
     });
   });
 
+  it('starts a feature from the immutable provenance returned by config apply', async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-apply-start-')),
+    );
+    const path = join(root, 'agent-os.yaml');
+    await writeFile(join(root, '.git'), 'gitdir: test\n');
+    await writeFile(path, STARTER_CONFIG);
+    const provenance = {
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+    };
+    const requests: Array<{
+      url: string;
+      init: RequestInit | undefined;
+    }> = [];
+    const fetch = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === 'GET') return Response.json({ active: null });
+        if (String(url).endsWith('/api/configuration/apply'))
+          return Response.json({
+            projectId: 'project_1',
+            digest: provenance.configDigest,
+            revision: 1,
+            appliedAt: '2026-08-17T12:00:00.000Z',
+            provenance,
+          });
+        return Response.json({ id: 'run_1', status: 'pending' });
+      },
+    );
+    const shared = {
+      fetch: fetch as typeof globalThis.fetch,
+      cwd: root,
+      env: {
+        AGENTOS_URL: 'https://control.example',
+        AGENTOS_API_TOKEN: 'token',
+      },
+    };
+    const apply = capture(shared);
+    expect(
+      await runCli(
+        [
+          '--json',
+          'config',
+          'apply',
+          '--config',
+          path,
+          '--idempotency-key',
+          'apply-start',
+        ],
+        apply.io,
+      ),
+    ).toBe(0);
+    const applied = JSON.parse(apply.stdout.join('')) as {
+      projectId: string;
+      provenance: typeof provenance;
+    };
+
+    const start = capture(shared);
+    expect(
+      await runCli(
+        [
+          'feature',
+          'start',
+          '--project-id',
+          applied.projectId,
+          '--title',
+          'Projected feature',
+          '--description',
+          'Start from config apply output.',
+          '--repository-sha',
+          applied.provenance.repositorySha,
+          '--config-digest',
+          applied.provenance.configDigest,
+          '--model-digest',
+          applied.provenance.modelDigest,
+          '--prompt-digest',
+          applied.provenance.promptDigest,
+          '--environment-digest',
+          applied.provenance.environmentDigest,
+          '--policy-digest',
+          applied.provenance.policyDigest,
+          '--idempotency-key',
+          'feature-start',
+        ],
+        start.io,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(String(requests[2]?.init?.body))).toMatchObject({
+      projectId: 'project_1',
+      ...provenance,
+    });
+  });
+
   it('does not expose the API token when transport errors contain it', async () => {
     const failure = capture({
       env: {

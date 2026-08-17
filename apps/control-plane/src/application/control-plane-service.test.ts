@@ -68,21 +68,63 @@ runtime: { provider: local }
     expect(revisions).toEqual([
       expect.objectContaining({ repositorySha: 'b'.repeat(40) }),
     ]);
-    const revision = revisions[0]!;
     await expect(
       service.createFeatureRun('trusted-head-feature', {
         projectId: applied.projectId,
         title: 'Use the real selected head',
         description: 'Snapshot the exact applied revision.',
-        repositorySha: revision.repositorySha,
-        configDigest: revision.configDigest,
-        modelDigest: revision.modelDigest,
-        promptDigest: revision.promptDigest,
-        environmentDigest: revision.environmentDigest,
-        policyDigest: revision.policyDigest,
+        ...applied.provenance,
       }),
     ).resolves.toMatchObject({ repositorySha: 'b'.repeat(40) });
     expect(requestStart).toHaveBeenCalledOnce();
+  });
+
+  it('replays a config apply before consulting a mutable repository head', async () => {
+    const repository = new InMemoryDomainRepository();
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce('b'.repeat(40))
+      .mockResolvedValueOnce('c'.repeat(40));
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      undefined,
+      { resolve },
+    );
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const request = {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
+    };
+
+    const first = await service.applyConfiguration('stable-key', request);
+    const replay = await service.applyConfiguration('stable-key', request);
+    expect(replay).toEqual(first);
+    expect(resolve).toHaveBeenCalledOnce();
+
+    const changed = { ...config, project: { ...config.project, name: 'Next' } };
+    const next = await service.applyConfiguration('next-key', {
+      canonicalConfig: canonicalConfigJson(changed),
+      digest: canonicalConfigHash(changed),
+      expectedRevision: first.revision,
+      expectedDigest: first.digest,
+    });
+    expect(next.provenance.repositorySha).toBe('c'.repeat(40));
+    expect(resolve).toHaveBeenCalledTimes(2);
   });
 
   it('records configuration immutably and replays the same apply key', async () => {
@@ -126,6 +168,7 @@ runtime: { provider: local }
         digest: first.digest,
         revision: first.revision,
         appliedAt: first.appliedAt,
+        provenance: first.provenance,
       },
     });
     const projects = await repository.listProjects();

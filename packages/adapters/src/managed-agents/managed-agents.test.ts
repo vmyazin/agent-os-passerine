@@ -807,6 +807,36 @@ describe('declarative resource sync', () => {
 });
 
 describe('sessions and controls', () => {
+  it('accepts an exact one-MiB mounted resource and rejects one byte more', async () => {
+    const { provider } = await syncedProvider();
+    await expect(
+      provider.provisionSessionAccess({
+        idempotencyKey: 'resource-exact-limit',
+        files: [
+          {
+            filename: 'exact.bin',
+            mediaType: 'application/octet-stream',
+            bytes: new Uint8Array(1024 * 1024),
+            mountPath: '/workspace/inputs/exact.bin',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ resources: [expect.any(Object)] });
+    await expect(
+      provider.provisionSessionAccess({
+        idempotencyKey: 'resource-over-limit',
+        files: [
+          {
+            filename: 'over.bin',
+            mediaType: 'application/octet-stream',
+            bytes: new Uint8Array(1024 * 1024 + 1),
+            mountPath: '/workspace/inputs/over.bin',
+          },
+        ],
+      }),
+    ).rejects.toThrow('Access file exceeds maxOutputBytes');
+  });
+
   it('provisions restart-idempotent scoped MCP vault auth and mounted files without putting the bearer in session input', async () => {
     const { client, provider } = await syncedProvider();
     const accessRequest = {
@@ -1563,7 +1593,8 @@ describe('bounded normalization, replay, output, and usage', () => {
       inputTokens: 10,
       outputTokens: 5,
       cacheReadInputTokens: 4,
-      cacheCreationInputTokens: 5,
+      cacheCreation5mInputTokens: 2,
+      cacheCreation1hInputTokens: 3,
       runtimeMs: 1250,
     });
   });

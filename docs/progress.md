@@ -25,7 +25,10 @@ Last reviewed: 2026-08-17
    isolated provider-observed command verification, one review/fix/final-review
    pass, trusted publication, independent cancellation, sealed ambiguous-start
    recovery, config-bound actual orphan pricing, cleanup reconciliation, and a
-   persistent fair reconciliation cursor.
+   persistent fair reconciliation cursor. Current hardening also includes
+   complete prompt-cache pricing, delayed independent absence confirmation,
+   a separate read-only source GitHub App identity, safe apply-to-start
+   provenance projection, and a one-MiB source-bundle transport limit.
 
 ## Verification boundary
 

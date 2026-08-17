@@ -42,6 +42,11 @@ export const ModelProfileSchema = z
     model: Identifier,
     inputMicrodollarsPerMillionTokens: NonNegativeInteger.default(0),
     outputMicrodollarsPerMillionTokens: NonNegativeInteger.default(0),
+    cacheReadInputMicrodollarsPerMillionTokens: NonNegativeInteger.optional(),
+    cacheCreation5mInputMicrodollarsPerMillionTokens:
+      NonNegativeInteger.optional(),
+    cacheCreation1hInputMicrodollarsPerMillionTokens:
+      NonNegativeInteger.optional(),
     runtimeMicrodollarsPerMinute: NonNegativeInteger.default(0),
   })
   .strict();

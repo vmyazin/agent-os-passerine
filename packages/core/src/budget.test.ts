@@ -19,6 +19,49 @@ const limits: BudgetLimits = {
 };
 
 describe('integer usage accounting', () => {
+  it('prices every prompt-cache bucket with integer-safe ceiling', () => {
+    expect(
+      calculateUsageCost(
+        {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadInputTokens: 1,
+          cacheCreation5mInputTokens: 1,
+          cacheCreation1hInputTokens: 1,
+          runtimeMs: 1,
+        },
+        {
+          inputMicrodollarsPerMillionTokens: 3_000_000,
+          outputMicrodollarsPerMillionTokens: 15_000_000,
+          cacheReadInputMicrodollarsPerMillionTokens: 300_000,
+          cacheCreation5mInputMicrodollarsPerMillionTokens: 3_750_000,
+          cacheCreation1hInputMicrodollarsPerMillionTokens: 6_000_000,
+          runtimeMicrodollarsPerMinute: 80_000,
+        },
+      ),
+    ).toBe(31);
+  });
+
+  it('uses the versioned official cache multipliers when rates are omitted', () => {
+    expect(
+      calculateUsageCost(
+        {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 1_000_000,
+          cacheCreation5mInputTokens: 1_000_000,
+          cacheCreation1hInputTokens: 1_000_000,
+          runtimeMs: 0,
+        },
+        {
+          inputMicrodollarsPerMillionTokens: 3_000_000,
+          outputMicrodollarsPerMillionTokens: 15_000_000,
+          runtimeMicrodollarsPerMinute: 80_000,
+        },
+      ),
+    ).toBe(10_050_000);
+  });
+
   it('calculates token and runtime cost in integer microdollars', () => {
     expect(
       calculateUsageCost(

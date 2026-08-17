@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GET } from '../../app/api/configuration/route';
 import { POST } from '../../app/api/configuration/apply/route';
+import { POST as startFeature } from '../../app/api/features/route';
 import { GET as getInbox } from '../../app/api/inbox/route';
 import { authConfigFromEnv, issueSession, SESSION_COOKIE } from '../auth/auth';
 import { resetControlPlaneServiceForTests } from '../application/runtime';
@@ -90,6 +91,32 @@ describe('configuration API routes', () => {
     });
     expect(projected).not.toHaveProperty('id');
     expect(projected).not.toHaveProperty('repositorySha');
+    expect(projected.provenance).toMatchObject({
+      repositorySha: expect.stringMatching(/^[a-f0-9]{40}$/),
+      configDigest: body.digest,
+      modelDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      environmentDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      policyDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+
+    const feature = await startFeature(
+      request('/api/features', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'feature-from-applied-config' },
+        body: JSON.stringify({
+          projectId: projected.projectId,
+          title: 'Start from safe projection',
+          description: 'Use the immutable provenance returned by apply.',
+          ...projected.provenance,
+        }),
+      }),
+    );
+    expect(feature.status).toBe(201);
+    await expect(feature.json()).resolves.toMatchObject({
+      projectId: projected.projectId,
+      repositorySha: projected.provenance.repositorySha,
+    });
 
     const active = await GET(request('/api/configuration'));
     await expect(active.json()).resolves.toEqual({ active: projected });

@@ -267,14 +267,21 @@ function normalizedError(value: unknown): Record<string, unknown> {
 function normalizedUsage(value: unknown): Record<string, number> {
   if (!isRecord(value)) throw new Error('Malformed provider event');
   const cache = isRecord(value.cache_creation) ? value.cache_creation : {};
+  const cache5m = nonnegativeNumber(cache.ephemeral_5m_input_tokens);
+  const cache1h = nonnegativeNumber(cache.ephemeral_1h_input_tokens);
+  const undifferentiatedCacheCreation = nonnegativeNumber(
+    value.cache_creation_input_tokens,
+  );
   return {
     inputTokens: nonnegativeNumber(value.input_tokens),
     outputTokens: nonnegativeNumber(value.output_tokens),
     cacheReadInputTokens: nonnegativeNumber(value.cache_read_input_tokens),
-    cacheCreationInputTokens:
-      nonnegativeNumber(value.cache_creation_input_tokens) +
-      nonnegativeNumber(cache.ephemeral_5m_input_tokens) +
-      nonnegativeNumber(cache.ephemeral_1h_input_tokens),
+    cacheCreation5mInputTokens: cache5m,
+    // Older/partial provider events do not expose TTL. Charge that bucket at
+    // the conservative 1h rate, but never add a total on top of its breakdown.
+    cacheCreation1hInputTokens:
+      cache1h +
+      (cache5m === 0 && cache1h === 0 ? undifferentiatedCacheCreation : 0),
     runtimeMs: nonnegativeNumber(value.active_seconds) * 1000,
   };
 }

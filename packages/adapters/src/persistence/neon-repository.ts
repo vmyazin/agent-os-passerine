@@ -213,8 +213,12 @@ function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
     row.runId === usage.runId &&
     row.stepRunId === usage.stepRunId &&
     row.model === usage.model &&
+    row.pricingVersion === usage.pricingVersion &&
     row.inputTokens === usage.inputTokens &&
     row.outputTokens === usage.outputTokens &&
+    row.cacheReadInputTokens === usage.cacheReadInputTokens &&
+    row.cacheCreation5mInputTokens === usage.cacheCreation5mInputTokens &&
+    row.cacheCreation1hInputTokens === usage.cacheCreation1hInputTokens &&
     row.runtimeMs === usage.runtimeMs &&
     row.microdollars === usage.microdollars &&
     isoTimestampEpochMicroseconds(row.recordedAt) ===
@@ -1553,9 +1557,9 @@ export class NeonDomainRepository implements DomainRepository {
     assertValidUsage(usage);
     const result = await this.database.execute<Record<string, unknown>>(sql`
       insert into "usage_records"
-        ("idempotency_id", "run_id", "step_run_id", "model", "input_tokens", "output_tokens", "runtime_ms", "microdollars", "recorded_at")
+        ("idempotency_id", "run_id", "step_run_id", "model", "pricing_version", "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens", "runtime_ms", "microdollars", "recorded_at")
       values
-        (${usage.idempotencyId}, ${usage.runId}, ${usage.stepRunId ?? null}, ${usage.model}, ${usage.inputTokens}, ${usage.outputTokens}, ${usage.runtimeMs}, ${usage.microdollars}, ${usage.recordedAt})
+        (${usage.idempotencyId}, ${usage.runId}, ${usage.stepRunId ?? null}, ${usage.model}, ${usage.pricingVersion}, ${usage.inputTokens}, ${usage.outputTokens}, ${usage.cacheReadInputTokens}, ${usage.cacheCreation5mInputTokens}, ${usage.cacheCreation1hInputTokens}, ${usage.runtimeMs}, ${usage.microdollars}, ${usage.recordedAt})
       on conflict ("idempotency_id") do update
         set "idempotency_id" = "usage_records"."idempotency_id"
       returning
@@ -1563,8 +1567,12 @@ export class NeonDomainRepository implements DomainRepository {
         "run_id" as "runId",
         "step_run_id" as "stepRunId",
         "model",
+        "pricing_version" as "pricingVersion",
         "input_tokens"::text as "inputTokens",
         "output_tokens"::text as "outputTokens",
+        "cache_read_input_tokens"::text as "cacheReadInputTokens",
+        "cache_creation_5m_input_tokens"::text as "cacheCreation5mInputTokens",
+        "cache_creation_1h_input_tokens"::text as "cacheCreation1hInputTokens",
         "runtime_ms"::text as "runtimeMs",
         "microdollars"::text as "microdollars",
         to_char("recorded_at" at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "recordedAt"
@@ -1574,6 +1582,18 @@ export class NeonDomainRepository implements DomainRepository {
       ...usageRow,
       inputTokens: databaseSafeInteger(usageRow.inputTokens, 'inputTokens'),
       outputTokens: databaseSafeInteger(usageRow.outputTokens, 'outputTokens'),
+      cacheReadInputTokens: databaseSafeInteger(
+        usageRow.cacheReadInputTokens,
+        'cacheReadInputTokens',
+      ),
+      cacheCreation5mInputTokens: databaseSafeInteger(
+        usageRow.cacheCreation5mInputTokens,
+        'cacheCreation5mInputTokens',
+      ),
+      cacheCreation1hInputTokens: databaseSafeInteger(
+        usageRow.cacheCreation1hInputTokens,
+        'cacheCreation1hInputTokens',
+      ),
       runtimeMs: databaseSafeInteger(usageRow.runtimeMs, 'runtimeMs'),
       microdollars: databaseSafeInteger(usageRow.microdollars, 'microdollars'),
     });

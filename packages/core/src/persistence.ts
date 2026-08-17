@@ -402,8 +402,12 @@ export interface UsageRecordEntry {
   readonly runId: WorkflowRunId;
   readonly stepRunId?: StepRunId;
   readonly model: string;
+  readonly pricingVersion: string;
   readonly inputTokens: number;
   readonly outputTokens: number;
+  readonly cacheReadInputTokens: number;
+  readonly cacheCreation5mInputTokens: number;
+  readonly cacheCreation1hInputTokens: number;
   readonly runtimeMs: number;
   readonly microdollars: number;
   readonly recordedAt: IsoTimestamp;

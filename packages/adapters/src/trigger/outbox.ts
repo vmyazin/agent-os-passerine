@@ -23,6 +23,8 @@ import type {
   TriggerWorkflowDispatcher,
 } from './trigger-adapter.js';
 
+export const RUNTIME_START_VISIBILITY_DELAY_MS = 30_000;
+
 const fingerprint = (value: unknown) =>
   createHash('sha256')
     .update(canonicalJsonValue(JSON.parse(JSON.stringify(value))))
@@ -60,6 +62,9 @@ export interface DurableTriggerOutboxOptions {
       readonly priceUsage: (usage: {
         readonly inputTokens: number;
         readonly outputTokens: number;
+        readonly cacheReadInputTokens?: number;
+        readonly cacheCreation5mInputTokens?: number;
+        readonly cacheCreation1hInputTokens?: number;
         readonly runtimeMs: number;
       }) => number;
     }>;
@@ -491,6 +496,15 @@ export function createDurableTriggerOutbox(
           'expired budget reconciliation requires the domain repository',
         );
       for (const reservation of expired) {
+        const runtimeIntent = effects.find(
+          (candidate) =>
+            candidate.kind === 'runtime-session' &&
+            candidate.key.includes(`:${reservation.stepKey}:`),
+        );
+        // Runtime reservations are released exclusively by orphan
+        // reconciliation after remote cleanup or confirmed absence. Generic
+        // terminal cleanup must never bypass that proof.
+        if (runtimeIntent !== undefined) continue;
         await options.repository!.appendUsage({
           idempotencyId: persistenceId(
             'usage',
@@ -498,8 +512,12 @@ export function createDurableTriggerOutbox(
           ),
           runId: persistenceId('run', reservation.runId),
           model: 'conservative-reservation',
+          pricingVersion: 'conservative-reservation-v1',
           inputTokens: 0,
           outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreation5mInputTokens: 0,
+          cacheCreation1hInputTokens: 0,
           runtimeMs: 20 * 60_000,
           microdollars: reservation.estimatedMicrodollars,
           recordedAt: isoTimestamp(now),
@@ -645,10 +663,33 @@ export function createDurableTriggerOutbox(
               'ambiguous runtime start absence requires independent reconciliation',
             );
           }
+          const absenceOutput = absence.effect.output;
+          const absenceRecord =
+            typeof absenceOutput === 'object' &&
+            absenceOutput !== null &&
+            !Array.isArray(absenceOutput)
+              ? (absenceOutput as Readonly<Record<string, JsonValue>>)
+              : undefined;
+          const firstObservedAt =
+            typeof absenceRecord?.firstObservedAt === 'string'
+              ? absenceRecord.firstObservedAt
+              : undefined;
+          if (
+            firstObservedAt === undefined ||
+            !Number.isFinite(Date.parse(firstObservedAt)) ||
+            Date.parse(now) - Date.parse(firstObservedAt) <
+              RUNTIME_START_VISIBILITY_DELAY_MS
+          )
+            throw new Error(
+              'ambiguous runtime start absence is inside the provider visibility delay',
+            );
         }
-        let usage = {
+        let usage: import('@agentos/core').RuntimeUsage = {
           inputTokens: 0,
           outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreation5mInputTokens: 0,
+          cacheCreation1hInputTokens: 0,
           runtimeMs: FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs,
         };
         let microdollars = reservation.estimatedMicrodollars;
@@ -699,8 +740,12 @@ export function createDurableTriggerOutbox(
           ),
           runId: persistenceId('run', reservation.runId),
           model: usageModel,
+          pricingVersion: recoveryBinding.pricingVersion,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
+          cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+          cacheCreation5mInputTokens: usage.cacheCreation5mInputTokens ?? 0,
+          cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens ?? 0,
           runtimeMs: usage.runtimeMs,
           microdollars,
           recordedAt: isoTimestamp(now),

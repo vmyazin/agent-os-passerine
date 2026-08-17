@@ -46,6 +46,18 @@ export function resolveFeatureRolesFromSnapshot(
           agent.tools[0] !== 'bash')
       )
         throw new Error('verification must be Bash-only with no MCP access');
+      if (
+        role === 'verification' &&
+        (Object.keys(environment.variables).length !== 0 ||
+          environment.packages !== undefined ||
+          (environment.networking?.type === 'limited' &&
+            (environment.networking.allowedHosts.length !== 0 ||
+              environment.networking.allowMcpServers ||
+              environment.networking.allowPackageManagers)))
+      )
+        throw new Error(
+          'verification must use a secretless isolated environment with no network or package setup',
+        );
       if (environment.networking?.type === 'unrestricted')
         throw new Error(`${role} cannot use unrestricted networking`);
       const artifactHost =
@@ -71,7 +83,8 @@ export function resolveFeatureRolesFromSnapshot(
             id: environmentId,
             runtime: environment.runtime,
             image: environment.image,
-            variables: { ...environment.variables },
+            variables:
+              role === 'verification' ? {} : { ...environment.variables },
             networking: {
               type: 'limited' as const,
               allowedHosts: [
@@ -90,7 +103,7 @@ export function resolveFeatureRolesFromSnapshot(
                   ? environment.networking.allowPackageManagers
                   : false,
             },
-            ...(environment.packages === undefined
+            ...(environment.packages === undefined || role === 'verification'
               ? {}
               : { packages: environment.packages }),
           },

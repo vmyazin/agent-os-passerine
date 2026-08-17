@@ -4,6 +4,7 @@ import { InMemoryDomainRepository } from '../persistence/in-memory.js';
 import { createInMemoryArtifactStorage } from '../artifacts/in-memory.js';
 import {
   isoTimestamp,
+  calculateUsageCost,
   persistenceId,
   canonicalJsonValue,
   type ArtifactStore,
@@ -11,6 +12,8 @@ import {
   type RuntimeEnvironment,
   type RuntimeHandle,
   type RuntimeOutput,
+  type RuntimeUsage,
+  USAGE_PRICING_VERSION,
   type RuntimeProvider,
   type RuntimeEvent,
 } from '@agentos/core';
@@ -41,6 +44,11 @@ class FakeRuntime implements RuntimeProvider {
   readonly environments: RuntimeEnvironment[] = [];
   #outputs: RuntimeOutput[];
   reconciled: RuntimeHandle | undefined;
+  reportedUsage: RuntimeUsage = {
+    inputTokens: 10,
+    outputTokens: 5,
+    runtimeMs: 100,
+  };
 
   constructor(outputs: RuntimeOutput[]) {
     this.#outputs = [...outputs];
@@ -77,7 +85,7 @@ class FakeRuntime implements RuntimeProvider {
     return value;
   }
   async usage() {
-    return { inputTokens: 10, outputTokens: 5, runtimeMs: 100 };
+    return this.reportedUsage;
   }
   async cleanup(handle: RuntimeHandle) {
     this.cleaned.push(handle);
@@ -731,8 +739,12 @@ describe('durable feature workflow', () => {
       idempotencyId: persistenceId('usage', 'prior-usage'),
       runId: persistenceId('run', 'run-1'),
       model: 'sonnet',
+      pricingVersion: 'pricing-v1',
       inputTokens: 1,
       outputTokens: 1,
+      cacheReadInputTokens: 0,
+      cacheCreation5mInputTokens: 0,
+      cacheCreation1hInputTokens: 0,
       runtimeMs: 1,
       microdollars: 1_600_000,
       recordedAt: now,
@@ -766,6 +778,64 @@ describe('durable feature workflow', () => {
       reason: 'workflow_budget',
     });
     expect(f.runtime.starts).toHaveLength(0);
+  });
+
+  it('charges cache-heavy usage completely and blocks the next session', async () => {
+    const f = await fixture();
+    f.runtime.reportedUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 7_000_000,
+      cacheCreation5mInputTokens: 0,
+      cacheCreation1hInputTokens: 0,
+      runtimeMs: 0,
+    };
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: (usage) =>
+        calculateUsageCost(usage, {
+          inputMicrodollarsPerMillionTokens: 3_000_000,
+          outputMicrodollarsPerMillionTokens: 15_000_000,
+          cacheReadInputMicrodollarsPerMillionTokens: 300_000,
+          cacheCreation5mInputMicrodollarsPerMillionTokens: 3_750_000,
+          cacheCreation1hInputMicrodollarsPerMillionTokens: 6_000_000,
+          runtimeMicrodollarsPerMinute: 80_000,
+        }),
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(await f.repository.listUsage(persistenceId('run', 'run-1'))).toEqual(
+      [
+        expect.objectContaining({
+          cacheReadInputTokens: 7_000_000,
+          microdollars: 2_100_000,
+          pricingVersion: `${USAGE_PRICING_VERSION}:${input.digests.config}`,
+        }),
+      ],
+    );
+    expect(result.status).toBe('budget_exhausted');
+    expect(f.runtime.starts).toHaveLength(1);
   });
 
   it('settles reported usage against the hard workflow cap before continuing', async () => {

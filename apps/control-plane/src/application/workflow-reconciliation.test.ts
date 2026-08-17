@@ -266,4 +266,40 @@ describe('workflow outbox reconciliation', () => {
     expect(cancelled).toContain('cursor-124');
     expect(cursor).toBeUndefined();
   });
+
+  it('does not run terminal cleanup in the same pass when orphan reconciliation needs another observation', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'orphan-gate-project');
+    const runId = persistenceId('run', 'orphan-gate-run');
+    await repository.createProject({
+      id: projectId,
+      name: 'Orphan gate',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'failed',
+      createdAt: now,
+      updatedAt: now,
+    });
+    let cleanupCalls = 0;
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestOrphanReconciliation: async () => {
+        throw new Error('independent reconciliation required');
+      },
+      requestCleanup: async () => {
+        cleanupCalls += 1;
+      },
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({ scannedRuns: 1, delivered: 0, failed: 1 });
+    expect(cleanupCalls).toBe(0);
+  });
 });

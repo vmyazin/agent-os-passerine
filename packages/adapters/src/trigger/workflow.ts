@@ -5,12 +5,14 @@ import {
   isRuntimeEventType,
   isoTimestamp,
   persistenceId,
+  USAGE_PRICING_VERSION,
   type ArtifactMetadata,
   type ExternalSessionId,
   type JsonValue,
   type RunStatus,
   type RuntimeHandle,
   type RuntimeOutput,
+  type RuntimeUsage,
   type StepRun,
   type WorkflowRun,
   type WorkflowRunUpdate,
@@ -677,7 +679,7 @@ async function runAgentStep<T>(
       | undefined;
     const recordUsage = async (candidate?: RuntimeHandle): Promise<void> => {
       if (usageRecorded) return;
-      let usage = {
+      let usage: RuntimeUsage = {
         inputTokens: 0,
         outputTokens: 0,
         runtimeMs: runtimeStartAttempted
@@ -708,8 +710,12 @@ async function runAgentStep<T>(
         runId: persistenceId('run', workflow.runId),
         stepRunId: stepId,
         model: roleDefinition.agent.model,
+        pricingVersion: `${USAGE_PRICING_VERSION}:${workflow.digests.config}`,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+        cacheCreation5mInputTokens: usage.cacheCreation5mInputTokens ?? 0,
+        cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens ?? 0,
         runtimeMs: usage.runtimeMs,
         microdollars,
         recordedAt: at(dependencies.clock()),

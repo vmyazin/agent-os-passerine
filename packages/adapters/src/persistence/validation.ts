@@ -38,6 +38,18 @@ function assertPostgresInteger(
 export function assertValidUsage(usage: UsageRecordEntry): void {
   assertNonNegativeSafeInteger(usage.inputTokens, 'inputTokens');
   assertNonNegativeSafeInteger(usage.outputTokens, 'outputTokens');
+  assertNonNegativeSafeInteger(
+    usage.cacheReadInputTokens,
+    'cacheReadInputTokens',
+  );
+  assertNonNegativeSafeInteger(
+    usage.cacheCreation5mInputTokens,
+    'cacheCreation5mInputTokens',
+  );
+  assertNonNegativeSafeInteger(
+    usage.cacheCreation1hInputTokens,
+    'cacheCreation1hInputTokens',
+  );
   assertNonNegativeSafeInteger(usage.runtimeMs, 'runtimeMs');
   assertNonNegativeSafeInteger(usage.microdollars, 'microdollars');
 }

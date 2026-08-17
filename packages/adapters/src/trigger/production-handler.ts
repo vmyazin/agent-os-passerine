@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  calculateUsageCost,
   canonicalPublicationManifestDigest,
   canonicalPublicationPolicyDigest,
   canonicalJsonValue,
@@ -178,11 +179,7 @@ function exactTrustedCommand(definition: {
 
 function priceUsage(
   config: AgentOsConfig,
-  usage: {
-    readonly inputTokens: number;
-    readonly outputTokens: number;
-    readonly runtimeMs: number;
-  },
+  usage: import('@agentos/core').RuntimeUsage,
   modelName: string,
 ): number {
   const model = Object.values(config.models).find(
@@ -190,12 +187,7 @@ function priceUsage(
   );
   if (model === undefined)
     throw new Error('runtime model is absent from the stored config');
-  return Math.ceil(
-    (usage.inputTokens * model.inputMicrodollarsPerMillionTokens +
-      usage.outputTokens * model.outputMicrodollarsPerMillionTokens) /
-      1_000_000 +
-      (usage.runtimeMs * model.runtimeMicrodollarsPerMinute) / 60_000,
-  );
+  return calculateUsageCost(usage, model);
 }
 
 export async function createProductionFeatureWorkflowFromEnv(

@@ -8,7 +8,9 @@ session leases.
 ## Execution path
 
 1. Configuration apply resolves and persists the selected repository's exact
-   default-branch head through a contents-read-only GitHub App token.
+   default-branch head through a separate contents-read-only GitHub App
+   identity. The configuration response exposes the immutable, non-secret
+   provenance needed by the API/CLI feature-start request.
    `POST /api/features` creates the idempotent `pending` domain run bound to
    that revision. A durable outbox effect then reads the exact base commit,
    validates and writes a bounded `source/bundle-v1` artifact, and only then
@@ -21,7 +23,8 @@ session leases.
    approval and its atomic `approval.approved` or `approval.rejected` event.
 4. Planning, implementation/testing, review, and trusted verification use
    distinct agents, environments, and runtime sessions. Each role receives the
-   exact source bundle plus verified upstream artifacts as read-only mounted
+   exact source bundle (at most one MiB for the current POC runtime transport)
+   plus verified upstream artifacts as read-only mounted
    files. Its Artifact MCP capability can write only to that role's logical
    step scope. A requested fix gets one fresh
    implementation session followed by a fresh final-review session; a final
@@ -52,9 +55,11 @@ A runtime start that is durably marked `started` but has no external reference
 is repeatedly reconciled by the provider's deterministic
 run/step/idempotency binding. The sealed start inputs are reconstructed from
 the immutable step/config/access checkpoints. If no session is discoverable by
-the reservation's bounded reconciliation deadline, trusted cleanup removes
-the uploaded files and vaults, charges the full reservation, and only then
-releases the global fence.
+the reservation's bounded reconciliation deadline, two successful absence
+observations separated by at least 30 seconds are required. Only then does
+trusted cleanup remove uploaded files and vaults, conservatively charge the
+full reservation, and release the global fence. Provider/list errors never
+count as absence observations.
 Managed Agents session listing reconstructs the same HMAC-derived ownership
 capability across replicas. Publication retries re-enter the composite GitHub
 publisher's durable reconciliation. Full runtime handles are AES-GCM sealed in
@@ -103,7 +108,11 @@ usage from `usage_records`, includes all active estimated reservations, applies
 both thresholds, and atomically writes the reservation plus global lease before
 runtime start. Every terminal path collects actual usage or conservatively
 charges the reservation before settlement. Schema/provider failure and
-cancellation therefore cannot silently release uncharged capacity. Trigger
+cancellation therefore cannot silently release uncharged capacity. Usage
+records persist ordinary input/output, cache reads, distinct 5-minute and
+1-hour cache-creation buckets, runtime, and the pricing algorithm/config
+version. Integer-safe ceiling prices every bucket; undifferentiated legacy
+cache creation is conservatively charged at the 1-hour rate. Trigger
 queue concurrency is defense in depth; it is not the budget or concurrency
 authority.
 
@@ -140,7 +149,12 @@ when execution needs the component, never silently during Trigger discovery.
 Production feature configuration must contain exact `specification`,
 `planning`, `implementation`, `review`, and `verification` step IDs, each with
 a separate limited-network environment. The first four may use only the
-`artifacts` MCP alias. Verification must be Bash-only with no MCP. Required
+`artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
+variables, network hosts, package-manager access, or package installation.
+Source ingestion additionally requires the distinct
+`GITHUB_READER_APP_ID`, `GITHUB_READER_APP_PRIVATE_KEY`, and
+`GITHUB_READER_SELECTED_REPOSITORIES_JSON`; the reader App ID must differ from
+the publisher App ID. Required
 server-only values include `AGENTOS_ARTIFACT_MCP_URL`,
 `ARTIFACT_CAPABILITY_KEYS_JSON`, `AGENTOS_TEST_REPORT_KEYS_JSON`, and the
 runtime/R2/GitHub credentials documented in `.env.example`.

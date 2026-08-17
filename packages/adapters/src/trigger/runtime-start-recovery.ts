@@ -1,4 +1,6 @@
 import {
+  calculateUsageCost,
+  USAGE_PRICING_VERSION,
   parseAgentOsConfig,
   persistenceId,
   type DomainRepository,
@@ -128,14 +130,7 @@ export function createRuntimeStartRecoveryResolver(options: {
       if (modelConfig === undefined)
         throw new Error('runtime recovery model pricing is unavailable');
       const priceUsage = (usage: RuntimeUsage) =>
-        Math.ceil(
-          (usage.inputTokens * modelConfig.inputMicrodollarsPerMillionTokens +
-            usage.outputTokens *
-              modelConfig.outputMicrodollarsPerMillionTokens) /
-            1_000_000 +
-            (usage.runtimeMs * modelConfig.runtimeMicrodollarsPerMinute) /
-              60_000,
-        );
+        calculateUsageCost(usage, modelConfig);
       return {
         request: {
           runId: input.runId,
@@ -166,7 +161,7 @@ export function createRuntimeStartRecoveryResolver(options: {
         resources: sessionAccess.resources,
         credentialRefs: sessionAccess.credentialRefs,
         model: definition.agent.model,
-        pricingVersion: snapshot.configDigest,
+        pricingVersion: `${USAGE_PRICING_VERSION}:${snapshot.configDigest}`,
         priceUsage,
       };
     },

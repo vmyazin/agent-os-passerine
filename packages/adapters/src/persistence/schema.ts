@@ -564,8 +564,18 @@ export const usageRecords = pgTable(
       onDelete: 'set null',
     }),
     model: text('model').notNull(),
+    pricingVersion: text('pricing_version').notNull(),
     inputTokens: bigint('input_tokens', { mode: 'number' }).notNull(),
     outputTokens: bigint('output_tokens', { mode: 'number' }).notNull(),
+    cacheReadInputTokens: bigint('cache_read_input_tokens', {
+      mode: 'number',
+    }).notNull(),
+    cacheCreation5mInputTokens: bigint('cache_creation_5m_input_tokens', {
+      mode: 'number',
+    }).notNull(),
+    cacheCreation1hInputTokens: bigint('cache_creation_1h_input_tokens', {
+      mode: 'number',
+    }).notNull(),
     runtimeMs: bigint('runtime_ms', { mode: 'number' }).notNull(),
     microdollars: bigint('microdollars', { mode: 'number' }).notNull(),
     recordedAt: instant('recorded_at').notNull(),
@@ -580,6 +590,30 @@ export const usageRecords = pgTable(
     check(
       'usage_output_safe_integer',
       sql`${table.outputTokens} <= 9007199254740991`,
+    ),
+    check(
+      'usage_cache_read_nonnegative',
+      sql`${table.cacheReadInputTokens} >= 0`,
+    ),
+    check(
+      'usage_cache_read_safe_integer',
+      sql`${table.cacheReadInputTokens} <= 9007199254740991`,
+    ),
+    check(
+      'usage_cache_creation_5m_nonnegative',
+      sql`${table.cacheCreation5mInputTokens} >= 0`,
+    ),
+    check(
+      'usage_cache_creation_5m_safe_integer',
+      sql`${table.cacheCreation5mInputTokens} <= 9007199254740991`,
+    ),
+    check(
+      'usage_cache_creation_1h_nonnegative',
+      sql`${table.cacheCreation1hInputTokens} >= 0`,
+    ),
+    check(
+      'usage_cache_creation_1h_safe_integer',
+      sql`${table.cacheCreation1hInputTokens} <= 9007199254740991`,
     ),
     check('usage_runtime_nonnegative', sql`${table.runtimeMs} >= 0`),
     check(

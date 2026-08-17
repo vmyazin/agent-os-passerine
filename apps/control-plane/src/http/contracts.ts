@@ -60,6 +60,16 @@ export const configurationProjectionSchema = z
     digest: z.string().regex(/^[a-f0-9]{64}$/),
     revision: z.number().int().positive(),
     appliedAt: z.string(),
+    provenance: z
+      .object({
+        repositorySha: z.string().regex(/^[a-f0-9]{40}$/),
+        configDigest: digest,
+        modelDigest: digest,
+        promptDigest: digest,
+        environmentDigest: digest,
+        policyDigest: digest,
+      })
+      .strict(),
   })
   .strict();
 export const activeConfigurationSchema = z

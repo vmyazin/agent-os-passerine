@@ -11,8 +11,9 @@ import type {
 } from './types.js';
 
 const MAX_FILES = 5_000;
-const MAX_FILE_BYTES = 1_000_000;
-const MAX_TOTAL_BYTES = 5_000_000;
+const MAX_FILE_BYTES = 1024 * 1024;
+const MAX_TOTAL_BYTES = 1024 * 1024;
+export const MAX_SOURCE_BUNDLE_BYTES = 1024 * 1024;
 
 export interface TrustedSourceSnapshotBinding {
   readonly projectId: string;
@@ -169,6 +170,11 @@ export function createTrustedSourceSnapshotIngestorWithClientFactory(
           treeSha: tree.sha,
           files,
         };
+        const bytes = new TextEncoder().encode(canonicalJsonValue(body));
+        if (bytes.byteLength > MAX_SOURCE_BUNDLE_BYTES)
+          throw new Error(
+            'source snapshot bundle exceeds managed resource size limit',
+          );
         return options.artifacts.put({
           scope: {
             projectId: binding.projectId,
@@ -177,7 +183,7 @@ export function createTrustedSourceSnapshotIngestorWithClientFactory(
           },
           artifactId: 'bundle',
           version: 1,
-          bytes: new TextEncoder().encode(canonicalJsonValue(body)),
+          bytes,
           mediaType: 'application/json',
           retentionClass: 'source-bundle',
         });

@@ -50,8 +50,10 @@ export async function reconcileWorkflowOutbox(
         try {
           await operation();
           delivered += 1;
+          return true;
         } catch {
           failed += 1;
+          return false;
         }
       };
       let run = listedRun;
@@ -60,12 +62,17 @@ export async function reconcileWorkflowOutbox(
         run.pipeline === 'feature' &&
         outbox.requestOrphanReconciliation !== undefined
       ) {
-        await deliver(() =>
+        const orphanReconciled = await deliver(() =>
           outbox.requestOrphanReconciliation!({
             idempotencyKey: `workflow-orphan-reconcile:${run.id}`,
             runId: run.id,
           }),
         );
+        if (!orphanReconciled) {
+          after = { at: listedRun.createdAt, id: listedRun.id };
+          await cursorStore?.save(after);
+          continue;
+        }
         const refreshed = await repository.getRun(run.id);
         if (refreshed !== undefined) run = refreshed;
       }

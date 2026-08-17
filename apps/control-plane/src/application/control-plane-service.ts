@@ -88,6 +88,7 @@ export interface ConfigurationProjection {
   readonly digest: string;
   readonly revision: number;
   readonly appliedAt: IsoTimestamp;
+  readonly provenance: PersistenceDigests;
 }
 
 const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
@@ -161,6 +162,14 @@ function configurationProjection(
     digest: revision.configDigest,
     revision: revision.revision,
     appliedAt: revision.createdAt,
+    provenance: {
+      repositorySha: revision.repositorySha,
+      configDigest: revision.configDigest,
+      modelDigest: revision.modelDigest,
+      promptDigest: revision.promptDigest,
+      environmentDigest: revision.environmentDigest,
+      policyDigest: revision.policyDigest,
+    },
   };
 }
 
@@ -476,6 +485,23 @@ export class ControlPlaneService {
         422,
       );
     }
+    const revisionId = this.generateId(
+      'configRevision',
+      `configuration:${idempotencyKey}`,
+    );
+    const replay = await this.repository.getConfigRevision(revisionId);
+    if (replay !== undefined) {
+      if (
+        replay.configDigest !== digest ||
+        canonicalJsonValue(replay.config) !== canonicalConfig
+      )
+        throw new ServiceError(
+          'idempotency_conflict',
+          'idempotency key was already used with another configuration',
+          409,
+        );
+      return configurationProjection(replay);
+    }
     const now = this.clock();
     let repositorySha: string;
     if (this.repositoryHead !== undefined) {
@@ -521,10 +547,7 @@ export class ControlPlaneService {
           updatedAt: now,
         },
         {
-          id: this.generateId(
-            'configRevision',
-            `configuration:${idempotencyKey}`,
-          ),
+          id: revisionId,
           projectId,
           config: JSON.parse(canonicalConfig) as JsonValue,
           configDigest: digest,

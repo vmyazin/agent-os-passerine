@@ -830,13 +830,19 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       this.#client.beta.sessions.retrieve(handle.id),
     );
     const cache = session.usage.cache_creation ?? {};
+    const cache5m = nonnegative(cache.ephemeral_5m_input_tokens);
+    const cache1h = nonnegative(cache.ephemeral_1h_input_tokens);
+    const undifferentiatedCacheCreation = nonnegative(
+      session.usage.cache_creation_input_tokens,
+    );
     return {
       inputTokens: nonnegative(session.usage.input_tokens),
       outputTokens: nonnegative(session.usage.output_tokens),
       cacheReadInputTokens: nonnegative(session.usage.cache_read_input_tokens),
-      cacheCreationInputTokens:
-        nonnegative(cache.ephemeral_5m_input_tokens) +
-        nonnegative(cache.ephemeral_1h_input_tokens),
+      cacheCreation5mInputTokens: cache5m,
+      cacheCreation1hInputTokens:
+        cache1h +
+        (cache5m === 0 && cache1h === 0 ? undifferentiatedCacheCreation : 0),
       runtimeMs:
         nonnegative(
           session.usage.active_seconds ?? session.stats.active_seconds,

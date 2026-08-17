@@ -49,6 +49,46 @@ function parsedRuntimeJson<T>(name: string): T {
   }
 }
 
+function trustedReaderConfiguration() {
+  const readerAppId = Number(requiredRuntime('GITHUB_READER_APP_ID'));
+  const publisherAppId = Number(requiredRuntime('GITHUB_APP_ID'));
+  if (
+    !Number.isSafeInteger(readerAppId) ||
+    readerAppId <= 0 ||
+    readerAppId === publisherAppId
+  )
+    throw new Error(
+      'GITHUB_READER_APP_ID must identify a separate read-only GitHub App',
+    );
+  const selectedRepositories = parsedRuntimeJson<
+    PublicationManifestBody['repository'][]
+  >('GITHUB_READER_SELECTED_REPOSITORIES_JSON');
+  if (selectedRepositories.length !== 1)
+    throw new Error('the POC requires exactly one selected reader repository');
+  const publisherRepositories = parsedRuntimeJson<
+    PublicationManifestBody['repository'][]
+  >('GITHUB_SELECTED_REPOSITORIES_JSON');
+  const readerRepository = selectedRepositories[0]!;
+  const publisherRepository = publisherRepositories[0];
+  if (
+    publisherRepositories.length !== 1 ||
+    publisherRepository === undefined ||
+    publisherRepository.owner !== readerRepository.owner ||
+    publisherRepository.name !== readerRepository.name ||
+    publisherRepository.repositoryId !== readerRepository.repositoryId
+  )
+    throw new Error(
+      'reader and publisher GitHub Apps must bind the same selected repository',
+    );
+  return {
+    githubApp: {
+      appId: readerAppId,
+      privateKey: requiredRuntime('GITHUB_READER_APP_PRIVATE_KEY'),
+    },
+    selectedRepositories,
+  };
+}
+
 function cancellationRuntime(): RuntimeProvider {
   let provider: Promise<RuntimeProvider> | undefined;
   const get = () =>
@@ -89,11 +129,7 @@ export function workflowDispatchFromEnv() {
     );
   }
   const repository = repositoryFromEnv();
-  const selectedRepositories = parsedRuntimeJson<
-    PublicationManifestBody['repository'][]
-  >('GITHUB_SELECTED_REPOSITORIES_JSON');
-  if (selectedRepositories.length !== 1)
-    throw new Error('the POC requires exactly one selected repository');
+  const reader = trustedReaderConfiguration();
   const artifacts = createR2ArtifactStore({
     accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
     bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
@@ -105,8 +141,7 @@ export function workflowDispatchFromEnv() {
   });
   const sourceSnapshot = createTrustedSourceSnapshotIngestor({
     githubApp: {
-      appId: Number(requiredRuntime('GITHUB_APP_ID')),
-      privateKey: requiredRuntime('GITHUB_APP_PRIVATE_KEY'),
+      ...reader.githubApp,
     },
     artifacts,
     resolveBinding: async (runId) => {
@@ -134,7 +169,7 @@ export function workflowDispatchFromEnv() {
         runId: run.id,
         repositorySha,
         baseBranch: config.project.defaultBranch,
-        repository: selectedRepositories[0]!,
+        repository: reader.selectedRepositories[0]!,
       };
     },
   });
@@ -179,25 +214,16 @@ export function controlPlaneService(): ControlPlaneService {
       dispatch === undefined
         ? undefined
         : (() => {
-            const selected = parsedRuntimeJson<
-              PublicationManifestBody['repository'][]
-            >('GITHUB_SELECTED_REPOSITORIES_JSON');
-            if (selected.length !== 1)
-              throw new Error(
-                'the POC requires exactly one selected repository',
-              );
+            const reader = trustedReaderConfiguration();
             const resolver = createTrustedRepositoryHeadResolver({
-              githubApp: {
-                appId: Number(requiredRuntime('GITHUB_APP_ID')),
-                privateKey: requiredRuntime('GITHUB_APP_PRIVATE_KEY'),
-              },
+              githubApp: reader.githubApp,
             });
             return {
               resolve: (config: ReturnType<typeof parseAgentOsConfig>) => {
                 if (config.project.repository === undefined)
                   throw new Error('GitHub repository URL is required');
                 return resolver.resolve({
-                  repository: selected[0]!,
+                  repository: reader.selectedRepositories[0]!,
                   repositoryUrl: config.project.repository,
                   defaultBranch: config.project.defaultBranch,
                 });

@@ -44,6 +44,7 @@ async function startedEffect(
 function collaborators(
   runtime?: RuntimeProvider,
   repository?: DomainRepository,
+  clock: () => string = () => now,
 ) {
   const checkpoints = new InMemoryWorkflowCheckpointStore();
   const cancelTrigger = vi.fn(async () => undefined);
@@ -61,7 +62,7 @@ function collaborators(
         wait: vi.fn(),
         wake: vi.fn(),
       },
-      clock: () => now,
+      clock,
       sourceSnapshot: {
         ensure: vi.fn(async () => ({
           key: 'source/bundle',
@@ -458,7 +459,12 @@ describe('durable Trigger outbox cancellation', () => {
       cleanup: vi.fn(async () => undefined),
       cleanupAccess: vi.fn(async () => undefined),
     } as unknown as RuntimeProvider;
-    const { checkpoints, outbox } = collaborators(runtime, repository);
+    let currentTime = now;
+    const { checkpoints, outbox } = collaborators(
+      runtime,
+      repository,
+      () => currentTime,
+    );
     const effect = await checkpoints.claimEffect(
       {
         key: 'runtime:run-1:implementation:1',
@@ -506,12 +512,29 @@ describe('durable Trigger outbox cancellation', () => {
       'independent reconciliation',
     );
     await expect(
+      outbox.requestCleanup({
+        idempotencyKey: 'cleanup:run-1',
+        runId: 'run-1',
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
       checkpoints.listExpiredReservations('run-1', now),
     ).resolves.toHaveLength(1);
+    await expect(outbox.requestOrphanReconciliation(request)).rejects.toThrow(
+      'visibility delay',
+    );
+    await expect(
+      checkpoints.listExpiredReservations('run-1', now),
+    ).resolves.toHaveLength(1);
+    currentTime = '2026-08-17T12:00:29.999Z';
+    await expect(outbox.requestOrphanReconciliation(request)).rejects.toThrow(
+      'visibility delay',
+    );
+    currentTime = '2026-08-17T12:00:30.000Z';
     await expect(
       outbox.requestOrphanReconciliation(request),
     ).resolves.toBeUndefined();
-    expect(runtime.reconcileStart).toHaveBeenCalledTimes(2);
+    expect(runtime.reconcileStart).toHaveBeenCalledTimes(4);
     expect(runtime.cleanupAccess).toHaveBeenCalledOnce();
     await expect(
       checkpoints.listExpiredReservations('run-1', now),

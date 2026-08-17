@@ -1,14 +1,24 @@
 export type Microdollars = number;
+export const USAGE_PRICING_VERSION = 'managed-agents-cache-pricing-v1';
 
 export interface UsageQuantity {
   readonly inputTokens: number;
   readonly outputTokens: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheCreation5mInputTokens?: number;
+  readonly cacheCreation1hInputTokens?: number;
   readonly runtimeMs: number;
 }
 
 export interface ModelRates {
   readonly inputMicrodollarsPerMillionTokens: Microdollars;
   readonly outputMicrodollarsPerMillionTokens: Microdollars;
+  readonly cacheReadInputMicrodollarsPerMillionTokens?:
+    Microdollars | undefined;
+  readonly cacheCreation5mInputMicrodollarsPerMillionTokens?:
+    Microdollars | undefined;
+  readonly cacheCreation1hInputMicrodollarsPerMillionTokens?:
+    Microdollars | undefined;
   readonly runtimeMicrodollarsPerMinute: Microdollars;
 }
 
@@ -38,6 +48,15 @@ function toMicrodollars(value: bigint): Microdollars {
   return Number(value);
 }
 
+function derivedRate(value: number, numerator: bigint, denominator: bigint) {
+  return toMicrodollars(
+    divideUp(
+      requireNonNegativeInteger(value, 'input rate') * numerator,
+      denominator,
+    ),
+  );
+}
+
 export function calculateUsageCost(
   usage: UsageQuantity,
   rates: ModelRates,
@@ -58,6 +77,42 @@ export function calculateUsageCost(
       ),
     1_000_000n,
   );
+  const cacheRead = divideUp(
+    requireNonNegativeInteger(
+      usage.cacheReadInputTokens ?? 0,
+      'cacheReadInputTokens',
+    ) *
+      requireNonNegativeInteger(
+        rates.cacheReadInputMicrodollarsPerMillionTokens ??
+          derivedRate(rates.inputMicrodollarsPerMillionTokens, 1n, 10n),
+        'cache read input rate',
+      ),
+    1_000_000n,
+  );
+  const cacheCreation5m = divideUp(
+    requireNonNegativeInteger(
+      usage.cacheCreation5mInputTokens ?? 0,
+      'cacheCreation5mInputTokens',
+    ) *
+      requireNonNegativeInteger(
+        rates.cacheCreation5mInputMicrodollarsPerMillionTokens ??
+          derivedRate(rates.inputMicrodollarsPerMillionTokens, 5n, 4n),
+        '5m cache creation input rate',
+      ),
+    1_000_000n,
+  );
+  const cacheCreation1h = divideUp(
+    requireNonNegativeInteger(
+      usage.cacheCreation1hInputTokens ?? 0,
+      'cacheCreation1hInputTokens',
+    ) *
+      requireNonNegativeInteger(
+        rates.cacheCreation1hInputMicrodollarsPerMillionTokens ??
+          derivedRate(rates.inputMicrodollarsPerMillionTokens, 2n, 1n),
+        '1h cache creation input rate',
+      ),
+    1_000_000n,
+  );
   const runtime = divideUp(
     requireNonNegativeInteger(usage.runtimeMs, 'runtimeMs') *
       requireNonNegativeInteger(
@@ -66,7 +121,9 @@ export function calculateUsageCost(
       ),
     60_000n,
   );
-  return toMicrodollars(input + output + runtime);
+  return toMicrodollars(
+    input + output + cacheRead + cacheCreation5m + cacheCreation1h + runtime,
+  );
 }
 
 export interface UsageLedger {
