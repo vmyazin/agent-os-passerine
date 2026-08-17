@@ -116,7 +116,7 @@ export function resolveFeatureRolesFromSnapshot(
               allowMcpServers: options !== undefined && role !== 'verification',
               allowPackageManagers:
                 role === 'verification'
-                  ? verificationRegistryHosts.length > 0
+                  ? false
                   : environment.networking?.type === 'limited'
                     ? environment.networking.allowPackageManagers
                     : false,

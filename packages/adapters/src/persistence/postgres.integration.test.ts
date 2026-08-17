@@ -631,6 +631,19 @@ describePostgres('PostgreSQL persistence integration', () => {
   it('accepts a version-locked legacy usage insert during the expand phase', async () => {
     const { runId, at } = await seed(`legacy-usage-${randomUUID()}`);
     const usageId = persistenceId('usage', `legacy-${randomUUID()}`);
+    await client.unsafe(`
+      alter table usage_records alter column pricing_version drop default;
+      alter table usage_records alter column cache_read_input_tokens drop default;
+      alter table usage_records alter column cache_creation_5m_input_tokens drop default;
+      alter table usage_records alter column cache_creation_1h_input_tokens drop default;
+    `);
+    const repairMigration = readFileSync(
+      resolve(migrationDirectory, '0017_restore_usage_defaults.sql'),
+      'utf8',
+    );
+    for (const statement of repairMigration.split('--> statement-breakpoint')) {
+      if (statement.trim() !== '') await client.unsafe(statement);
+    }
     await client`
       insert into usage_records
         (idempotency_id, run_id, model, input_tokens, output_tokens, runtime_ms, microdollars, recorded_at)

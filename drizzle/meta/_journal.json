@@ -120,6 +120,13 @@
       "when": 1786997600000,
       "tag": "0016_complete_usage_pricing",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1787001200000,
+      "tag": "0017_restore_usage_defaults",
+      "breakpoints": true
     }
   ]
 }

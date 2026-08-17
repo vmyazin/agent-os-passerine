@@ -69,7 +69,7 @@ describe('production feature role isolation', () => {
         type: 'limited',
         allowedHosts: ['registry.npmjs.org'],
         allowMcpServers: false,
-        allowPackageManagers: true,
+        allowPackageManagers: false,
       },
     });
   });

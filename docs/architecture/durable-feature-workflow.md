@@ -153,8 +153,9 @@ Production feature configuration must contain exact `specification`,
 a separate limited-network environment. The first four may use only the
 `artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
 variables, or YAML-selected network/package capabilities. Trusted server
-configuration supplies its exact package-registry allowlist and enables only
-the package manager needed for the frozen-lockfile install.
+configuration supplies its exact package-registry host allowlist. Managed
+Agents' broad package-manager registry bypass remains disabled; `pnpm` reaches
+only those explicit hosts for the frozen-lockfile install.
 Source ingestion additionally requires the distinct
 `GITHUB_READER_APP_ID`, `GITHUB_READER_APP_PRIVATE_KEY`, and
 `GITHUB_READER_SELECTED_REPOSITORIES_JSON`; the reader App ID must differ from
@@ -166,7 +167,9 @@ runtime/R2/GitHub credentials documented in `.env.example`.
 Migration `0016_complete_usage_pricing.sql` intentionally retains defaults for
 its new usage columns so version-locked older Trigger deployments can finish
 writing during the expand phase. A later contract migration may remove those
-defaults only after old task versions and waitpoints have drained.
+defaults only after old task versions and waitpoints have drained. Migration
+`0017_restore_usage_defaults.sql` also restores them for databases that applied
+the earlier development form of `0016` before the expand-phase correction.
 
 `CRON_SECRET` must be 32–256 bytes and protects both internal reconciliation
 and retention routes. Never expose Trigger secrets, waitpoint callback URLs, or

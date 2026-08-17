@@ -28,6 +28,17 @@ describe('domain persistence migration', () => {
       '"cache_read_input_tokens" bigint not null default 0',
     );
     expect(pricingMigration).not.toContain('drop default');
+    const repairMigration = readFileSync(
+      resolve(migrationDirectory, '0017_restore_usage_defaults.sql'),
+      'utf8',
+    ).toLowerCase();
+    for (const column of [
+      'pricing_version',
+      'cache_read_input_tokens',
+      'cache_creation_5m_input_tokens',
+      'cache_creation_1h_input_tokens',
+    ])
+      expect(repairMigration).toContain(`alter column "${column}" set default`);
   });
 
   it.each([
