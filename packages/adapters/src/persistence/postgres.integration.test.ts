@@ -758,6 +758,66 @@ describePostgres('PostgreSQL persistence integration', () => {
     );
   });
 
+  it('rejects pre-0018 goal rows instead of inventing trusted history', async () => {
+    if (databaseUrl === undefined)
+      throw new Error('TEST_DATABASE_URL required');
+    const upgradeSchema = `agentos_${randomUUID().replaceAll('-', '')}`;
+    if (!/^agentos_[a-f0-9]{32}$/.test(upgradeSchema))
+      throw new Error('invalid upgrade integration schema');
+    const upgradeAdmin = postgres(databaseUrl, {
+      max: 1,
+      connection: { search_path: upgradeSchema },
+    });
+    await admin.unsafe(`create schema "${upgradeSchema}"`);
+    try {
+      const migrations = readdirSync(migrationDirectory)
+        .filter((name) => name.endsWith('.sql') && name < '0018_')
+        .sort();
+      for (const filename of migrations) {
+        const statements = readFileSync(
+          resolve(migrationDirectory, filename),
+          'utf8',
+        )
+          .replaceAll('"public".', `"${upgradeSchema}".`)
+          .split('--> statement-breakpoint');
+        for (const statement of statements)
+          if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
+      }
+      await upgradeAdmin.unsafe(`
+        insert into projects (id, name, created_at, updated_at)
+        values ('legacy-goal-project', 'legacy', now(), now());
+        insert into workflow_runs
+          (id, project_id, pipeline, status, created_at, updated_at)
+        values
+          ('legacy-goal-run', 'legacy-goal-project', 'goal', 'running', now(), now());
+        insert into goal_criteria
+          (id, run_id, ordinal, description, status, created_at)
+        values
+          ('legacy-goal-criterion', 'legacy-goal-run', 0, 'Unknown command', 'pending', now());
+        insert into goal_progress
+          (id, run_id, criterion_id, status, detail, recorded_at)
+        values
+          ('legacy-goal-progress', 'legacy-goal-run', 'legacy-goal-criterion', 'pending', 'Unknown step', now());
+      `);
+      const boundedGoalStatements = readFileSync(
+        resolve(migrationDirectory, '0018_bounded_goal_records.sql'),
+        'utf8',
+      )
+        .replaceAll('"public".', `"${upgradeSchema}".`)
+        .split('--> statement-breakpoint');
+
+      await expect(
+        (async () => {
+          for (const statement of boundedGoalStatements)
+            if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
+        })(),
+      ).rejects.toThrow(/cannot infer bounded goal history/i);
+    } finally {
+      await upgradeAdmin.end();
+      await admin.unsafe(`drop schema "${upgradeSchema}" cascade`);
+    }
+  }, 30_000);
+
   it('upgrades valid pre-0008 manifests without classifying legacy artifacts', async () => {
     if (databaseUrl === undefined)
       throw new Error('TEST_DATABASE_URL required');

@@ -530,6 +530,49 @@ runtime: { provider: local }
     );
   });
 
+  it('uses one immutable goal request snapshot across asynchronous persistence', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const applied = await applyGoalConfiguration(service, 'immutable-input');
+    const originalCriteria = goalCriteria.map((criterion) => ({
+      ...criterion,
+    }));
+    const input = {
+      projectId: applied.projectId,
+      title: 'Immutable goal input',
+      description: 'Caller mutation must not split persisted records.',
+      ...applied.provenance,
+      criteria: originalCriteria.map((criterion) => ({ ...criterion })),
+    };
+    const listConfigRevisions = repository.listConfigRevisions.bind(repository);
+    let mutated = false;
+    vi.spyOn(repository, 'listConfigRevisions').mockImplementation(
+      async (...arguments_) => {
+        const revisions = await listConfigRevisions(...arguments_);
+        if (!mutated) {
+          mutated = true;
+          input.projectId = 'mutated-project';
+          input.configDigest = 'mutated-config';
+          input.criteria[0]!.command = 'pnpm compromised';
+        }
+        return revisions;
+      },
+    );
+
+    const created = await service.createGoalRun('immutable-input', input);
+    const runId = persistenceId('run', created.id);
+
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      projectId: persistenceId('project', applied.projectId),
+      input: { criteria: originalCriteria },
+    });
+    await expect(repository.listGoalCriteria(runId)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ definition: originalCriteria[0] }),
+      ]),
+    );
+  });
+
   it('rejects goal provenance that does not match an applied revision', async () => {
     const repository = new InMemoryDomainRepository();
     const requestStart = vi.fn();

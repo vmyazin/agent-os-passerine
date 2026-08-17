@@ -180,6 +180,14 @@ function mappedRows<T>(
   return rows.map(mapper);
 }
 
+function isPostgresUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    Reflect.get(error, 'code') === '23505'
+  );
+}
+
 function validateArtifactQuotaRequest(
   request: ArtifactCapabilityQuotaRequest,
 ): void {
@@ -1675,18 +1683,27 @@ export class NeonDomainRepository implements DomainRepository {
     criterion: GoalCriterion,
   ): Promise<GoalCriterion> {
     assertValidGoalCriterion(criterion);
-    const rows = await this.database
-      .insert(goalCriteria)
-      .values(criterion)
-      .onConflictDoUpdate({
-        target: goalCriteria.id,
-        set: { id: criterion.id },
-      })
-      .returning(goalCriterionSelection);
-    const existing = mapGoalCriterionRow(one(rows, 'Goal criterion'));
-    if (!sameGoalCriterion(existing, criterion))
-      throw new IdempotencyConflictError('Goal criterion', criterion.id);
-    return existing;
+    try {
+      const rows = await this.database
+        .insert(goalCriteria)
+        .values(criterion)
+        .onConflictDoUpdate({
+          target: goalCriteria.id,
+          set: { id: criterion.id },
+        })
+        .returning(goalCriterionSelection);
+      const existing = mapGoalCriterionRow(one(rows, 'Goal criterion'));
+      if (!sameGoalCriterion(existing, criterion))
+        throw new IdempotencyConflictError('Goal criterion', criterion.id);
+      return existing;
+    } catch (error) {
+      if (isPostgresUniqueViolation(error))
+        throw new IdempotencyConflictError(
+          'Goal criterion ordinal',
+          `${criterion.runId}:${String(criterion.ordinal)}`,
+        );
+      throw error;
+    }
   }
 
   async listGoalCriteria(

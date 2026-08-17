@@ -118,6 +118,47 @@ describe('NeonDomainRepository', () => {
     }
   });
 
+  it('normalizes a goal criterion ordinal collision as an idempotency conflict', async () => {
+    const uniqueViolation = Object.assign(new Error('duplicate key'), {
+      code: '23505',
+      constraint: 'goal_criteria_run_ordinal_unique',
+    });
+    const database = {
+      insert() {
+        const builder = {
+          values() {
+            return builder;
+          },
+          onConflictDoUpdate() {
+            return builder;
+          },
+          returning() {
+            throw uniqueViolation;
+          },
+        };
+        return builder;
+      },
+    };
+    const repository = new NeonDomainRepository(database as never);
+
+    await expect(
+      repository.createGoalCriterionIdempotently({
+        id: persistenceId('goalCriterion', 'criterion-conflict'),
+        runId,
+        ordinal: 0,
+        description: 'All tests pass',
+        definition: {
+          id: 'tests',
+          type: 'command',
+          description: 'All tests pass',
+          command: 'pnpm test',
+        },
+        status: 'pending',
+        createdAt: isoTimestamp('2026-08-16T12:02:00.000Z'),
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
   it('applies configuration with one serialized atomic statement', async () => {
     const at = isoTimestamp('2026-08-17T12:00:00.000Z');
     const project = {

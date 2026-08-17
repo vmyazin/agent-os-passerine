@@ -635,7 +635,9 @@ export class ControlPlaneService {
     input: CreateRunInput | CreateGoalRunInput,
   ): Promise<RunProjection> {
     const id = this.generateId('run', `${pipeline}:${idempotencyKey}`);
-    const runInput = inputForRun(idempotencyKey, input);
+    const requestInput = JSON.parse(canonicalJsonValue(input)) as
+      CreateRunInput | CreateGoalRunInput;
+    const runInput = inputForRun(idempotencyKey, requestInput);
     const now = this.clock();
     let configRevision: ConfigRevision | undefined;
     if (
@@ -645,17 +647,17 @@ export class ControlPlaneService {
       let after: number | undefined;
       while (configRevision === undefined) {
         const revisions = await this.repository.listConfigRevisions(
-          persistenceId('project', input.projectId),
+          persistenceId('project', requestInput.projectId),
           { ...(after === undefined ? {} : { after }), limit: 100 },
         );
         configRevision = revisions.find(
           (candidate) =>
-            candidate.configDigest === input.configDigest &&
-            candidate.modelDigest === input.modelDigest &&
-            candidate.promptDigest === input.promptDigest &&
-            candidate.environmentDigest === input.environmentDigest &&
-            candidate.policyDigest === input.policyDigest &&
-            candidate.repositorySha === input.repositorySha,
+            candidate.configDigest === requestInput.configDigest &&
+            candidate.modelDigest === requestInput.modelDigest &&
+            candidate.promptDigest === requestInput.promptDigest &&
+            candidate.environmentDigest === requestInput.environmentDigest &&
+            candidate.policyDigest === requestInput.policyDigest &&
+            candidate.repositorySha === requestInput.repositorySha,
         );
         const last = revisions.at(-1);
         if (configRevision !== undefined || last === undefined) break;
@@ -672,7 +674,7 @@ export class ControlPlaneService {
       const created = await this.repository.createRunIdempotently(
         {
           id,
-          projectId: persistenceId('project', input.projectId),
+          projectId: persistenceId('project', requestInput.projectId),
           pipeline,
           ...(configRevision === undefined
             ? {}
@@ -682,7 +684,11 @@ export class ControlPlaneService {
           createdAt: now,
           updatedAt: now,
         },
-        fingerprint({ pipeline, projectId: input.projectId, input: runInput }),
+        fingerprint({
+          pipeline,
+          projectId: requestInput.projectId,
+          input: runInput,
+        }),
       );
       if (configRevision !== undefined) {
         const snapshots = await this.repository.listConfigSnapshots(
@@ -717,7 +723,7 @@ export class ControlPlaneService {
         }
       }
       if (pipeline === 'goal') {
-        const goalInput = input as CreateGoalRunInput;
+        const goalInput = requestInput as CreateGoalRunInput;
         const definitions = goalDefinitions(goalInput.criteria);
         for (const [ordinal, definition] of definitions.entries()) {
           const source = goalInput.criteria[ordinal]!;

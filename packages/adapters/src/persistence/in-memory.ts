@@ -1503,6 +1503,12 @@ export class InMemoryDomainRepository implements DomainRepository {
         throw new IdempotencyConflictError('Goal criterion', criterion.id);
       return copy(existing);
     }
+    const ordinalKey = `${criterion.runId}\u0000${criterion.ordinal}`;
+    if (this.#goalCriterionKeys.has(ordinalKey))
+      throw new IdempotencyConflictError(
+        'Goal criterion ordinal',
+        `${criterion.runId}:${String(criterion.ordinal)}`,
+      );
     return this.createGoalCriterion(criterion);
   }
 

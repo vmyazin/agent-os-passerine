@@ -14,8 +14,20 @@ const artifactMigration = readFileSync(
   resolve(migrationDirectory, '0008_concerned_wither.sql'),
   'utf8',
 ).toLowerCase();
+const boundedGoalMigration = readFileSync(
+  resolve(migrationDirectory, '0018_bounded_goal_records.sql'),
+  'utf8',
+).toLowerCase();
 
 describe('domain persistence migration', () => {
+  it('rejects legacy goal history whose definitions and steps are unknowable', () => {
+    expect(boundedGoalMigration).toContain('raise exception');
+    expect(boundedGoalMigration).toContain('from "goal_criteria"');
+    expect(boundedGoalMigration).toContain('from "goal_progress"');
+    expect(boundedGoalMigration).not.toContain('jsonb_build_object');
+    expect(boundedGoalMigration).not.toContain('set "step" = 1');
+  });
+
   it('keeps expand-phase usage defaults for version-locked workflow writers', () => {
     const pricingMigration = readFileSync(
       resolve(migrationDirectory, '0016_complete_usage_pricing.sql'),

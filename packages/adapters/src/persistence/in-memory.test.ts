@@ -15,6 +15,7 @@ import {
   EventFingerprintConflictError,
   InMemoryDomainRepository,
 } from './in-memory.js';
+import { IdempotencyConflictError } from './errors.js';
 
 const projectId = persistenceId('project', 'project-1');
 const configRevisionId = persistenceId('configRevision', 'config-1');
@@ -417,5 +418,31 @@ describe('InMemoryDomainRepository', () => {
     expect(await repository.listArtifacts(run.id)).toHaveLength(1);
     expect(await repository.listGoalCriteria(run.id)).toEqual([criterion]);
     expect(await repository.listGoalProgress(run.id)).toHaveLength(1);
+  });
+
+  it('normalizes a goal criterion ordinal collision as an idempotency conflict', async () => {
+    const repository = await seededRepository();
+    const criterion: GoalCriterion = {
+      id: criterionId,
+      runId: run.id,
+      ordinal: 0,
+      description: 'All tests pass',
+      definition: {
+        id: 'tests',
+        type: 'command',
+        description: 'All tests pass',
+        command: 'pnpm test',
+      },
+      status: 'pending',
+      createdAt: isoTimestamp('2026-08-16T12:02:00.000Z'),
+    };
+    await repository.createGoalCriterionIdempotently(criterion);
+
+    await expect(
+      repository.createGoalCriterionIdempotently({
+        ...criterion,
+        id: persistenceId('goalCriterion', 'criterion-2'),
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 });
