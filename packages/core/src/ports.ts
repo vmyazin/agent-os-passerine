@@ -1,4 +1,5 @@
 import type { SignedAttestation } from './attestation.js';
+export type { ArtifactAdminStore, ArtifactStore } from './artifacts.js';
 
 export type Identifier = string;
 
@@ -39,7 +40,7 @@ export interface RuntimeEvent {
 
 export interface RuntimeOutput {
   readonly text?: string;
-  readonly artifacts: readonly ArtifactReference[];
+  readonly artifacts: readonly RuntimeArtifactReference[];
   readonly data?: unknown;
 }
 
@@ -64,31 +65,11 @@ export interface RuntimeProvider {
   cleanup(handle: RuntimeHandle): Promise<void>;
 }
 
-export interface ArtifactReference {
+export interface RuntimeArtifactReference {
   readonly key: string;
   readonly mediaType?: string;
   readonly sizeBytes?: number;
   readonly hash?: string;
-}
-
-export interface ArtifactValue extends ArtifactReference {
-  readonly bytes: Uint8Array;
-}
-
-export interface ArtifactPutRequest {
-  readonly key: string;
-  readonly bytes: Uint8Array;
-  readonly mediaType?: string;
-}
-
-export interface ArtifactStore {
-  get(key: string): Promise<ArtifactValue | undefined>;
-  put(request: ArtifactPutRequest): Promise<ArtifactReference>;
-  list(prefix?: string): Promise<readonly ArtifactReference[]>;
-}
-
-export interface ArtifactAdminStore {
-  delete(key: string): Promise<boolean>;
 }
 
 export interface RepositoryValidationRequest {
