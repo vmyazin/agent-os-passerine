@@ -61,6 +61,16 @@ export interface ManagedAgentsEvent {
   [key: string]: unknown;
 }
 
+export interface ManagedAgentsRemoteFile {
+  id: string;
+  type: 'file';
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  downloadable?: boolean;
+  scope?: { type: 'session'; id: string } | null;
+}
+
 interface ManagedAgentsAgentsResource {
   list(params?: unknown): Promise<AsyncIterable<ManagedAgentsRemoteAgent>>;
   create(params: unknown): Promise<ManagedAgentsRemoteAgent>;
@@ -99,5 +109,11 @@ export interface ManagedAgentsClient {
     readonly agents: ManagedAgentsAgentsResource;
     readonly environments: ManagedAgentsEnvironmentsResource;
     readonly sessions: ManagedAgentsSessionsResource;
+    readonly files: {
+      list(params: {
+        scope_id: string;
+        betas: readonly ['managed-agents-2026-04-01'];
+      }): Promise<AsyncIterable<ManagedAgentsRemoteFile>>;
+    };
   };
 }

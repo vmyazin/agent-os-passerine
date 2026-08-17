@@ -21,6 +21,7 @@ export interface ManagedAgentsRuntimeProviderOptions {
   readonly baseURL?: string;
   readonly requestTimeoutMs?: number;
   readonly allowUnrestrictedNetworking?: boolean;
+  readonly allowBuiltInWebEgress?: boolean;
   readonly limits?: ManagedAgentsLimits;
   readonly transport?: typeof fetch;
 }
@@ -75,6 +76,9 @@ export interface ManagedAgentsRuntimeHandle extends RuntimeHandle {
   readonly agentId: string;
   readonly agentVersion: number;
   readonly environmentId: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly ownershipCapability: string;
 }
 
 export interface ManagedAgentsCustomToolResult {

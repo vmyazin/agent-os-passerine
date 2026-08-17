@@ -15,6 +15,8 @@ import type { ManagedAgentsRemoteEnvironment } from './index.js';
 import type { ManagedAgentsRemoteSession } from './index.js';
 // @ts-expect-error Beta-shaped provider events are package-internal.
 import type { ManagedAgentsEvent } from './index.js';
+// @ts-expect-error Beta-shaped provider file metadata is package-internal.
+import type { ManagedAgentsRemoteFile } from './index.js';
 // @ts-expect-error The concrete provider class is not publicly constructible.
 import type { ManagedAgentsRuntimeProvider } from './index.js';
 
@@ -42,4 +44,5 @@ void (0 as unknown as ManagedAgentsRemoteAgent);
 void (0 as unknown as ManagedAgentsRemoteEnvironment);
 void (0 as unknown as ManagedAgentsRemoteSession);
 void (0 as unknown as ManagedAgentsEvent);
+void (0 as unknown as ManagedAgentsRemoteFile);
 void (0 as unknown as ManagedAgentsRuntimeProvider);

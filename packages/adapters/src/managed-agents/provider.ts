@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type {
   Clock,
@@ -36,6 +36,12 @@ const OWNER = 'agentos-managed-agents-runtime';
 const LOCAL_ID = 'agentos.local_id';
 const CONFIG_DIGEST = 'agentos.config_digest';
 const OWNER_KEY = 'agentos.owner';
+const SESSION_CAPABILITY_HASH = 'agentos.session_capability_hash';
+const PROVIDER_INSTANCE_ID = 'agentos.provider_instance_id';
+const RUN_ID = 'agentos.run_id';
+const STEP_ID = 'agentos.step_id';
+const MANAGED_AGENTS_BETA = 'managed-agents-2026-04-01' as const;
+const WEB_EGRESS_TOOLS = new Set(['web_fetch', 'web_search']);
 const BUILT_IN_TOOLS = new Set([
   'bash',
   'edit',
@@ -51,11 +57,13 @@ interface ResolvedAgent {
   id: string;
   version: number;
   digest: string;
+  usesBuiltInWebEgress: boolean;
 }
 
 interface ResolvedEnvironment {
   id: string;
   digest: string;
+  unrestrictedNetworking: boolean;
 }
 
 interface RequiredLimits {
@@ -83,24 +91,44 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   readonly #clock: Clock;
   readonly #limits: RequiredLimits;
   readonly #allowUnrestrictedNetworking: boolean;
+  readonly #allowBuiltInWebEgress: boolean;
+  readonly #providerInstanceId = randomToken();
   readonly #agents = new Map<string, ResolvedAgent>();
   readonly #environments = new Map<string, ResolvedEnvironment>();
   readonly #cleanedSessions = new Set<string>();
+  readonly #agentSyncs = new Map<string, Promise<void>>();
+  readonly #environmentSyncs = new Map<string, Promise<void>>();
 
   constructor(
     client: ManagedAgentsClient,
     clock: Clock,
     limits: RequiredLimits,
     allowUnrestrictedNetworking: boolean,
+    allowBuiltInWebEgress: boolean,
   ) {
     this.#client = client;
     this.#clock = clock;
     this.#limits = limits;
     this.#allowUnrestrictedNetworking = allowUnrestrictedNetworking;
+    this.#allowBuiltInWebEgress = allowBuiltInWebEgress;
   }
 
   async syncAgent(agent: RuntimeAgent): Promise<void> {
     validateLocalId(agent.id, 'agent.id');
+    return this.#serializeSync(this.#agentSyncs, agent.id, () =>
+      this.#syncAgent(agent),
+    );
+  }
+
+  async #syncAgent(agent: RuntimeAgent): Promise<void> {
+    const usesBuiltInWebEgress = agent.tools.some((tool) =>
+      WEB_EGRESS_TOOLS.has(tool),
+    );
+    if (usesBuiltInWebEgress && !this.#allowBuiltInWebEgress) {
+      throw new ManagedAgentsConfigurationError(
+        'built-in web egress is disabled by policy',
+      );
+    }
     const definition = agentDefinition(agent);
     const digest = configDigest(definition);
     await this.#wrap(async () => {
@@ -108,22 +136,33 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         await this.#client.beta.agents.list({ include_archived: false }),
         this.#limits.maxRemoteResources,
       );
-      const remote = findOwnedResource(
-        remotes,
-        agent.id,
-        `agentos:${agent.id}`,
-      );
+      let remote = findOwnedResource(remotes, agent.id, `agentos:${agent.id}`);
       if (remote === undefined) {
-        const created = await this.#client.beta.agents.create({
-          ...definition,
-          metadata: metadataFor(agent.id, digest),
-        });
-        this.#agents.set(agent.id, {
-          id: created.id,
-          version: created.version,
-          digest,
-        });
-        return;
+        try {
+          const created = await this.#client.beta.agents.create({
+            ...definition,
+            metadata: metadataFor(agent.id, digest),
+          });
+          this.#agents.set(agent.id, {
+            id: created.id,
+            version: created.version,
+            digest,
+            usesBuiltInWebEgress,
+          });
+          return;
+        } catch (error) {
+          if (!isConflictResponse(error)) throw error;
+          const reconciled = await collectBounded(
+            await this.#client.beta.agents.list({ include_archived: false }),
+            this.#limits.maxRemoteResources,
+          );
+          remote = findOwnedResource(
+            reconciled,
+            agent.id,
+            `agentos:${agent.id}`,
+          );
+          if (remote === undefined) throw error;
+        }
       }
       assertOwnership(remote.metadata);
       if (remote.metadata[CONFIG_DIGEST] === digest) {
@@ -131,6 +170,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           id: remote.id,
           version: remote.version,
           digest,
+          usesBuiltInWebEgress,
         });
         return;
       }
@@ -143,6 +183,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         id: updated.id,
         version: updated.version,
         digest,
+        usesBuiltInWebEgress,
       });
     }, true);
   }
@@ -151,6 +192,14 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     environment: ManagedAgentsRuntimeEnvironment,
   ): Promise<void> {
     validateLocalId(environment.id, 'environment.id');
+    return this.#serializeSync(this.#environmentSyncs, environment.id, () =>
+      this.#syncEnvironment(environment),
+    );
+  }
+
+  async #syncEnvironment(
+    environment: ManagedAgentsRuntimeEnvironment,
+  ): Promise<void> {
     const managed = environment;
     validateEnvironmentFields(managed);
     if (
@@ -173,24 +222,48 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         await this.#client.beta.environments.list({ include_archived: false }),
         this.#limits.maxRemoteResources,
       );
-      const remote = findOwnedResource(
+      let remote = findOwnedResource(
         remotes,
         environment.id,
         `agentos:${environment.id}`,
       );
       if (remote === undefined) {
-        const created = await this.#client.beta.environments.create({
-          name: `agentos:${environment.id}`,
-          description: `AgentOS environment ${environment.id}`,
-          config: definition,
-          metadata: metadataFor(environment.id, digest),
-        });
-        this.#environments.set(environment.id, { id: created.id, digest });
-        return;
+        try {
+          const created = await this.#client.beta.environments.create({
+            name: `agentos:${environment.id}`,
+            description: `AgentOS environment ${environment.id}`,
+            config: definition,
+            metadata: metadataFor(environment.id, digest),
+          });
+          this.#environments.set(environment.id, {
+            id: created.id,
+            digest,
+            unrestrictedNetworking: isUnrestricted(environment),
+          });
+          return;
+        } catch (error) {
+          if (!isConflictResponse(error)) throw error;
+          const reconciled = await collectBounded(
+            await this.#client.beta.environments.list({
+              include_archived: false,
+            }),
+            this.#limits.maxRemoteResources,
+          );
+          remote = findOwnedResource(
+            reconciled,
+            environment.id,
+            `agentos:${environment.id}`,
+          );
+          if (remote === undefined) throw error;
+        }
       }
       assertOwnership(remote.metadata);
       if (remote.metadata[CONFIG_DIGEST] === digest) {
-        this.#environments.set(environment.id, { id: remote.id, digest });
+        this.#environments.set(environment.id, {
+          id: remote.id,
+          digest,
+          unrestrictedNetworking: isUnrestricted(environment),
+        });
         return;
       }
       const updated = await this.#client.beta.environments.update(remote.id, {
@@ -199,7 +272,11 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         config: definition,
         metadata: metadataFor(environment.id, digest),
       });
-      this.#environments.set(environment.id, { id: updated.id, digest });
+      this.#environments.set(environment.id, {
+        id: updated.id,
+        digest,
+        unrestrictedNetworking: isUnrestricted(environment),
+      });
     }, true);
   }
 
@@ -219,6 +296,11 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         'environment must be synced before start',
       );
     }
+    if (agent.usesBuiltInWebEgress && !environment.unrestrictedNetworking) {
+      throw new ManagedAgentsConfigurationError(
+        'built-in web tools require unrestricted networking',
+      );
+    }
     validateLocalId(request.runId, 'runId');
     validateLocalId(request.stepId, 'stepId');
     const input = boundedText(
@@ -230,18 +312,21 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       throw new ManagedAgentsLimitError('Session resource limit exceeded');
     }
     const resources = (managed.resources ?? []).map(mapResource);
+    const ownershipCapability = randomToken();
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.create({
         agent: { type: 'agent', id: agent.id, version: agent.version },
         environment_id: environment.id,
         metadata: {
-          'agentos.run_id': request.runId,
-          'agentos.step_id': request.stepId,
+          [RUN_ID]: request.runId,
+          [STEP_ID]: request.stepId,
           ...(managed.roleId === undefined
             ? {}
             : { 'agentos.role_id': managed.roleId }),
           'agentos.agent_digest': agent.digest,
           'agentos.environment_digest': environment.digest,
+          [SESSION_CAPABILITY_HASH]: hashCapability(ownershipCapability),
+          [PROVIDER_INSTANCE_ID]: this.#providerInstanceId,
         },
         initial_events: [userMessage(input)],
         resources,
@@ -252,21 +337,31 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       agentId: agent.id,
       agentVersion: agent.version,
       environmentId: environment.id,
+      runId: request.runId,
+      stepId: request.stepId,
+      ownershipCapability,
     };
   }
 
   async *events(handle: RuntimeHandle): AsyncIterable<RuntimeEvent> {
     const seen = new Set<string>();
     const startedAt = this.#clock.now().getTime();
-    for (const event of await this.listEvents(handle)) {
-      seen.add(event.id);
-      yield event;
-    }
     for (
       let connection = 0;
       connection <= this.#limits.maxStreamReconnects;
       connection += 1
     ) {
+      for (const event of await this.listEvents(handle)) {
+        if (!seen.has(event.id)) {
+          seen.add(event.id);
+          if (seen.size > this.#limits.maxListedEvents) {
+            throw new ManagedAgentsLimitError(
+              'Event collection limit exceeded',
+            );
+          }
+          yield event;
+        }
+      }
       if (
         this.#clock.now().getTime() - startedAt >
         this.#limits.maxStreamDurationMs
@@ -327,10 +422,19 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   }
 
   async listEvents(handle: RuntimeHandle): Promise<readonly RuntimeEvent[]> {
+    return this.#listEvents(handle);
+  }
+
+  async #listEvents(
+    handle: RuntimeHandle,
+    maxOutputBytes?: number,
+  ): Promise<readonly RuntimeEvent[]> {
     return this.#wrap(async () => {
       const result: RuntimeEvent[] = [];
       const seen = new Set<string>();
       let listedCount = 0;
+      let outputBytes = 0;
+      let outputMessages = 0;
       const source = await this.#client.beta.sessions.events.list(handle.id, {
         order: 'asc',
       });
@@ -345,6 +449,20 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           this.#clock.now(),
         );
         if (event !== undefined && !seen.has(event.id)) {
+          if (maxOutputBytes !== undefined && event.type === 'message') {
+            const text =
+              isRecord(event.payload) && typeof event.payload.text === 'string'
+                ? event.payload.text
+                : '';
+            outputBytes +=
+              Buffer.byteLength(text, 'utf8') + (outputMessages === 0 ? 0 : 1);
+            outputMessages += 1;
+            if (outputBytes > maxOutputBytes) {
+              throw new ManagedAgentsLimitError(
+                'Output exceeds maxOutputBytes',
+              );
+            }
+          }
           seen.add(event.id);
           result.push(event);
         }
@@ -375,14 +493,11 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     // The provider interrupt event has no reason field. Deliberately do not place
     // caller text into metadata or logs where it could disclose sensitive input.
     void reason;
-    await this.#interrupt(handle.id);
+    await this.#interrupt(handle);
   }
 
   async collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput> {
-    const [events, session] = await Promise.all([
-      this.listEvents(handle),
-      this.#wrap(() => this.#client.beta.sessions.retrieve(handle.id)),
-    ]);
+    const events = await this.#listEvents(handle, this.#limits.maxOutputBytes);
     const messages = events.filter((event) => event.type === 'message');
     const text = messages
       .map((event) =>
@@ -391,16 +506,20 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           : '',
       )
       .join('\n');
-    if (Buffer.byteLength(text, 'utf8') > this.#limits.maxOutputBytes) {
-      throw new ManagedAgentsLimitError('Output exceeds maxOutputBytes');
-    }
+    const files = await this.#wrap(async () =>
+      collectBounded(
+        await this.#client.beta.files.list({
+          scope_id: handle.id,
+          betas: [MANAGED_AGENTS_BETA],
+        }),
+        this.#limits.maxRemoteResources,
+      ),
+    );
     const data = parseStructuredOutput(text);
     return {
       ...(text.length === 0 ? {} : { text }),
       ...(data === undefined ? {} : { data }),
-      artifacts: session.resources
-        .slice(0, this.#limits.maxRemoteResources)
-        .map((resource) => ({ key: resource.id })),
+      artifacts: files.map((file) => normalizeOutputFile(file, handle.id)),
     };
   }
 
@@ -432,31 +551,58 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
 
   async cleanup(handle: RuntimeHandle): Promise<void> {
     if (this.#cleanedSessions.has(handle.id)) return;
-    let session = await this.#wrap(() =>
-      this.#client.beta.sessions.retrieve(handle.id),
-    );
+    let session = await this.#ownedSession(handle);
     let status = normalizeSessionStatus(session.status);
     if (status === 'running' || status === 'rescheduling') {
-      await this.#interrupt(handle.id);
-      session = await this.#wrap(() =>
-        this.#client.beta.sessions.retrieve(handle.id),
-      );
+      await this.#sendInterrupt(handle.id);
+      session = await this.#ownedSession(handle);
       status = normalizeSessionStatus(session.status);
     }
     if (status !== 'idle' && status !== 'terminated') {
       throw new Error('Session remained active after interrupt');
     }
     await this.#wrap(() => this.#client.beta.sessions.archive(handle.id));
+    await this.#ownedSession(handle);
     await this.#wrap(() => this.#client.beta.sessions.delete(handle.id));
     this.#cleanedSessions.add(handle.id);
   }
 
-  async #interrupt(sessionId: string): Promise<void> {
+  async #interrupt(handle: RuntimeHandle): Promise<void> {
+    await this.#ownedSession(handle);
+    await this.#sendInterrupt(handle.id);
+  }
+
+  async #sendInterrupt(sessionId: string): Promise<void> {
     await this.#wrap(() =>
       this.#client.beta.sessions.events.send(sessionId, {
         events: [{ type: 'user.interrupt' }],
       }),
     );
+  }
+
+  async #ownedSession(
+    handle: RuntimeHandle,
+  ): Promise<ManagedAgentsRemoteSession> {
+    const session = await this.#wrap(() =>
+      this.#client.beta.sessions.retrieve(handle.id),
+    );
+    assertSessionOwnership(handle, session.metadata, this.#providerInstanceId);
+    return session;
+  }
+
+  async #serializeSync(
+    flights: Map<string, Promise<void>>,
+    localId: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const previous = flights.get(localId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    flights.set(localId, current);
+    try {
+      await current;
+    } finally {
+      if (flights.get(localId) === current) flights.delete(localId);
+    }
   }
 
   async #wrap<T>(operation: () => Promise<T>, mapConflict = false): Promise<T> {
@@ -513,6 +659,7 @@ export async function createManagedAgentsRuntimeProviderWithDependencies(
     dependencies.clock ?? systemClock,
     validated.limits,
     options.allowUnrestrictedNetworking === true,
+    options.allowBuiltInWebEgress === true,
   );
 }
 
@@ -663,6 +810,13 @@ function metadataFor(localId: string, digest: string): Record<string, string> {
   return { [LOCAL_ID]: localId, [CONFIG_DIGEST]: digest, [OWNER_KEY]: OWNER };
 }
 
+function isUnrestricted(environment: ManagedAgentsRuntimeEnvironment): boolean {
+  return (
+    environment.runtime === 'cloud' &&
+    environment.networking?.type === 'unrestricted'
+  );
+}
+
 function findOwnedResource<
   T extends {
     name: string;
@@ -703,6 +857,39 @@ function assertOwnership(metadata: Record<string, string>): void {
     throw new ManagedAgentsConflictError(
       'Remote resource has conflicting owner',
     );
+  }
+}
+
+function assertSessionOwnership(
+  handle: RuntimeHandle,
+  metadata: Record<string, string>,
+  providerInstanceId: string,
+): asserts handle is ManagedAgentsRuntimeHandle {
+  const candidate = handle as Partial<ManagedAgentsRuntimeHandle>;
+  const suppliedHash = hashCapability(
+    typeof candidate.ownershipCapability === 'string'
+      ? candidate.ownershipCapability
+      : '',
+  );
+  const storedHash = metadata[SESSION_CAPABILITY_HASH];
+  const suppliedBytes = Buffer.from(
+    suppliedHash.slice('sha256:'.length),
+    'hex',
+  );
+  const storedBytes =
+    typeof storedHash === 'string' && /^sha256:[a-f0-9]{64}$/.test(storedHash)
+      ? Buffer.from(storedHash.slice('sha256:'.length), 'hex')
+      : Buffer.alloc(32);
+  const capabilityMatches = timingSafeEqual(suppliedBytes, storedBytes);
+  if (
+    !capabilityMatches ||
+    typeof candidate.runId !== 'string' ||
+    typeof candidate.stepId !== 'string' ||
+    metadata[RUN_ID] !== candidate.runId ||
+    metadata[STEP_ID] !== candidate.stepId ||
+    metadata[PROVIDER_INSTANCE_ID] !== providerInstanceId
+  ) {
+    throw new ManagedAgentsConflictError('Session ownership validation failed');
   }
 }
 
@@ -869,6 +1056,14 @@ function configDigest(value: unknown): string {
   return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
 }
 
+function hashCapability(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function randomToken(): string {
+  return randomBytes(32).toString('base64url');
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (isRecord(value)) {
@@ -913,6 +1108,41 @@ function normalizeSessionStatus(
   throw new Error('Unsupported provider status');
 }
 
+function normalizeOutputFile(
+  file: {
+    id: string;
+    type: 'file';
+    mime_type: string;
+    size_bytes: number;
+    scope?: { type: 'session'; id: string } | null;
+  },
+  sessionId: string,
+) {
+  if (
+    typeof file.id !== 'string' ||
+    file.id.length === 0 ||
+    file.id.length > 256 ||
+    typeof file.mime_type !== 'string' ||
+    file.mime_type.length === 0 ||
+    file.mime_type.length > 256 ||
+    !Number.isSafeInteger(file.size_bytes) ||
+    file.size_bytes < 0 ||
+    file.scope?.type !== 'session' ||
+    file.scope.id !== sessionId
+  ) {
+    throw new Error('Malformed provider file metadata');
+  }
+  return {
+    key: file.id,
+    mediaType: file.mime_type,
+    sizeBytes: file.size_bytes,
+  };
+}
+
+function isConflictResponse(error: unknown): boolean {
+  return isRecord(error) && error.status === 409;
+}
+
 function isLocalError(error: unknown): boolean {
   return (
     error instanceof ManagedAgentsConfigurationError ||
@@ -920,6 +1150,7 @@ function isLocalError(error: unknown): boolean {
     error instanceof ManagedAgentsLimitError ||
     (error instanceof Error &&
       (error.message === 'Malformed provider event' ||
+        error.message === 'Malformed provider file metadata' ||
         error.message === 'Unsupported provider event' ||
         error.message === 'Unsupported provider status'))
   );

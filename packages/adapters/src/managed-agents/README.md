@@ -23,6 +23,18 @@ unrestricted networking requires `allowUnrestrictedNetworking: true`.
 Matching remotes must also carry this adapter's exact owner marker; ownerless
 or foreign resources are never adopted.
 
+Built-in `web_search` and `web_fetch` are disabled independently. They require
+both `allowBuiltInWebEgress: true` and an unrestricted cloud environment; a
+limited environment can never start an agent containing either tool. This
+separate policy prevents an apparently restricted environment from acquiring
+provider-hosted web egress.
+
+Synchronization is single-flight per local agent/environment ID within one
+provider instance. A create conflict is re-listed and reconciled before an
+update, and true duplicates still fail closed. Cross-process synchronization
+must be externally serialized (for example, with a deployment lock), because
+the in-memory single-flight boundary cannot coordinate separate processes.
+
 Environment runtime must be `cloud` or `self_hosted`. Managed Agents does not
 provision the core port's `image` or `variables` fields, so the adapter rejects
 them instead of recording an unapplied digest. Use provider vault credentials
@@ -32,6 +44,14 @@ MCP tools keep the provider's explicit `always_ask` policy. Resolve a
 `requires_action` event with `send(handle, { type: 'tool_confirmation',
 toolUseId, result: 'allow' | 'deny' })`; the adapter never auto-approves tools
 added later by an MCP server.
+
+Every session handle contains a high-entropy ownership capability. Only its
+hash, the provider-instance ID, and run/step bindings are stored in remote
+metadata. Interrupt, archive, and delete validate that binding before acting;
+the capability is never included in provider errors. Output artifacts come
+only from bounded Files API metadata listed with the session ID and Managed
+Agents beta, not from the session's input mount resources. File content is not
+downloaded by `collectOutput`.
 
 The opt-in smoke command requires both `ANTHROPIC_API_KEY` and
 `AGENTOS_LIVE_TESTS=1`:

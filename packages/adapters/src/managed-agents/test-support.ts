@@ -13,6 +13,7 @@ import type {
 export type {
   ManagedAgentsClient,
   ManagedAgentsEvent,
+  ManagedAgentsRemoteFile,
   ManagedAgentsRemoteAgent,
   ManagedAgentsRemoteEnvironment,
   ManagedAgentsRemoteSession,
