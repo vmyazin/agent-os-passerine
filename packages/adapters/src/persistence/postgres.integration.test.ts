@@ -758,7 +758,7 @@ describePostgres('PostgreSQL persistence integration', () => {
     );
   });
 
-  it('rejects pre-0018 goal rows instead of inventing trusted history', async () => {
+  it('terminates pre-0018 goals without inventing trusted history', async () => {
     if (databaseUrl === undefined)
       throw new Error('TEST_DATABASE_URL required');
     const upgradeSchema = `agentos_${randomUUID().replaceAll('-', '')}`;
@@ -789,7 +789,8 @@ describePostgres('PostgreSQL persistence integration', () => {
         insert into workflow_runs
           (id, project_id, pipeline, status, created_at, updated_at)
         values
-          ('legacy-goal-run', 'legacy-goal-project', 'goal', 'running', now(), now());
+          ('legacy-goal-run', 'legacy-goal-project', 'goal', 'running', now(), now()),
+          ('legacy-empty-goal-run', 'legacy-goal-project', 'goal', 'pending', now(), now());
         insert into goal_criteria
           (id, run_id, ordinal, description, status, created_at)
         values
@@ -806,12 +807,24 @@ describePostgres('PostgreSQL persistence integration', () => {
         .replaceAll('"public".', `"${upgradeSchema}".`)
         .split('--> statement-breakpoint');
 
+      for (const statement of boundedGoalStatements)
+        if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
+
+      const legacyRuns = await upgradeAdmin.unsafe<
+        { status: string; error: { code: string } }[]
+      >(
+        `select status, error from workflow_runs where id in ('legacy-goal-run', 'legacy-empty-goal-run') order by id`,
+      );
+      expect(legacyRuns).toEqual([
+        { status: 'failed', error: { code: 'legacy_goal_unverifiable' } },
+        { status: 'failed', error: { code: 'legacy_goal_unverifiable' } },
+      ]);
       await expect(
-        (async () => {
-          for (const statement of boundedGoalStatements)
-            if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
-        })(),
-      ).rejects.toThrow(/cannot infer bounded goal history/i);
+        upgradeAdmin.unsafe('select id from goal_criteria'),
+      ).resolves.toHaveLength(0);
+      await expect(
+        upgradeAdmin.unsafe('select id from goal_progress'),
+      ).resolves.toHaveLength(0);
     } finally {
       await upgradeAdmin.end();
       await admin.unsafe(`drop schema "${upgradeSchema}" cascade`);

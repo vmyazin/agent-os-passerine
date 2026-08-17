@@ -20,10 +20,13 @@ const boundedGoalMigration = readFileSync(
 ).toLowerCase();
 
 describe('domain persistence migration', () => {
-  it('rejects legacy goal history whose definitions and steps are unknowable', () => {
-    expect(boundedGoalMigration).toContain('raise exception');
-    expect(boundedGoalMigration).toContain('from "goal_criteria"');
-    expect(boundedGoalMigration).toContain('from "goal_progress"');
+  it('terminates legacy goals and removes history whose definitions and steps are unknowable', () => {
+    expect(boundedGoalMigration).toContain('update "workflow_runs"');
+    expect(boundedGoalMigration).toContain('"pipeline" = \'goal\'');
+    expect(boundedGoalMigration).toContain('legacy_goal_unverifiable');
+    expect(boundedGoalMigration).toContain('delete from "goal_progress"');
+    expect(boundedGoalMigration).toContain('delete from "goal_criteria"');
+    expect(boundedGoalMigration).not.toContain('raise exception');
     expect(boundedGoalMigration).not.toContain('jsonb_build_object');
     expect(boundedGoalMigration).not.toContain('set "step" = 1');
   });
