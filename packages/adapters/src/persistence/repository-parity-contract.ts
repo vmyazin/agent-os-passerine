@@ -441,6 +441,7 @@ export function repositoryParityContract(
         uri: `artifacts/v1/project/run/step/spec/1/sha256/${'a'.repeat(64)}`,
         retentionClass: 'working' as const,
         manifestVersion: 'artifact-manifest-v1' as const,
+        deletionState: 'active' as const,
         createdAt: at,
         cleanupAt: isoTimestamp('2026-08-18T08:00:00.000000Z'),
       };
@@ -476,11 +477,27 @@ export function repositoryParityContract(
         10,
       );
       expect(due).toHaveLength(1);
-      await repository.markArtifactDeleted(
-        due[0]!.id,
-        isoTimestamp('2026-08-18T08:00:00.000001Z'),
-        'retention_expired',
-      );
+      const deletionAt = isoTimestamp('2026-08-18T08:00:00.000001Z');
+      const reserved = await repository.reserveArtifactDeletion({
+        id: due[0]!.id,
+        runId,
+        logicalKey: due[0]!.key,
+        uri: due[0]!.uri!,
+        digest: due[0]!.digest,
+        now: deletionAt,
+        requestedAt: deletionAt,
+        reason: 'retention_expired',
+      });
+      expect(reserved?.deletionState).toBe('pending');
+      await repository.finalizeArtifactDeletion({
+        id: due[0]!.id,
+        runId,
+        logicalKey: due[0]!.key,
+        uri: due[0]!.uri!,
+        digest: due[0]!.digest,
+        deletedAt: deletionAt,
+        reason: 'retention_expired',
+      });
       expect(
         await repository.listArtifactsByRunKey(
           runId,
@@ -491,7 +508,7 @@ export function repositoryParityContract(
       ).toEqual([]);
     });
 
-    it('atomically enforces durable artifact capability quotas with replay safety', async () => {
+    it('charges every quota invocation and rejects first-call byte overflow', async () => {
       const repository = await createRepository();
       const quota = repository as DomainRepository & {
         consumeArtifactCapabilityQuota(request: {
@@ -537,10 +554,25 @@ export function repositoryParityContract(
           operationId: winner,
         }),
       ).resolves.toMatchObject({
-        allowed: true,
-        replayed: true,
+        allowed: false,
+        replayed: false,
         calls: 1,
         cumulativeBytes: 6,
+      });
+
+      await expect(
+        quota.consumeArtifactCapabilityQuota({
+          ...base,
+          nonce: `${implementation}-quota-first-overflow`,
+          operationId: 'first-too-large',
+          bytes: 11,
+          maxCalls: 2,
+        }),
+      ).resolves.toEqual({
+        allowed: false,
+        replayed: false,
+        calls: 0,
+        cumulativeBytes: 0,
       });
 
       const byteBase = {
@@ -583,10 +615,30 @@ export function repositoryParityContract(
         }),
       ]);
       expect(raced.filter(Boolean)).toHaveLength(1);
+      const winningOwner = raced[0]
+        ? `${implementation}-worker-one`
+        : `${implementation}-worker-two`;
+      const losingOwner = raced[0]
+        ? `${implementation}-worker-two`
+        : `${implementation}-worker-one`;
+      await expect(
+        leased.renewArtifactCleanupLease({
+          owner: losingOwner,
+          now: isoTimestamp('2026-08-17T08:01:00.000000Z'),
+          expiresAt: isoTimestamp('2026-08-17T08:06:00.000000Z'),
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        leased.renewArtifactCleanupLease({
+          owner: winningOwner,
+          now: isoTimestamp('2026-08-17T08:01:00.000000Z'),
+          expiresAt: isoTimestamp('2026-08-17T08:06:00.000000Z'),
+        }),
+      ).resolves.toBe(true);
       await expect(
         leased.claimArtifactCleanupLease({
           owner: `${implementation}-worker-three`,
-          now: isoTimestamp('2026-08-17T08:05:00.000001Z'),
+          now: isoTimestamp('2026-08-17T08:06:00.000001Z'),
           expiresAt: isoTimestamp('2026-08-17T08:10:00.000000Z'),
         }),
       ).resolves.toBe(true);

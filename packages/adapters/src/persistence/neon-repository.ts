@@ -16,7 +16,10 @@ import type {
   ArtifactCapabilityQuotaRequest,
   ArtifactCapabilityQuotaResult,
   ArtifactCleanupLeaseRequest,
+  ArtifactDeletionFinalizationRequest,
+  ArtifactDeletionReservationRequest,
   ArtifactRecord,
+  ArtifactWriteClaimRequest,
   ConfigRevision,
   ConfigRevisionDraft,
   ConfigRevisionPrecondition,
@@ -1123,6 +1126,71 @@ export class NeonDomainRepository implements DomainRepository {
     return existing;
   }
 
+  async claimArtifactForWrite(
+    request: ArtifactWriteClaimRequest,
+  ): Promise<ArtifactRecord> {
+    const artifact = request.artifact;
+    assertValidArtifact(artifact);
+    if (
+      request.leaseId.trim() === '' ||
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+        isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('artifact write lease is invalid');
+    const [claimed] = await this.database
+      .insert(artifacts)
+      .values({
+        ...artifact,
+        deletionState: 'active',
+        writeLeaseId: request.leaseId,
+        writeLeaseExpiresAt: request.expiresAt,
+      })
+      .onConflictDoUpdate({
+        target: [artifacts.runId, artifacts.key],
+        set: {
+          writeLeaseId: request.leaseId,
+          writeLeaseExpiresAt: request.expiresAt,
+        },
+        setWhere: and(
+          eq(artifacts.id, artifact.id),
+          eq(artifacts.digest, artifact.digest),
+          eq(artifacts.uri, artifact.uri!),
+          eq(artifacts.mediaType, artifact.mediaType!),
+          eq(artifacts.sizeBytes, artifact.sizeBytes!),
+          eq(artifacts.retentionClass, artifact.retentionClass!),
+          eq(artifacts.createdAt, artifact.createdAt),
+          eq(artifacts.cleanupAt, artifact.cleanupAt!),
+          eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
+          eq(artifacts.deletionState, 'active'),
+          isNull(artifacts.deletedAt),
+          or(
+            isNull(artifacts.writeLeaseExpiresAt),
+            lte(artifacts.writeLeaseExpiresAt, request.now),
+            eq(artifacts.writeLeaseId, request.leaseId),
+          ),
+        )!,
+      })
+      .returning(artifactSelection);
+    if (claimed !== undefined) return mapArtifactRow(claimed);
+    const existing = await this.getArtifactByRunKey(
+      artifact.runId,
+      artifact.key,
+    );
+    if (existing === undefined)
+      throw new Error('Artifact write claim could not be reconciled');
+    return existing;
+  }
+
+  async releaseArtifactWriteLease(
+    id: ArtifactId,
+    leaseId: string,
+  ): Promise<void> {
+    await this.database
+      .update(artifacts)
+      .set({ writeLeaseId: null, writeLeaseExpiresAt: null })
+      .where(and(eq(artifacts.id, id), eq(artifacts.writeLeaseId, leaseId)));
+  }
+
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
     const [row] = await this.database
       .select(artifactSelection)
@@ -1159,6 +1227,7 @@ export class NeonDomainRepository implements DomainRepository {
             eq(artifacts.runId, runId),
             isNull(artifacts.deletedAt),
             eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
+            eq(artifacts.deletionState, 'active'),
             sql`left(${artifacts.key}, ${keyPrefix.length}) = ${keyPrefix}`,
             afterKey === undefined
               ? undefined
@@ -1183,6 +1252,10 @@ export class NeonDomainRepository implements DomainRepository {
           and(
             isNull(artifacts.deletedAt),
             eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
+            or(
+              eq(artifacts.deletionState, 'active'),
+              eq(artifacts.deletionState, 'pending'),
+            ),
             sql`${artifacts.cleanupAt} is not null`,
             lte(artifacts.cleanupAt, before),
           ),
@@ -1193,20 +1266,75 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
-  async markArtifactDeleted(
-    id: ArtifactId,
-    deletedAt: import('@agentos/core').IsoTimestamp,
-    reason: string,
-  ): Promise<ArtifactRecord> {
-    const rows = await this.database
+  async reserveArtifactDeletion(
+    request: ArtifactDeletionReservationRequest,
+  ): Promise<ArtifactRecord | undefined> {
+    const [reserved] = await this.database
       .update(artifacts)
-      .set({ deletedAt, deletionReason: reason })
-      .where(and(eq(artifacts.id, id), isNull(artifacts.deletedAt)))
+      .set({
+        deletionState: 'pending',
+        deletionRequestedAt: request.requestedAt,
+        deletionReason: request.reason,
+      })
+      .where(
+        and(
+          eq(artifacts.id, request.id),
+          eq(artifacts.runId, request.runId),
+          eq(artifacts.key, request.logicalKey),
+          eq(artifacts.uri, request.uri),
+          eq(artifacts.digest, request.digest),
+          eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
+          or(
+            eq(artifacts.deletionState, 'active'),
+            eq(artifacts.deletionState, 'pending'),
+          ),
+          isNull(artifacts.deletedAt),
+          or(
+            isNull(artifacts.writeLeaseExpiresAt),
+            lte(artifacts.writeLeaseExpiresAt, request.now),
+          ),
+        ),
+      )
       .returning(artifactSelection);
-    const updated = rows[0];
-    if (updated !== undefined) return mapArtifactRow(updated);
-    const existing = await this.getArtifact(id);
-    if (existing === undefined) throw new Error(`Artifact ${id} not found`);
+    return reserved === undefined ? undefined : mapArtifactRow(reserved);
+  }
+
+  async finalizeArtifactDeletion(
+    request: ArtifactDeletionFinalizationRequest,
+  ): Promise<ArtifactRecord> {
+    const [finalized] = await this.database
+      .update(artifacts)
+      .set({
+        deletionState: 'deleted',
+        deletedAt: request.deletedAt,
+        deletionReason: request.reason,
+        writeLeaseId: null,
+        writeLeaseExpiresAt: null,
+      })
+      .where(
+        and(
+          eq(artifacts.id, request.id),
+          eq(artifacts.runId, request.runId),
+          eq(artifacts.key, request.logicalKey),
+          eq(artifacts.uri, request.uri),
+          eq(artifacts.digest, request.digest),
+          eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
+          eq(artifacts.deletionState, 'pending'),
+          isNull(artifacts.deletedAt),
+        ),
+      )
+      .returning(artifactSelection);
+    if (finalized !== undefined) return mapArtifactRow(finalized);
+    const existing = await this.getArtifact(request.id);
+    if (
+      existing === undefined ||
+      existing.deletionState !== 'deleted' ||
+      existing.runId !== request.runId ||
+      existing.key !== request.logicalKey ||
+      existing.uri !== request.uri ||
+      existing.digest !== request.digest
+    )
+      throw new Error('Artifact deletion could not be finalized');
     return existing;
   }
 
@@ -1223,25 +1351,23 @@ export class NeonDomainRepository implements DomainRepository {
       return { allowed: false, replayed: false, calls: 0, cumulativeBytes: 0 };
     const result = await this.database.execute<Record<string, unknown>>(sql`
       insert into "artifact_capability_quotas"
-        ("purpose", "audience", "nonce", "fingerprint", "not_before", "expires_at", "calls", "cumulative_bytes", "operation_ids", "last_operation_replayed", "updated_at")
-      values
-        (${request.purpose}, ${request.audience}, ${request.nonce}, ${request.fingerprint}, ${request.notBefore}, ${request.expiresAt}, 1, ${request.bytes}, array[${request.operationId}]::text[], false, ${request.now})
+        ("purpose", "audience", "nonce", "fingerprint", "not_before", "expires_at", "calls", "cumulative_bytes", "updated_at")
+      select
+        ${request.purpose}, ${request.audience}, ${request.nonce}, ${request.fingerprint}, ${request.notBefore}, ${request.expiresAt}, 1, ${request.bytes}, ${request.now}
+      where ${request.maxCalls} >= 1
+        and ${request.bytes} <= ${request.maxCumulativeBytes}
       on conflict ("purpose", "audience", "nonce") do update set
-        "calls" = "artifact_capability_quotas"."calls" + case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then 0 else 1 end,
-        "cumulative_bytes" = "artifact_capability_quotas"."cumulative_bytes" + case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then 0 else ${request.bytes} end,
-        "operation_ids" = case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then "artifact_capability_quotas"."operation_ids" else array_append("artifact_capability_quotas"."operation_ids", ${request.operationId}) end,
-        "last_operation_replayed" = ${request.operationId} = any("artifact_capability_quotas"."operation_ids"),
+        "calls" = "artifact_capability_quotas"."calls" + 1,
+        "cumulative_bytes" = "artifact_capability_quotas"."cumulative_bytes" + ${request.bytes},
         "updated_at" = ${request.now}
       where
         "artifact_capability_quotas"."fingerprint" = ${request.fingerprint}
         and "artifact_capability_quotas"."not_before" = ${request.notBefore}
         and "artifact_capability_quotas"."expires_at" = ${request.expiresAt}
-        and (${request.operationId} = any("artifact_capability_quotas"."operation_ids") or (
-          "artifact_capability_quotas"."calls" + 1 <= ${request.maxCalls}
-          and "artifact_capability_quotas"."cumulative_bytes" + ${request.bytes} <= ${request.maxCumulativeBytes}
-        ))
+        and "artifact_capability_quotas"."calls" + 1 <= ${request.maxCalls}
+        and "artifact_capability_quotas"."cumulative_bytes" + ${request.bytes} <= ${request.maxCumulativeBytes}
       returning
-        "calls", "cumulative_bytes", "last_operation_replayed" as "replayed"
+        "calls", "cumulative_bytes"
     `);
     const row = executionRows(result)[0];
     if (row !== undefined)
@@ -1289,6 +1415,30 @@ export class NeonDomainRepository implements DomainRepository {
           "expires_at" = excluded."expires_at",
           "updated_at" = excluded."updated_at"
         where "artifact_cleanup_leases"."expires_at" <= ${request.now}
+        returning "name"
+      `),
+    );
+    return rows.length === 1;
+  }
+
+  async renewArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean> {
+    if (request.owner.trim() === '' || request.owner.length > 256)
+      throw new TypeError('cleanup lease owner is invalid');
+    if (
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+      isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('cleanup lease expiry must be after now');
+    const rows = executionRows(
+      await this.database.execute<Record<string, unknown>>(sql`
+        update "artifact_cleanup_leases"
+        set "expires_at" = ${request.expiresAt},
+            "updated_at" = ${request.now}
+        where "name" = 'artifact-retention'
+          and "owner" = ${request.owner}
+          and "expires_at" > ${request.now}
         returning "name"
       `),
     );

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -16,6 +16,7 @@ import {
   IdempotencyConflictError,
   StaleConfigurationError,
 } from './errors.js';
+import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
 import * as schema from './schema.js';
@@ -431,4 +432,90 @@ describePostgres('PostgreSQL persistence integration', () => {
       isoTimestampEpochMicroseconds(input),
     );
   });
+
+  it('upgrades valid pre-0008 manifests without classifying legacy artifacts', async () => {
+    if (databaseUrl === undefined)
+      throw new Error('TEST_DATABASE_URL required');
+    const upgradeSchema = `agentos_${randomUUID().replaceAll('-', '')}`;
+    if (!/^agentos_[a-f0-9]{32}$/.test(upgradeSchema))
+      throw new Error('invalid upgrade integration schema');
+    const upgradeAdmin = postgres(databaseUrl, {
+      max: 1,
+      connection: { search_path: upgradeSchema },
+    });
+    await admin.unsafe(`create schema "${upgradeSchema}"`);
+    try {
+      const migrations = readdirSync(migrationDirectory)
+        .filter((name) => name.endsWith('.sql'))
+        .sort();
+      for (const filename of migrations.filter((name) => name < '0008_')) {
+        const statements = readFileSync(
+          resolve(migrationDirectory, filename),
+          'utf8',
+        )
+          .replaceAll('"public".', `"${upgradeSchema}".`)
+          .split('--> statement-breakpoint');
+        for (const statement of statements)
+          if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
+      }
+
+      const projectId = `upgrade-project-${randomUUID()}`;
+      const runId = `upgrade-run-${randomUUID()}`;
+      const stepId = 'specification';
+      const artifactId = 'approved-spec';
+      const digest = 'a'.repeat(64);
+      const logicalKey = `artifact-manifest/v1/${stepId}/${artifactId}/1`;
+      const uri = `artifacts/v1/${projectId}/${runId}/${stepId}/${artifactId}/1/sha256/${digest}`;
+      const recordId = `artifact_${createHash('sha256')
+        .update(`${projectId}\0${runId}\0${logicalKey}`)
+        .digest('hex')}`;
+      await upgradeAdmin`
+        insert into projects (id, name, created_at, updated_at)
+        values (${projectId}, 'upgrade', '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z')
+      `;
+      await upgradeAdmin`
+        insert into workflow_runs (id, project_id, pipeline, status, created_at, updated_at)
+        values (${runId}, ${projectId}, 'upgrade', 'running', '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z')
+      `;
+      await upgradeAdmin`
+        insert into artifacts
+          (id, run_id, key, media_type, size_bytes, digest, uri, retention_class, created_at, cleanup_at)
+        values
+          (${recordId}, ${runId}, ${logicalKey}, 'text/plain', 4, ${digest}, ${uri}, 'working', '2026-08-17T00:00:00.000Z', '2026-08-18T00:00:00.000Z'),
+          ('legacy-row', ${runId}, 'legacy-report', null, null, 'legacy', null, null, '2026-08-17T00:00:00.000Z', '2026-08-18T00:00:00.000Z')
+      `;
+
+      const migration = readFileSync(
+        resolve(migrationDirectory, '0008_concerned_wither.sql'),
+        'utf8',
+      )
+        .replaceAll('"public".', `"${upgradeSchema}".`)
+        .split('--> statement-breakpoint');
+      for (const statement of migration)
+        if (statement.trim() !== '') await upgradeAdmin.unsafe(statement);
+
+      const upgradeRepository = new NeonDomainRepository(
+        drizzle(upgradeAdmin, { schema }) as never,
+      );
+      const manifest = createDomainArtifactManifestStore(upgradeRepository);
+      await expect(
+        manifest.get({ projectId, runId, stepId }, uri),
+      ).resolves.toMatchObject({ key: uri, digest });
+      await expect(
+        manifest.list({ scope: { projectId, runId, stepId }, limit: 10 }),
+      ).resolves.toMatchObject({ items: [{ key: uri }] });
+      await expect(
+        upgradeRepository.listArtifactsDueForCleanup(
+          isoTimestamp('2026-08-18T00:00:00.000001Z'),
+          10,
+        ),
+      ).resolves.toHaveLength(1);
+      await expect(
+        upgradeRepository.getArtifact(persistenceId('artifact', 'legacy-row')),
+      ).resolves.not.toHaveProperty('manifestVersion');
+    } finally {
+      await upgradeAdmin.end();
+      await admin.unsafe(`drop schema "${upgradeSchema}" cascade`);
+    }
+  }, 30_000);
 });

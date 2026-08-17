@@ -240,8 +240,9 @@ describe('Artifact MCP handler', () => {
     expect(list).toHaveBeenCalledTimes(1);
     const replay = await invoke('one');
     expect(await replay.json()).toMatchObject({
-      result: { structuredContent: { page: { items: [] } } },
+      error: { code: -32002 },
     });
+    expect(list).toHaveBeenCalledTimes(1);
   });
 
   it('conforms through the exact-pinned official MCP client', async () => {

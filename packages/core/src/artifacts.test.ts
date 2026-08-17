@@ -147,7 +147,7 @@ describe('artifact contracts', () => {
     ).toThrow(/large/i);
   });
 
-  it('limits short-lived source and session artifacts to 24 hours', () => {
+  it('leaves a cleanup safety margin inside the 24-hour short-lived limit', () => {
     for (const retentionClass of [
       'source-bundle',
       'cloud-session-upload',
@@ -163,7 +163,21 @@ describe('artifact contracts', () => {
         },
         new Date('2026-08-17T00:00:00.000Z'),
       );
-      expect(artifact.expiresAt).toBe('2026-08-18T00:00:00.000Z');
+      expect(artifact.expiresAt).toBe('2026-08-17T23:45:00.000Z');
+      expect(
+        prepareArtifactPut(
+          {
+            scope,
+            artifactId: 'explicit-max',
+            version: 1,
+            bytes,
+            mediaType: 'application/octet-stream',
+            retentionClass,
+            expiresAt: '2026-08-18T00:00:00.000Z',
+          },
+          new Date('2026-08-17T00:00:00.000Z'),
+        ).expiresAt,
+      ).toBe('2026-08-18T00:00:00.000Z');
     }
   });
 

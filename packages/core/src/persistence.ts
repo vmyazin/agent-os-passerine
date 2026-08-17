@@ -329,7 +329,39 @@ export interface ArtifactRecord {
   readonly cleanupAt?: IsoTimestamp;
   readonly deletedAt?: IsoTimestamp;
   readonly deletionReason?: string;
+  readonly deletionState?: 'active' | 'pending' | 'deleted';
+  readonly deletionRequestedAt?: IsoTimestamp;
+  readonly writeLeaseId?: string;
+  readonly writeLeaseExpiresAt?: IsoTimestamp;
   readonly manifestVersion?: 'artifact-manifest-v1';
+}
+
+export interface ArtifactWriteClaimRequest {
+  readonly artifact: ArtifactRecord;
+  readonly leaseId: string;
+  readonly now: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
+}
+
+export interface ArtifactDeletionReservationRequest {
+  readonly id: ArtifactId;
+  readonly runId: WorkflowRunId;
+  readonly logicalKey: string;
+  readonly uri: string;
+  readonly digest: string;
+  readonly now: IsoTimestamp;
+  readonly requestedAt: IsoTimestamp;
+  readonly reason: string;
+}
+
+export interface ArtifactDeletionFinalizationRequest {
+  readonly id: ArtifactId;
+  readonly runId: WorkflowRunId;
+  readonly logicalKey: string;
+  readonly uri: string;
+  readonly digest: string;
+  readonly deletedAt: IsoTimestamp;
+  readonly reason: string;
 }
 
 /** Atomic, durable admission request for one capability-scoped MCP operation. */
@@ -499,6 +531,10 @@ export interface DomainRepository {
 
   createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord>;
   claimArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord>;
+  claimArtifactForWrite(
+    request: ArtifactWriteClaimRequest,
+  ): Promise<ArtifactRecord>;
+  releaseArtifactWriteLease(id: ArtifactId, leaseId: string): Promise<void>;
   getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined>;
   getArtifactByRunKey(
     runId: WorkflowRunId,
@@ -514,15 +550,19 @@ export interface DomainRepository {
     before: IsoTimestamp,
     limit: number,
   ): Promise<readonly ArtifactRecord[]>;
-  markArtifactDeleted(
-    id: ArtifactId,
-    deletedAt: IsoTimestamp,
-    reason: string,
+  reserveArtifactDeletion(
+    request: ArtifactDeletionReservationRequest,
+  ): Promise<ArtifactRecord | undefined>;
+  finalizeArtifactDeletion(
+    request: ArtifactDeletionFinalizationRequest,
   ): Promise<ArtifactRecord>;
   consumeArtifactCapabilityQuota(
     request: ArtifactCapabilityQuotaRequest,
   ): Promise<ArtifactCapabilityQuotaResult>;
   claimArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean>;
+  renewArtifactCleanupLease(
     request: ArtifactCleanupLeaseRequest,
   ): Promise<boolean>;
   listArtifacts(

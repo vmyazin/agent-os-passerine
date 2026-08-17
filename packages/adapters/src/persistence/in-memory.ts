@@ -12,8 +12,11 @@ import type {
   ArtifactCapabilityQuotaRequest,
   ArtifactCapabilityQuotaResult,
   ArtifactCleanupLeaseRequest,
+  ArtifactDeletionFinalizationRequest,
+  ArtifactDeletionReservationRequest,
   ArtifactId,
   ArtifactRecord,
+  ArtifactWriteClaimRequest,
   ConfigRevision,
   ConfigRevisionDraft,
   ConfigRevisionPrecondition,
@@ -211,6 +214,25 @@ function validateArtifactQuotaRequest(
   isoTimestamp(request.now);
 }
 
+function immutableArtifactMatches(
+  existing: ArtifactRecord,
+  requested: ArtifactRecord,
+): boolean {
+  return (
+    existing.id === requested.id &&
+    existing.runId === requested.runId &&
+    existing.key === requested.key &&
+    existing.uri === requested.uri &&
+    existing.digest === requested.digest &&
+    existing.mediaType === requested.mediaType &&
+    existing.sizeBytes === requested.sizeBytes &&
+    existing.retentionClass === requested.retentionClass &&
+    existing.createdAt === requested.createdAt &&
+    existing.cleanupAt === requested.cleanupAt &&
+    existing.manifestVersion === requested.manifestVersion
+  );
+}
+
 export class InMemoryDomainRepository implements DomainRepository {
   readonly #projects = new Map<string, Project>();
   readonly #configRevisions = new Map<string, ConfigRevision>();
@@ -236,7 +258,6 @@ export class InMemoryDomainRepository implements DomainRepository {
       expiresAt: string;
       calls: number;
       cumulativeBytes: number;
-      operationIds: Set<string>;
     }
   >();
   #artifactCleanupLease:
@@ -994,6 +1015,67 @@ export class InMemoryDomainRepository implements DomainRepository {
     return created;
   }
 
+  async claimArtifactForWrite(
+    request: ArtifactWriteClaimRequest,
+  ): Promise<ArtifactRecord> {
+    const { artifact } = request;
+    requireEntry(this.#runs, artifact.runId, 'Run');
+    assertValidArtifact(artifact);
+    if (
+      request.leaseId.trim() === '' ||
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+        isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('artifact write lease is invalid');
+    const key = `${artifact.runId}\u0000${artifact.key}`;
+    const existingId = this.#artifactKeys.get(key);
+    if (existingId === undefined) {
+      const created = insertUnique(
+        this.#artifacts,
+        artifact.id,
+        {
+          ...artifact,
+          deletionState: 'active',
+          writeLeaseId: request.leaseId,
+          writeLeaseExpiresAt: request.expiresAt,
+        },
+        'Artifact',
+      );
+      this.#artifactKeys.set(key, artifact.id);
+      return created;
+    }
+    const existing = this.#artifacts.get(existingId)!;
+    if (
+      !immutableArtifactMatches(existing, artifact) ||
+      existing.deletionState !== 'active' ||
+      (existing.writeLeaseId !== undefined &&
+        existing.writeLeaseId !== request.leaseId &&
+        existing.writeLeaseExpiresAt !== undefined &&
+        isoTimestampEpochMicroseconds(existing.writeLeaseExpiresAt) >
+          isoTimestampEpochMicroseconds(request.now))
+    )
+      return copy(existing);
+    const updated = {
+      ...existing,
+      writeLeaseId: request.leaseId,
+      writeLeaseExpiresAt: request.expiresAt,
+    };
+    this.#artifacts.set(existing.id, copy(updated));
+    return copy(updated);
+  }
+
+  async releaseArtifactWriteLease(
+    id: ArtifactId,
+    leaseId: string,
+  ): Promise<void> {
+    const existing = requireEntry(this.#artifacts, id, 'Artifact');
+    if (existing.writeLeaseId !== leaseId) return;
+    const updated = { ...existing };
+    delete updated.writeLeaseId;
+    delete updated.writeLeaseExpiresAt;
+    this.#artifacts.set(id, copy(updated));
+  }
+
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
     const value = this.#artifacts.get(id);
     return value === undefined ? undefined : copy(value);
@@ -1020,6 +1102,8 @@ export class InMemoryDomainRepository implements DomainRepository {
           (artifact) =>
             artifact.runId === runId &&
             artifact.deletedAt === undefined &&
+            artifact.manifestVersion === 'artifact-manifest-v1' &&
+            artifact.deletionState === 'active' &&
             artifact.key.startsWith(keyPrefix) &&
             (afterKey === undefined ||
               compareOpaqueText(artifact.key, afterKey) > 0),
@@ -1040,6 +1124,8 @@ export class InMemoryDomainRepository implements DomainRepository {
           (artifact) =>
             artifact.manifestVersion === 'artifact-manifest-v1' &&
             artifact.deletedAt === undefined &&
+            (artifact.deletionState === 'active' ||
+              artifact.deletionState === 'pending') &&
             artifact.cleanupAt !== undefined &&
             isoTimestampEpochMicroseconds(artifact.cleanupAt) <= cutoff,
         )
@@ -1055,15 +1141,59 @@ export class InMemoryDomainRepository implements DomainRepository {
     );
   }
 
-  async markArtifactDeleted(
-    id: ArtifactId,
-    deletedAt: import('@agentos/core').IsoTimestamp,
-    reason: string,
+  async reserveArtifactDeletion(
+    request: ArtifactDeletionReservationRequest,
+  ): Promise<ArtifactRecord | undefined> {
+    const existing = this.#artifacts.get(request.id);
+    if (
+      existing === undefined ||
+      existing.runId !== request.runId ||
+      existing.key !== request.logicalKey ||
+      existing.uri !== request.uri ||
+      existing.digest !== request.digest ||
+      existing.manifestVersion !== 'artifact-manifest-v1' ||
+      existing.deletionState === 'deleted' ||
+      existing.deletedAt !== undefined ||
+      (existing.writeLeaseId !== undefined &&
+        existing.writeLeaseExpiresAt !== undefined &&
+        isoTimestampEpochMicroseconds(existing.writeLeaseExpiresAt) >
+          isoTimestampEpochMicroseconds(request.now))
+    )
+      return undefined;
+    if (existing.deletionState === 'pending') return copy(existing);
+    if (existing.deletionState !== 'active') return undefined;
+    const updated = {
+      ...existing,
+      deletionState: 'pending' as const,
+      deletionRequestedAt: request.requestedAt,
+      deletionReason: request.reason,
+    };
+    this.#artifacts.set(existing.id, copy(updated));
+    return copy(updated);
+  }
+
+  async finalizeArtifactDeletion(
+    request: ArtifactDeletionFinalizationRequest,
   ): Promise<ArtifactRecord> {
-    const existing = requireEntry(this.#artifacts, id, 'Artifact');
-    if (existing.deletedAt !== undefined) return copy(existing);
-    const updated = { ...existing, deletedAt, deletionReason: reason };
-    this.#artifacts.set(id, copy(updated));
+    const existing = requireEntry(this.#artifacts, request.id, 'Artifact');
+    if (
+      existing.runId !== request.runId ||
+      existing.key !== request.logicalKey ||
+      existing.uri !== request.uri ||
+      existing.digest !== request.digest ||
+      existing.manifestVersion !== 'artifact-manifest-v1'
+    )
+      throw new Error('Artifact deletion identity does not match');
+    if (existing.deletionState === 'deleted') return copy(existing);
+    if (existing.deletionState !== 'pending')
+      throw new Error('Artifact deletion was not reserved');
+    const updated = {
+      ...existing,
+      deletionState: 'deleted' as const,
+      deletedAt: request.deletedAt,
+      deletionReason: existing.deletionReason ?? request.reason,
+    };
+    this.#artifacts.set(existing.id, copy(updated));
     return copy(updated);
   }
 
@@ -1094,7 +1224,6 @@ export class InMemoryDomainRepository implements DomainRepository {
         expiresAt: request.expiresAt,
         calls: 1,
         cumulativeBytes: request.bytes,
-        operationIds: new Set([request.operationId]),
       });
       return {
         allowed: true,
@@ -1114,13 +1243,6 @@ export class InMemoryDomainRepository implements DomainRepository {
         calls: existing.calls,
         cumulativeBytes: existing.cumulativeBytes,
       };
-    if (existing.operationIds.has(request.operationId))
-      return {
-        allowed: true,
-        replayed: true,
-        calls: existing.calls,
-        cumulativeBytes: existing.cumulativeBytes,
-      };
     if (
       existing.calls >= request.maxCalls ||
       existing.cumulativeBytes + request.bytes > request.maxCumulativeBytes
@@ -1133,7 +1255,6 @@ export class InMemoryDomainRepository implements DomainRepository {
       };
     existing.calls += 1;
     existing.cumulativeBytes += request.bytes;
-    existing.operationIds.add(request.operationId);
     return {
       allowed: true,
       replayed: false,
@@ -1155,6 +1276,29 @@ export class InMemoryDomainRepository implements DomainRepository {
     if (
       this.#artifactCleanupLease !== undefined &&
       isoTimestampEpochMicroseconds(this.#artifactCleanupLease.expiresAt) >
+        isoTimestampEpochMicroseconds(request.now)
+    )
+      return false;
+    this.#artifactCleanupLease = {
+      owner: request.owner,
+      expiresAt: request.expiresAt,
+    };
+    return true;
+  }
+
+  async renewArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean> {
+    if (request.owner.trim() === '' || request.owner.length > 256)
+      throw new TypeError('cleanup lease owner is invalid');
+    if (
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+      isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('cleanup lease expiry must be after now');
+    if (
+      this.#artifactCleanupLease?.owner !== request.owner ||
+      isoTimestampEpochMicroseconds(this.#artifactCleanupLease.expiresAt) <=
         isoTimestampEpochMicroseconds(request.now)
     )
       return false;

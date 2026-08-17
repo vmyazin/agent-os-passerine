@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   ArtifactValidationError,
@@ -78,33 +78,43 @@ export function createInMemoryArtifactStorage(
           ? {}
           : { maxBytes: options.maxBytes }),
       });
-      const claimed = await manifest.claim(metadata(prepared));
-      if (claimed.key !== prepared.key)
-        throw new ArtifactStoreAdapterError(
-          'artifact_conflict',
-          'artifact version already exists with different content',
-          409,
-        );
-      const existing = values.get(prepared.key);
-      if (existing !== undefined) {
-        if (
-          existing.metadata.mediaType !== prepared.mediaType ||
-          existing.metadata.retentionClass !== prepared.retentionClass ||
-          existing.metadata.digest !== prepared.digest
-        )
+      const leaseId = randomUUID();
+      const leaseNow = now();
+      const claimed = await manifest.beginWrite(metadata(prepared), {
+        leaseId,
+        now: leaseNow.toISOString(),
+        expiresAt: new Date(leaseNow.getTime() + 120_000).toISOString(),
+      });
+      try {
+        if (claimed.key !== prepared.key)
           throw new ArtifactStoreAdapterError(
             'artifact_conflict',
-            'artifact key already exists with different metadata',
+            'artifact version already exists with different content',
             409,
           );
-        return existing.metadata;
+        const existing = values.get(prepared.key);
+        if (existing !== undefined) {
+          if (
+            existing.metadata.mediaType !== prepared.mediaType ||
+            existing.metadata.retentionClass !== prepared.retentionClass ||
+            existing.metadata.digest !== prepared.digest
+          )
+            throw new ArtifactStoreAdapterError(
+              'artifact_conflict',
+              'artifact key already exists with different metadata',
+              409,
+            );
+          return existing.metadata;
+        }
+        const stored = {
+          metadata: metadata(prepared),
+          bytes: Uint8Array.from(prepared.bytes),
+        };
+        values.set(prepared.key, stored);
+        return stored.metadata;
+      } finally {
+        await manifest.finishWrite(claimed, leaseId);
       }
-      const stored = {
-        metadata: metadata(prepared),
-        bytes: Uint8Array.from(prepared.bytes),
-      };
-      values.set(prepared.key, stored);
-      return stored.metadata;
     },
     async get(request: ArtifactGetRequest) {
       let inScope: boolean;
@@ -175,16 +185,23 @@ export function createInMemoryArtifactStorage(
   const admin: ArtifactAdminStore = Object.freeze({
     async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
       const parts = parseArtifactKey(key);
-      const expected = await manifest.get(parts, key);
-      if (expected === undefined) return false;
-      const removed = values.delete(key);
-      if (!removed) return false;
-      await manifest.markDeleted(expected, {
+      const reservationTime = now().toISOString();
+      const deletedAt = audit?.deletedAt ?? reservationTime;
+      const deletionAudit = {
         key,
-        deletedAt: audit?.deletedAt ?? now().toISOString(),
+        deletedAt,
         reason: audit?.reason ?? 'control_plane_delete',
-      });
-      return removed;
+      };
+      const expected = await manifest.reserveDeletion(
+        parts,
+        key,
+        deletionAudit,
+        reservationTime,
+      );
+      if (expected === undefined) return false;
+      values.delete(key);
+      await manifest.finalizeDeletion(expected, deletionAudit);
+      return true;
     },
   });
   return Object.freeze({ store, admin, manifest });

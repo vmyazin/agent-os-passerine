@@ -571,6 +571,21 @@ describe('NeonDomainRepository', () => {
     expect(conflict.execute).toHaveBeenCalledTimes(1);
   });
 
+  it('conditionally inserts the first artifact quota consumption', () => {
+    const quota = source.slice(
+      source.indexOf('async consumeArtifactCapabilityQuota'),
+      source.indexOf('async claimArtifactCleanupLease'),
+    );
+    expect(quota).toMatch(
+      /insert into "artifact_capability_quotas"[\s\S]*select/,
+    );
+    expect(quota).toMatch(
+      /request\.bytes\} <= \$\{request\.maxCumulativeBytes/,
+    );
+    expect(quota).not.toContain('operation_ids');
+    expect(quota).not.toContain('replayed"');
+  });
+
   it('rejects usage replays that differ below millisecond precision', async () => {
     const usage = {
       idempotencyId: persistenceId('usage', 'usage-precise'),

@@ -16,6 +16,7 @@ import {
   type ArtifactMetadata,
   type ArtifactRecord,
   type ArtifactScope,
+  type ArtifactWriteLease,
   type DomainRepository,
 } from '@agentos/core';
 
@@ -97,7 +98,8 @@ function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
     record.mediaType === undefined ||
     record.sizeBytes === undefined ||
     record.cleanupAt === undefined ||
-    record.retentionClass === undefined
+    record.retentionClass === undefined ||
+    !['active', 'pending', 'deleted'].includes(record.deletionState ?? '')
   )
     throw new ArtifactStoreAdapterError(
       'artifact_integrity_error',
@@ -142,6 +144,7 @@ function recordFromMetadata(metadata: ArtifactMetadata): ArtifactRecord {
     createdAt: isoTimestamp(metadata.createdAt),
     cleanupAt: isoTimestamp(metadata.expiresAt),
     manifestVersion: 'artifact-manifest-v1',
+    deletionState: 'active',
   };
 }
 
@@ -178,10 +181,47 @@ export function createDomainArtifactManifestStore(
       const record = await repository.claimArtifact(
         recordFromMetadata(metadata),
       );
-      if (record.deletedAt !== undefined) throw deleted();
+      if (
+        record.deletedAt !== undefined ||
+        record.deletionState === 'pending' ||
+        record.deletionState === 'deleted'
+      )
+        throw deleted();
       const claimed = metadataFromRecord(record);
       if (!equivalent(claimed, metadata)) throw conflict();
       return claimed;
+    },
+    async beginWrite(input: ArtifactMetadata, lease: ArtifactWriteLease) {
+      const metadata = validateArtifactMetadata(input);
+      const run = await repository.getRun(persistenceId('run', metadata.runId));
+      if (run === undefined || run.projectId !== metadata.projectId)
+        throw new ArtifactStoreAdapterError(
+          'artifact_scope_denied',
+          'artifact run is outside the requested project',
+          403,
+        );
+      const record = await repository.claimArtifactForWrite({
+        artifact: recordFromMetadata(metadata),
+        leaseId: lease.leaseId,
+        now: isoTimestamp(lease.now),
+        expiresAt: isoTimestamp(lease.expiresAt),
+      });
+      if (
+        record.deletedAt !== undefined ||
+        record.deletionState === 'pending' ||
+        record.deletionState === 'deleted'
+      )
+        throw deleted();
+      const claimed = metadataFromRecord(record);
+      if (!equivalent(claimed, metadata)) throw conflict();
+      if (record.writeLeaseId !== lease.leaseId) throw conflict();
+      return claimed;
+    },
+    async finishWrite(expected: ArtifactMetadata, leaseId: string) {
+      await repository.releaseArtifactWriteLease(
+        persistenceId('artifact', recordId(expected)),
+        leaseId,
+      );
     },
     async get(scope: ArtifactScope, key: string) {
       const normalized = normalizeArtifactScope(scope);
@@ -196,7 +236,12 @@ export function createDomainArtifactManifestStore(
         persistenceId('run', normalized.runId),
         artifactLogicalKey(parts),
       );
-      if (record === undefined || record.deletedAt !== undefined)
+      if (
+        record === undefined ||
+        record.deletedAt !== undefined ||
+        record.deletionState === 'pending' ||
+        record.deletionState === 'deleted'
+      )
         return undefined;
       const metadata = metadataFromRecord(record);
       if (
@@ -258,7 +303,45 @@ export function createDomainArtifactManifestStore(
       }
       return Object.freeze({ items: Object.freeze(items), invalidCount });
     },
-    async markDeleted(
+    async reserveDeletion(
+      scope: ArtifactScope,
+      key: string,
+      audit: ArtifactDeletionAudit,
+      reservationTime: string,
+    ) {
+      const normalized = normalizeArtifactScope(scope);
+      if (audit.key !== key || !artifactKeyMatchesScope(key, normalized))
+        throw new ArtifactStoreAdapterError(
+          'artifact_integrity_error',
+          'artifact deletion target failed integrity verification',
+          409,
+        );
+      const parts = parseArtifactKey(key);
+      const record = await repository.getArtifactByRunKey(
+        persistenceId('run', normalized.runId),
+        artifactLogicalKey(parts),
+      );
+      if (record === undefined || record.deletionState === 'deleted')
+        return undefined;
+      const actual = metadataFromRecord(record);
+      if (actual.key !== key) return undefined;
+      if (!artifactKeyMatchesScope(actual.key, normalized)) throw conflict();
+      const reserved = await repository.reserveArtifactDeletion({
+        id: record.id,
+        runId: record.runId,
+        logicalKey: record.key,
+        uri: actual.key,
+        digest: actual.digest,
+        now: isoTimestamp(reservationTime),
+        requestedAt: isoTimestamp(reservationTime),
+        reason: audit.reason,
+      });
+      if (reserved === undefined) return undefined;
+      const reservedMetadata = metadataFromRecord(reserved);
+      if (!exactlyEquivalent(reservedMetadata, actual)) throw conflict();
+      return reservedMetadata;
+    },
+    async finalizeDeletion(
       expected: ArtifactMetadata,
       audit: ArtifactDeletionAudit,
     ) {
@@ -276,11 +359,15 @@ export function createDomainArtifactManifestStore(
       if (record === undefined) return;
       const actual = metadataFromRecord(record);
       if (!exactlyEquivalent(actual, expected)) throw conflict();
-      await repository.markArtifactDeleted(
-        record.id,
-        isoTimestamp(audit.deletedAt),
-        audit.reason,
-      );
+      await repository.finalizeArtifactDeletion({
+        id: record.id,
+        runId: record.runId,
+        logicalKey: record.key,
+        uri: actual.key,
+        digest: actual.digest,
+        deletedAt: isoTimestamp(audit.deletedAt),
+        reason: audit.reason,
+      });
     },
   });
 }
@@ -288,13 +375,15 @@ export function createDomainArtifactManifestStore(
 export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
   const values = new Map<string, ArtifactMetadata>();
   const tombstones = new Set<string>();
+  const pending = new Set<string>();
+  const writeLeases = new Map<string, ArtifactWriteLease>();
   const identity = (metadata: ArtifactMetadata) =>
     `${metadata.projectId}\0${metadata.runId}\0${logicalKey(metadata)}`;
   return Object.freeze({
     async claim(input: ArtifactMetadata) {
       const metadata = validateArtifactMetadata(input);
       const id = identity(metadata);
-      if (tombstones.has(id)) throw deleted();
+      if (tombstones.has(id) || pending.has(id)) throw deleted();
       const existing = values.get(id);
       if (existing !== undefined) {
         if (!equivalent(existing, metadata)) throw conflict();
@@ -303,6 +392,29 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       const stored = metadataOnly(metadata);
       values.set(id, stored);
       return stored;
+    },
+    async beginWrite(input: ArtifactMetadata, lease: ArtifactWriteLease) {
+      const metadata = validateArtifactMetadata(input);
+      const id = identity(metadata);
+      if (tombstones.has(id) || pending.has(id)) throw deleted();
+      const currentLease = writeLeases.get(id);
+      if (
+        currentLease !== undefined &&
+        currentLease.leaseId !== lease.leaseId &&
+        currentLease.expiresAt > lease.now
+      )
+        throw conflict();
+      const existing = values.get(id);
+      if (existing !== undefined && !equivalent(existing, metadata))
+        throw conflict();
+      const stored = existing ?? metadataOnly(metadata);
+      values.set(id, stored);
+      writeLeases.set(id, Object.freeze({ ...lease }));
+      return stored;
+    },
+    async finishWrite(expected: ArtifactMetadata, leaseId: string) {
+      const id = identity(expected);
+      if (writeLeases.get(id)?.leaseId === leaseId) writeLeases.delete(id);
     },
     async get(scope: ArtifactScope, key: string) {
       if (!artifactKeyMatchesScope(key, scope))
@@ -315,7 +427,11 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       const value = values.get(
         `${parts.projectId}\0${parts.runId}\0${artifactLogicalKey(parts)}`,
       );
-      if (value === undefined || tombstones.has(identity(value)))
+      if (
+        value === undefined ||
+        tombstones.has(identity(value)) ||
+        pending.has(identity(value))
+      )
         return undefined;
       return value.key === key ? value : undefined;
     },
@@ -326,6 +442,7 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
         .filter(
           (metadata) =>
             !tombstones.has(identity(metadata)) &&
+            !pending.has(identity(metadata)) &&
             metadata.projectId === normalized.projectId &&
             metadata.runId === normalized.runId &&
             metadata.stepId === normalized.stepId &&
@@ -360,7 +477,26 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
         invalidCount: 0,
       });
     },
-    async markDeleted(
+    async reserveDeletion(
+      scope: ArtifactScope,
+      key: string,
+      audit: ArtifactDeletionAudit,
+      reservationTime: string,
+    ) {
+      if (audit.key !== key || !artifactKeyMatchesScope(key, scope))
+        throw conflict();
+      const parts = parseArtifactKey(key);
+      const id = `${parts.projectId}\0${parts.runId}\0${artifactLogicalKey(parts)}`;
+      if (tombstones.has(id)) return undefined;
+      const existing = values.get(id);
+      if (existing === undefined || existing.key !== key) return undefined;
+      const lease = writeLeases.get(id);
+      if (lease !== undefined && lease.expiresAt > reservationTime)
+        return undefined;
+      pending.add(id);
+      return existing;
+    },
+    async finalizeDeletion(
       expected: ArtifactMetadata,
       audit: ArtifactDeletionAudit,
     ) {
@@ -368,6 +504,8 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       const existing = values.get(identity(expected));
       if (existing === undefined || !exactlyEquivalent(existing, expected))
         throw conflict();
+      if (!pending.has(identity(expected))) throw conflict();
+      pending.delete(identity(expected));
       tombstones.add(identity(expected));
     },
   });
@@ -384,26 +522,36 @@ export async function cleanupExpiredArtifacts(options: {
   readonly admin: ArtifactAdminStore;
   readonly now: Date;
   readonly limit?: number;
+  readonly concurrency?: number;
 }): Promise<ArtifactRetentionCleanupResult> {
   const limit = options.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
     throw new Error('Artifact cleanup limit is invalid');
+  const concurrency = options.concurrency ?? 4;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8)
+    throw new Error('Artifact cleanup concurrency is invalid');
   const deletedAt = options.now.toISOString();
   const expired = await options.manifest.listExpired(deletedAt, limit);
   let deleted = 0;
   let failed = expired.invalidCount;
-  for (const metadata of expired.items) {
-    try {
-      if (
-        await options.admin.delete(metadata.key, {
-          deletedAt,
-          reason: 'retention_expired',
-        })
-      )
-        deleted += 1;
+  for (let offset = 0; offset < expired.items.length; offset += concurrency) {
+    const results = await Promise.all(
+      expired.items
+        .slice(offset, offset + concurrency)
+        .map(async (metadata) => {
+          try {
+            return await options.admin.delete(metadata.key, {
+              deletedAt,
+              reason: 'retention_expired',
+            });
+          } catch {
+            return false;
+          }
+        }),
+    );
+    for (const removed of results) {
+      if (removed) deleted += 1;
       else failed += 1;
-    } catch {
-      failed += 1;
     }
   }
   return Object.freeze({

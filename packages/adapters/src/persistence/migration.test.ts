@@ -10,6 +10,10 @@ const migration = readdirSync(migrationDirectory)
   .map((name) => readFileSync(resolve(migrationDirectory, name), 'utf8'))
   .join('\n')
   .toLowerCase();
+const artifactMigration = readFileSync(
+  resolve(migrationDirectory, '0008_concerned_wither.sql'),
+  'utf8',
+).toLowerCase();
 
 describe('domain persistence migration', () => {
   it.each([
@@ -71,10 +75,35 @@ describe('domain persistence migration', () => {
 
   it('persists manifest discrimination, capability budgets, and cleanup leases', () => {
     expect(migration).toContain('"manifest_version" text');
+    expect(migration).toContain('"deletion_state" text');
+    expect(migration).toContain('"write_lease_id" text');
     expect(migration).toContain('primary key("purpose","audience","nonce")');
-    expect(migration).toContain('"operation_ids" text[] not null');
     expect(migration).toContain(
       '"expires_at" timestamp with time zone not null',
+    );
+  });
+
+  it('backfills only structurally valid v1 artifact manifest rows', () => {
+    expect(artifactMigration).toContain('update "artifacts" as "artifact"');
+    expect(artifactMigration).toContain('from "workflow_runs" as "run"');
+    expect(artifactMigration).toContain(
+      `set "manifest_version" = 'artifact-manifest-v1',`,
+    );
+    expect(artifactMigration).toContain(
+      `when "artifact"."deleted_at" is null then 'active'`,
+    );
+    expect(artifactMigration).toContain(
+      `"artifact"."key" like 'artifact-manifest/v1/%'`,
+    );
+    expect(artifactMigration).toContain('"artifact"."uri" =');
+    expect(artifactMigration).toContain(
+      '"artifact"."media_type" = lower(btrim("artifact"."media_type"))',
+    );
+    expect(artifactMigration).toContain(
+      '"artifact"."cleanup_at" > "artifact"."created_at"',
+    );
+    expect(artifactMigration).toContain(
+      '"artifact"."digest" = split_part("artifact"."uri", \'/\', 9)',
     );
   });
 

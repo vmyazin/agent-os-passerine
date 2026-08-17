@@ -9,7 +9,9 @@ cumulative-byte ledger across serverless cold starts.
 
 Postgres is the authoritative logical-version manifest. One
 `(project, run, step, artifact, version)` tuple can bind to only one immutable
-digest and metadata record. Deleted versions remain tombstoned. R2 object names
+digest and metadata record. Writes take a short durable manifest lease; deletes
+atomically reserve the exact row as pending before touching R2. Failed deletes
+remain retryable, and finalized versions remain tombstoned. R2 object names
 remain content-addressed, and all collision reconciliation re-reads bounded
 object bytes and recomputes SHA-256; ETags and provider checksums are never used
 as application content identity.
@@ -20,11 +22,13 @@ checksum calculation are set to `WHEN_REQUIRED`: R2 does not accept the SDK's
 optional full-object `ChecksumSHA256` request shape, while SigV4 still protects
 transport and Agent OS verifies its own SHA-256 before and after storage.
 
-Agent-facing R2 credentials are bucket-scoped to read/write only. The hourly
-Vercel cron uses `CRON_SECRET`, a Postgres lease, and separate control-plane R2
-delete credentials. It deletes source bundles and cloud-session uploads within
-24 hours and working artifacts after 30 days, recording the deletion reason and
-timestamp in the manifest. Legacy artifact rows without the
+Agent-facing R2 credentials are bucket-scoped to read/write only. The ten-minute
+Vercel cron uses `CRON_SECRET`, an owner-checked Postgres lease renewed between
+bounded 25-item pages, and separate control-plane R2 delete credentials. The
+runtime rejects identical agent/admin access-key IDs. Source bundles and
+cloud-session uploads expire at 23 hours 45 minutes, leaving a cleanup safety
+margin inside the 24-hour requirement; working artifacts expire after 30 days.
+Each deletion records its reason and timestamp in the manifest. Legacy rows without the
 `artifact-manifest-v1` discriminator are excluded from retention scans. Audit
 metadata remains in Postgres after the object is removed.
 

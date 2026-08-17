@@ -3,7 +3,6 @@ import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigint,
-  boolean,
   check,
   customType,
   index,
@@ -396,6 +395,10 @@ export const artifacts = pgTable(
     cleanupAt: instant('cleanup_at'),
     deletedAt: instant('deleted_at'),
     deletionReason: text('deletion_reason'),
+    deletionState: text('deletion_state'),
+    deletionRequestedAt: instant('deletion_requested_at'),
+    writeLeaseId: text('write_lease_id'),
+    writeLeaseExpiresAt: instant('write_lease_expires_at'),
     manifestVersion: text('manifest_version'),
   },
   (table) => [
@@ -411,7 +414,7 @@ export const artifacts = pgTable(
     index('artifacts_cleanup_idx')
       .on(table.cleanupAt)
       .where(
-        sql`${table.cleanupAt} is not null and ${table.deletedAt} is null and ${table.manifestVersion} = 'artifact-manifest-v1'`,
+        sql`${table.cleanupAt} is not null and ${table.deletedAt} is null and ${table.manifestVersion} = 'artifact-manifest-v1' and ${table.deletionState} in ('active', 'pending')`,
       ),
     index('artifacts_run_key_scan_idx').on(table.runId, bytewise(table.key)),
     index('artifacts_run_created_idx').on(
@@ -433,8 +436,6 @@ export const artifactCapabilityQuotas = pgTable(
     expiresAt: instant('expires_at').notNull(),
     calls: bigint('calls', { mode: 'number' }).notNull(),
     cumulativeBytes: bigint('cumulative_bytes', { mode: 'number' }).notNull(),
-    operationIds: text('operation_ids').array().notNull(),
-    lastOperationReplayed: boolean('last_operation_replayed').notNull(),
     updatedAt: instant('updated_at').notNull(),
   },
   (table) => [

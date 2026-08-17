@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('artifact retention schedule', () => {
-  it('declares an hourly durable production cron', () => {
+  it('declares a ten-minute durable production cron', () => {
     const path = resolve(process.cwd(), '../../vercel.json');
     expect(existsSync(path)).toBe(true);
     const config = existsSync(path)
@@ -14,7 +14,7 @@ describe('artifact retention schedule', () => {
       : {};
     expect(config.crons).toContainEqual({
       path: '/api/internal/artifacts/cleanup',
-      schedule: '17 * * * *',
+      schedule: '*/10 * * * *',
     });
   });
 });

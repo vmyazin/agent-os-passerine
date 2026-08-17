@@ -24,6 +24,12 @@ const RETENTION_MILLISECONDS = {
   'cloud-session-upload': 24 * 60 * 60 * 1_000,
   working: 30 * 24 * 60 * 60 * 1_000,
 } as const;
+const DEFAULT_RETENTION_MILLISECONDS = {
+  ...RETENTION_MILLISECONDS,
+  // Leave a 15-minute enforcement margin for the 10-minute cleanup schedule.
+  'source-bundle': (24 * 60 - 15) * 60 * 1_000,
+  'cloud-session-upload': (24 * 60 - 15) * 60 * 1_000,
+} as const;
 
 export type ArtifactRetentionClass = keyof typeof RETENTION_MILLISECONDS;
 
@@ -118,19 +124,36 @@ export interface ArtifactDeletionAudit {
   readonly reason: 'retention_expired' | 'control_plane_delete';
 }
 
+export interface ArtifactWriteLease {
+  readonly leaseId: string;
+  readonly now: string;
+  readonly expiresAt: string;
+}
+
 /**
  * Authoritative logical-version ledger. Implementations must atomically bind a
  * (project, run, step, artifact, version) tuple to one immutable metadata row.
  */
 export interface ArtifactManifestStore {
   claim(metadata: ArtifactMetadata): Promise<ArtifactMetadata>;
+  beginWrite(
+    metadata: ArtifactMetadata,
+    lease: ArtifactWriteLease,
+  ): Promise<ArtifactMetadata>;
+  finishWrite(expected: ArtifactMetadata, leaseId: string): Promise<void>;
   get(scope: ArtifactScope, key: string): Promise<ArtifactMetadata | undefined>;
   list(request: ArtifactManifestListRequest): Promise<ArtifactManifestListPage>;
   listExpired(
     before: string,
     limit: number,
   ): Promise<ArtifactExpiredManifestPage>;
-  markDeleted(
+  reserveDeletion(
+    scope: ArtifactScope,
+    key: string,
+    audit: ArtifactDeletionAudit,
+    reservationTime: string,
+  ): Promise<ArtifactMetadata | undefined>;
+  finalizeDeletion(
     expected: ArtifactMetadata,
     audit: ArtifactDeletionAudit,
   ): Promise<void>;
@@ -296,15 +319,16 @@ export function prepareArtifactPut(
   if (request.digest !== undefined && request.digest !== digest)
     throw new ArtifactValidationError('artifact digest does not match bytes');
   const retentionClass = request.retentionClass ?? 'working';
-  const retentionMs = RETENTION_MILLISECONDS[retentionClass];
-  if (retentionMs === undefined)
+  const retentionMaxMs = RETENTION_MILLISECONDS[retentionClass];
+  const defaultRetentionMs = DEFAULT_RETENTION_MILLISECONDS[retentionClass];
+  if (retentionMaxMs === undefined || defaultRetentionMs === undefined)
     throw new ArtifactValidationError('artifact retention class is invalid');
   const createdAt = new Date(now.getTime()).toISOString();
   const expiresAt = request.expiresAt
     ? timestamp(request.expiresAt, 'expiresAt')
-    : new Date(now.getTime() + retentionMs).toISOString();
+    : new Date(now.getTime() + defaultRetentionMs).toISOString();
   const expiresMs = Date.parse(expiresAt);
-  if (expiresMs <= now.getTime() || expiresMs > now.getTime() + retentionMs)
+  if (expiresMs <= now.getTime() || expiresMs > now.getTime() + retentionMaxMs)
     throw new ArtifactValidationError(
       `artifact retention exceeds ${retentionClass} maximum`,
     );

@@ -22,7 +22,7 @@ const claims: ArtifactCapabilityClaims = {
 };
 
 describe('domain artifact capability quota store', () => {
-  it('admits and replays an identical operation but denies a second call', async () => {
+  it('charges identical operations separately and denies the exact replay', async () => {
     const quota = createDomainArtifactCapabilityQuotaStore(
       new InMemoryDomainRepository(),
     );
@@ -31,9 +31,6 @@ describe('domain artifact capability quota store', () => {
     ).resolves.toBeUndefined();
     await expect(
       quota.consume(claims, { operationId: 'one', bytes: 0, now }),
-    ).resolves.toBeUndefined();
-    await expect(
-      quota.consume(claims, { operationId: 'two', bytes: 0, now }),
     ).rejects.toMatchObject({ code: 'artifact_quota_exhausted' });
   });
 });

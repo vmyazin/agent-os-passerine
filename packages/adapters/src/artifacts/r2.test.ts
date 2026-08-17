@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
@@ -24,6 +25,8 @@ class FakeR2Client implements R2SdkClient {
   failures = 0;
   raceOnPut = false;
   bodyFactory: (() => unknown) | undefined;
+  beforePut: (() => Promise<void>) | undefined;
+  beforeDelete: (() => Promise<void>) | undefined;
 
   async send(command: R2Command): Promise<Record<string, unknown>> {
     this.commands.push(command);
@@ -37,6 +40,7 @@ class FakeR2Client implements R2SdkClient {
     const key = String(input.Key ?? '');
     switch (command.kind) {
       case 'PutObject': {
+        await this.beforePut?.();
         const body = input.Body as Uint8Array;
         this.objects.set(key, {
           bytes: Uint8Array.from(body),
@@ -65,10 +69,19 @@ class FakeR2Client implements R2SdkClient {
         };
       }
       case 'DeleteObject':
+        await this.beforeDelete?.();
         this.objects.delete(key);
         return {};
     }
   }
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function fixture(client = new FakeR2Client()) {
@@ -86,6 +99,92 @@ function fixture(client = new FakeR2Client()) {
 artifactStoreContract('r2', () => fixture());
 
 describe('R2 artifact storage', () => {
+  it('reserves deletion before touching R2 so a concurrent put is rejected', async () => {
+    const result = fixture();
+    const input = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'reserved-delete',
+      version: 1,
+      bytes: new TextEncoder().encode('immutable'),
+      mediaType: 'text/plain',
+    } as const;
+    const stored = await result.store.put(input);
+    const started = deferred();
+    const release = deferred();
+    result.client.beforeDelete = async () => {
+      result.client.beforeDelete = undefined;
+      started.resolve();
+      await release.promise;
+    };
+    const deleting = result.admin.delete(stored.key);
+    await started.promise;
+    await expect(result.store.put(input)).rejects.toMatchObject({
+      code: 'artifact_deleted',
+    });
+    release.resolve();
+    await expect(deleting).resolves.toBe(true);
+  });
+
+  it('does not reserve deletion while a put holds the logical write lease', async () => {
+    const result = fixture();
+    const input = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'put-first',
+      version: 1,
+      bytes: new TextEncoder().encode('immutable'),
+      mediaType: 'text/plain',
+    } as const;
+    const started = deferred();
+    const release = deferred();
+    result.client.beforePut = async () => {
+      result.client.beforePut = undefined;
+      started.resolve();
+      await release.promise;
+    };
+    const putting = result.store.put(input);
+    await started.promise;
+    const key = `artifacts/v1/p/r/s/put-first/1/sha256/${createHash('sha256')
+      .update(input.bytes)
+      .digest('hex')}`;
+    await expect(
+      result.admin.delete(key, {
+        deletedAt: '2099-01-01T00:00:00.000Z',
+        reason: 'control_plane_delete',
+      }),
+    ).resolves.toBe(false);
+    release.resolve();
+    await expect(putting).resolves.toMatchObject({ key });
+    await expect(result.admin.delete(key)).resolves.toBe(true);
+    await expect(
+      result.store.get({ scope: input.scope, key }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('keeps a failed blob deletion pending and converges on retry', async () => {
+    const result = fixture();
+    const input = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'retry-delete',
+      version: 1,
+      bytes: new TextEncoder().encode('immutable'),
+      mediaType: 'text/plain',
+    } as const;
+    const stored = await result.store.put(input);
+    result.client.failures = 3;
+    await expect(result.admin.delete(stored.key)).rejects.toMatchObject({
+      code: 'artifact_store_unavailable',
+    });
+    await expect(result.store.put(input)).rejects.toMatchObject({
+      code: 'artifact_deleted',
+    });
+    result.client.failures = 0;
+    await expect(result.admin.delete(stored.key)).resolves.toBe(true);
+    await expect(
+      result.store.get({ scope: input.scope, key: stored.key }),
+    ).resolves.toBeUndefined();
+    expect((await result.store.list({ scope: input.scope })).items).toEqual([]);
+  });
+
   it('fails closed on invalid Cloudflare R2 configuration', async () => {
     const { createR2ArtifactStore } = await import('./r2.js');
     expect(() =>
@@ -304,9 +403,9 @@ describe('R2 artifact storage', () => {
     let scannedKey: string | undefined;
     const manifest: typeof base = {
       ...base,
-      async claim(metadata) {
+      async beginWrite(metadata, lease) {
         scannedKey = metadata.key;
-        return base.claim(metadata);
+        return base.beginWrite(metadata, lease);
       },
       async list(request) {
         if (request.after === undefined && scannedKey !== undefined)

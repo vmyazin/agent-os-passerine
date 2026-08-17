@@ -13,6 +13,8 @@ export interface ArtifactRetentionCleanupJobOptions {
   readonly owner: string;
   readonly now: Date;
   readonly limit?: number;
+  readonly clock?: () => Date;
+  readonly timeBudgetMs?: number;
 }
 
 export interface ArtifactRetentionCleanupJobResult {
@@ -32,11 +34,37 @@ export async function runArtifactRetentionCleanup(
     expiresAt: isoTimestamp(expiresAt.toISOString()),
   });
   if (!leased) return { skipped: true, inspected: 0, deleted: 0, failed: 0 };
-  const result = await cleanupExpiredArtifacts({
-    manifest: options.manifest,
-    admin: options.admin,
-    now: options.now,
-    ...(options.limit === undefined ? {} : { limit: options.limit }),
-  });
-  return { skipped: false, ...result };
+  const limit = options.limit ?? 25;
+  const clock = options.clock ?? (() => new Date());
+  const deadline = options.now.getTime() + (options.timeBudgetMs ?? 4 * 60_000);
+  let inspected = 0;
+  let deleted = 0;
+  let failed = 0;
+  let firstBatch = true;
+  while (firstBatch || clock().getTime() < deadline) {
+    if (!firstBatch) {
+      const heartbeatAt = clock();
+      const renewed = await options.repository.renewArtifactCleanupLease({
+        owner: options.owner,
+        now: isoTimestamp(heartbeatAt.toISOString()),
+        expiresAt: isoTimestamp(
+          new Date(heartbeatAt.getTime() + 5 * 60_000).toISOString(),
+        ),
+      });
+      if (!renewed) break;
+    }
+    firstBatch = false;
+    const batch = await cleanupExpiredArtifacts({
+      manifest: options.manifest,
+      admin: options.admin,
+      now: options.now,
+      limit,
+      concurrency: 4,
+    });
+    inspected += batch.inspected;
+    deleted += batch.deleted;
+    failed += batch.failed;
+    if (batch.inspected < limit || batch.deleted === 0) break;
+  }
+  return { skipped: false, inspected, deleted, failed };
 }

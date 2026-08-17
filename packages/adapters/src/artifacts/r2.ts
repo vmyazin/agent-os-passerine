@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   DeleteObjectCommand,
@@ -131,9 +131,12 @@ function dependenciesFromOptions(
 ): R2ArtifactStorageDependencies {
   if (
     options.manifest === undefined ||
-    typeof options.manifest.claim !== 'function' ||
+    typeof options.manifest.beginWrite !== 'function' ||
+    typeof options.manifest.finishWrite !== 'function' ||
     typeof options.manifest.get !== 'function' ||
-    typeof options.manifest.list !== 'function'
+    typeof options.manifest.list !== 'function' ||
+    typeof options.manifest.reserveDeletion !== 'function' ||
+    typeof options.manifest.finalizeDeletion !== 'function'
   )
     throw new Error('R2 artifact manifest is required');
   const accountEndpoint = endpoint(options);
@@ -498,34 +501,44 @@ export function createR2ArtifactStorageWithDependencies(
             ? {}
             : { maxBytes: options.maxBytes }),
         });
-        const claimed = await options.manifest.claim(prepared);
-        if (claimed.key !== prepared.key)
-          throw new ArtifactStoreAdapterError(
-            'artifact_conflict',
-            'artifact version already exists with different content',
-            409,
-          );
-        const existing = await readVerified(prepared.key, prepared.sizeBytes);
-        if (existing !== undefined) return reconcile(existing, claimed);
+        const leaseId = randomUUID();
+        const leaseNow = now();
+        const claimed = await options.manifest.beginWrite(prepared, {
+          leaseId,
+          now: leaseNow.toISOString(),
+          expiresAt: new Date(leaseNow.getTime() + 120_000).toISOString(),
+        });
         try {
-          await send({
-            kind: 'PutObject',
-            input: {
-              Bucket: options.bucket,
-              Key: prepared.key,
-              Body: prepared.bytes,
-              ContentLength: prepared.sizeBytes,
-              ContentType: prepared.mediaType,
-              IfNoneMatch: '*',
-              Metadata: objectMetadata(claimed),
-            },
-          });
-          return claimed;
-        } catch (error) {
-          if (!precondition(error)) throw error;
-          const raced = await readVerified(prepared.key, prepared.sizeBytes);
-          if (raced === undefined) throw error;
-          return reconcile(raced, claimed);
+          if (claimed.key !== prepared.key)
+            throw new ArtifactStoreAdapterError(
+              'artifact_conflict',
+              'artifact version already exists with different content',
+              409,
+            );
+          const existing = await readVerified(prepared.key, prepared.sizeBytes);
+          if (existing !== undefined) return reconcile(existing, claimed);
+          try {
+            await send({
+              kind: 'PutObject',
+              input: {
+                Bucket: options.bucket,
+                Key: prepared.key,
+                Body: prepared.bytes,
+                ContentLength: prepared.sizeBytes,
+                ContentType: prepared.mediaType,
+                IfNoneMatch: '*',
+                Metadata: objectMetadata(claimed),
+              },
+            });
+            return claimed;
+          } catch (error) {
+            if (!precondition(error)) throw error;
+            const raced = await readVerified(prepared.key, prepared.sizeBytes);
+            if (raced === undefined) throw error;
+            return reconcile(raced, claimed);
+          }
+        } finally {
+          await options.manifest.finishWrite(claimed, leaseId);
         }
       } catch (error) {
         return unavailable(error);
@@ -592,17 +605,24 @@ export function createR2ArtifactStorageWithDependencies(
     async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
       try {
         const parts = parseArtifactKey(key);
-        const expected = await options.manifest.get(parts, key);
+        const reservationTime = now().toISOString();
+        const deletionAudit = {
+          key,
+          deletedAt: audit?.deletedAt ?? reservationTime,
+          reason: audit?.reason ?? 'control_plane_delete',
+        };
+        const expected = await options.manifest.reserveDeletion(
+          parts,
+          key,
+          deletionAudit,
+          reservationTime,
+        );
         if (expected === undefined) return false;
         await send({
           kind: 'DeleteObject',
           input: { Bucket: options.bucket, Key: key },
         });
-        await options.manifest.markDeleted(expected, {
-          key,
-          deletedAt: audit?.deletedAt ?? now().toISOString(),
-          reason: audit?.reason ?? 'control_plane_delete',
-        });
+        await options.manifest.finalizeDeletion(expected, deletionAudit);
         return true;
       } catch (error) {
         return unavailable(error);
