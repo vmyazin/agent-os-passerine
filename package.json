@@ -12,7 +12,7 @@
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "test:e2e": "playwright test",
+    "test:e2e": "pnpm build && playwright test",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
