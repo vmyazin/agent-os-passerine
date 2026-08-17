@@ -1,7 +1,8 @@
 import { isDuplicateEvent, recordProcessedEvent } from './events.js';
+import type { AttestationVerifier } from './attestation.js';
 import type {
   DraftPublication,
-  RepositoryPublisherAttestation,
+  RepositoryPublisherAttestationClaims,
 } from './ports.js';
 
 export type FeatureWorkflowPhase =
@@ -34,7 +35,11 @@ export interface FeatureWorkflowState {
   readonly publication?: DraftPublication;
   readonly failureReason?: string;
   readonly blockedFromStatus?: 'running' | 'awaiting_approval';
-  readonly publicationBinding?: Omit<RepositoryPublisherAttestation, 'source'>;
+  readonly publicationBinding?: Omit<
+    RepositoryPublisherAttestationClaims,
+    'source'
+  >;
+  readonly publisherAttestationVerifier?: AttestationVerifier<RepositoryPublisherAttestationClaims>;
 }
 
 interface WorkflowEventBase {
@@ -77,7 +82,11 @@ export type FeatureWorkflowEvent =
 
 export interface FeatureWorkflowOptions {
   readonly maxRetries: number;
-  readonly publicationBinding?: Omit<RepositoryPublisherAttestation, 'source'>;
+  readonly publicationBinding?: Omit<
+    RepositoryPublisherAttestationClaims,
+    'source'
+  >;
+  readonly publisherAttestationVerifier?: AttestationVerifier<RepositoryPublisherAttestationClaims>;
 }
 
 export function createFeatureWorkflow(
@@ -96,6 +105,9 @@ export function createFeatureWorkflow(
     ...(options.publicationBinding === undefined
       ? {}
       : { publicationBinding: options.publicationBinding }),
+    ...(options.publisherAttestationVerifier === undefined
+      ? {}
+      : { publisherAttestationVerifier: options.publisherAttestationVerifier }),
   };
 }
 
@@ -204,6 +216,9 @@ export function reduceFeatureWorkflow(
       ...(state.publicationBinding === undefined
         ? {}
         : { publicationBinding: state.publicationBinding }),
+      ...(state.publisherAttestationVerifier === undefined
+        ? {}
+        : { publisherAttestationVerifier: state.publisherAttestationVerifier }),
     };
   }
   if (state.status === 'blocked') {
@@ -262,30 +277,22 @@ export function reduceFeatureWorkflow(
     case 'policy_failed':
       assertPhase(state, 'policy_validation', event);
       return retryOrFail(state, event, 'fixing');
-    case 'draft_published':
+    case 'draft_published': {
       assertPhase(state, 'draft_publication', event);
       if (event.publication.draft !== true)
         throw new Error('Only draft publications may complete the workflow');
-      if (
-        event.publication.attestation?.source !== 'repository-publisher' ||
-        [
-          event.publication.attestation.scopeHash,
-          event.publication.attestation.actionHash,
-          event.publication.attestation.baseSha,
-          event.publication.attestation.patchHash,
-        ].some((value) => typeof value !== 'string' || value.trim() === '')
-      )
+      const publisherClaims = state.publisherAttestationVerifier?.verify(
+        event.publication.attestation,
+      );
+      if (publisherClaims === undefined)
         throw new Error('A trusted publisher attestation is required');
       if (
         state.publicationBinding === undefined ||
-        event.publication.attestation.scopeHash !==
-          state.publicationBinding.scopeHash ||
-        event.publication.attestation.actionHash !==
-          state.publicationBinding.actionHash ||
-        event.publication.attestation.baseSha !==
-          state.publicationBinding.baseSha ||
-        event.publication.attestation.patchHash !==
-          state.publicationBinding.patchHash
+        publisherClaims.source !== 'repository-publisher' ||
+        publisherClaims.scopeHash !== state.publicationBinding.scopeHash ||
+        publisherClaims.actionHash !== state.publicationBinding.actionHash ||
+        publisherClaims.baseSha !== state.publicationBinding.baseSha ||
+        publisherClaims.patchHash !== state.publicationBinding.patchHash
       )
         throw new Error(
           'Publisher attestation does not match workflow binding',
@@ -294,6 +301,7 @@ export function reduceFeatureWorkflow(
         status: 'succeeded',
         publication: event.publication,
       });
+    }
   }
 }
 

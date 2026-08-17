@@ -75,6 +75,8 @@ export interface UsageLedger {
   readonly workflowSpentMicrodollars: Readonly<Record<string, Microdollars>>;
   readonly activeWorkflowIds: readonly string[];
   readonly reservations: Readonly<Record<string, BudgetReservation>>;
+  readonly settledReservations: Readonly<Record<string, SettledReservation>>;
+  readonly settledReservationIds: readonly string[];
 }
 
 export interface BudgetReservation {
@@ -82,6 +84,15 @@ export interface BudgetReservation {
   readonly workflowId: string;
   readonly microdollars: Microdollars;
 }
+
+export interface SettledReservation {
+  readonly id: string;
+  readonly requestFingerprint: string;
+  readonly outcome: 'consumed' | 'released';
+  readonly actualMicrodollars?: Microdollars;
+}
+
+const SETTLED_RESERVATION_WINDOW = 256;
 
 export function createUsageLedger(day: string): UsageLedger {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day))
@@ -92,6 +103,8 @@ export function createUsageLedger(day: string): UsageLedger {
     workflowSpentMicrodollars: {},
     activeWorkflowIds: [],
     reservations: {},
+    settledReservations: {},
+    settledReservationIds: [],
   };
 }
 
@@ -200,6 +213,13 @@ function reservationTotal(ledger: UsageLedger, workflowId?: string): bigint {
   return total;
 }
 
+function reservedWorkflowIds(ledger: UsageLedger): Set<string> {
+  return new Set([
+    ...ledger.activeWorkflowIds,
+    ...Object.values(ledger.reservations).map(({ workflowId }) => workflowId),
+  ]);
+}
+
 export function decideBudgetAction(
   ledger: UsageLedger,
   request: AdmissionRequest,
@@ -234,9 +254,10 @@ export function decideBudgetAction(
     return { decision: 'exhaust', reason: 'daily_cap' };
   if (!Number.isSafeInteger(limits.concurrency) || limits.concurrency <= 0)
     throw new Error('concurrency must be a positive safe integer');
+  const occupiedWorkflowIds = reservedWorkflowIds(ledger);
   if (
-    !ledger.activeWorkflowIds.includes(request.workflowId) &&
-    ledger.activeWorkflowIds.length >= limits.concurrency
+    !occupiedWorkflowIds.has(request.workflowId) &&
+    occupiedWorkflowIds.size >= limits.concurrency
   ) {
     return { decision: 'cancel', reason: 'concurrency_limit' };
   }
@@ -265,12 +286,22 @@ export function reserveBudget(
 ): BudgetReservationResult {
   if (request.reservationId.trim() === '')
     throw new Error('reservationId must be non-empty');
+  const requestFingerprint = JSON.stringify([
+    request.workflowId,
+    request.estimatedMicrodollars,
+  ]);
   const existing = ownValue(ledger.reservations, request.reservationId);
   if (existing !== undefined) {
     if (
       existing.workflowId !== request.workflowId ||
       existing.microdollars !== request.estimatedMicrodollars
     )
+      throw new Error('Reservation ID was reused with different details');
+    return { decision: 'admit', reason: 'within_limits', ledger };
+  }
+  const settled = ownValue(ledger.settledReservations, request.reservationId);
+  if (settled !== undefined) {
+    if (settled.requestFingerprint !== requestFingerprint)
       throw new Error('Reservation ID was reused with different details');
     return { decision: 'admit', reason: 'within_limits', ledger };
   }
@@ -298,11 +329,10 @@ export function reserveBudget(
   };
 }
 
-export function releaseBudgetReservation(
+function withoutReservation(
   ledger: UsageLedger,
   reservationId: string,
 ): UsageLedger {
-  if (ownValue(ledger.reservations, reservationId) === undefined) return ledger;
   return {
     ...ledger,
     reservations: Object.fromEntries(
@@ -313,17 +343,80 @@ export function releaseBudgetReservation(
   };
 }
 
+function settleReservation(
+  ledger: UsageLedger,
+  reservation: BudgetReservation,
+  outcome: SettledReservation['outcome'],
+  actualMicrodollars?: Microdollars,
+): UsageLedger {
+  const settledReservationIds = [
+    ...ledger.settledReservationIds,
+    reservation.id,
+  ];
+  const settledReservations: Record<string, SettledReservation> = {
+    ...ledger.settledReservations,
+    [reservation.id]: {
+      id: reservation.id,
+      requestFingerprint: JSON.stringify([
+        reservation.workflowId,
+        reservation.microdollars,
+      ]),
+      outcome,
+      ...(actualMicrodollars === undefined ? {} : { actualMicrodollars }),
+    },
+  };
+  while (settledReservationIds.length > SETTLED_RESERVATION_WINDOW) {
+    const expiredId = settledReservationIds.shift();
+    if (expiredId !== undefined) delete settledReservations[expiredId];
+  }
+  return { ...ledger, settledReservationIds, settledReservations };
+}
+
+export function releaseBudgetReservation(
+  ledger: UsageLedger,
+  reservationId: string,
+): UsageLedger {
+  const reservation = ownValue(ledger.reservations, reservationId);
+  if (reservation === undefined) {
+    const settled = ownValue(ledger.settledReservations, reservationId);
+    if (settled === undefined || settled.outcome === 'released') return ledger;
+    throw new Error('Reservation was already consumed');
+  }
+  return settleReservation(
+    withoutReservation(ledger, reservationId),
+    reservation,
+    'released',
+  );
+}
+
 export function consumeBudgetReservation(
   ledger: UsageLedger,
   reservationId: string,
   actualMicrodollars: Microdollars,
 ): UsageLedger {
   const reservation = ownValue(ledger.reservations, reservationId);
-  if (reservation === undefined)
+  if (reservation === undefined) {
+    const settled = ownValue(ledger.settledReservations, reservationId);
+    if (
+      settled?.outcome === 'consumed' &&
+      settled.actualMicrodollars === actualMicrodollars
+    )
+      return ledger;
+    if (settled !== undefined)
+      throw new Error(
+        'Reservation settlement was replayed with different details',
+      );
     throw new Error(`Unknown budget reservation: ${reservationId}`);
-  return recordUsageCost(
-    releaseBudgetReservation(ledger, reservationId),
+  }
+  const recorded = recordUsageCost(
+    withoutReservation(ledger, reservationId),
     reservation.workflowId,
+    actualMicrodollars,
+  );
+  return settleReservation(
+    recorded,
+    reservation,
+    'consumed',
     actualMicrodollars,
   );
 }

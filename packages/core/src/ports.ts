@@ -1,3 +1,5 @@
+import type { OpaqueAttestation } from './attestation.js';
+
 export type Identifier = string;
 
 export interface RuntimeAgent {
@@ -110,16 +112,19 @@ export interface DraftPublication {
   readonly id: string;
   readonly url: string;
   readonly draft: true;
-  readonly attestation: RepositoryPublisherAttestation;
+  readonly attestation: OpaqueAttestation<RepositoryPublisherAttestationClaims>;
 }
 
-export interface RepositoryPublisherAttestation {
+export interface RepositoryPublisherAttestationClaims {
   readonly source: 'repository-publisher';
   readonly scopeHash: string;
   readonly actionHash: string;
   readonly baseSha: string;
   readonly patchHash: string;
 }
+
+export type RepositoryPublisherAttestation =
+  OpaqueAttestation<RepositoryPublisherAttestationClaims>;
 
 export interface RepositoryPublisher {
   validate(

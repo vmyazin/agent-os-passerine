@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
+import { createAttestationAuthority } from './attestation.js';
 import {
   createFeatureWorkflow,
   reduceFeatureWorkflow,
   replayFeatureWorkflow,
   type FeatureWorkflowEvent,
+  type FeatureWorkflowOptions,
 } from './feature-workflow.js';
+import type { RepositoryPublisherAttestationClaims } from './ports.js';
 
 const event = (
   id: string,
@@ -18,6 +21,12 @@ const publicationBinding = {
   baseSha: 'base-sha',
   patchHash: 'patch-hash',
 } as const;
+const publisherClaims: RepositoryPublisherAttestationClaims = {
+  source: 'repository-publisher',
+  ...publicationBinding,
+};
+const publisherAuthority =
+  createAttestationAuthority<RepositoryPublisherAttestationClaims>();
 
 const happyPath: FeatureWorkflowEvent[] = [
   event('1', 'specification_completed'),
@@ -34,13 +43,7 @@ const happyPath: FeatureWorkflowEvent[] = [
       id: 'pr-1',
       url: 'https://example.test/pr/1',
       draft: true,
-      attestation: {
-        source: 'repository-publisher',
-        scopeHash: 'scope-hash',
-        actionHash: 'action-hash',
-        baseSha: 'base-sha',
-        patchHash: 'patch-hash',
-      },
+      attestation: publisherAuthority.issuer.issue(publisherClaims),
     },
   },
 ];
@@ -50,6 +53,7 @@ describe('feature workflow reducer', () => {
     const completed = replayFeatureWorkflow(happyPath, {
       maxRetries: 2,
       publicationBinding,
+      publisherAttestationVerifier: publisherAuthority.verifier,
     });
 
     expect(completed).toMatchObject({
@@ -151,6 +155,7 @@ describe('feature workflow reducer', () => {
     let state = replayFeatureWorkflow([event('1', 'specification_completed')], {
       maxRetries: 2,
       publicationBinding,
+      publisherAttestationVerifier: publisherAuthority.verifier,
     });
     state = reduceFeatureWorkflow(state, {
       id: 'crash-1',
@@ -242,6 +247,18 @@ describe('feature workflow reducer', () => {
           },
         },
       } as unknown as FeatureWorkflowEvent),
+    ).toThrow(/attestation/i);
+  });
+
+  it('rejects a publisher token issued by a different authority', () => {
+    const authority =
+      createAttestationAuthority<RepositoryPublisherAttestationClaims>();
+    expect(() =>
+      replayFeatureWorkflow(happyPath, {
+        maxRetries: 2,
+        publicationBinding,
+        publisherAttestationVerifier: authority.verifier,
+      } as unknown as FeatureWorkflowOptions),
     ).toThrow(/attestation/i);
   });
 });

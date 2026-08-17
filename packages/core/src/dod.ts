@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { AttestationVerifier, OpaqueAttestation } from './attestation.js';
 
 interface CriterionBase {
   readonly id: string;
@@ -62,15 +63,18 @@ export interface VerifierFinding {
   readonly details?: unknown;
 }
 
-export interface VerifierAttestation extends VerifierFinding {
+export interface VerifierAttestationClaims extends VerifierFinding {
   readonly source: 'registered-verifier';
   readonly verifierId: string;
   readonly criterionId: string;
   readonly evidenceId: string;
 }
 
+export type VerifierAttestation = OpaqueAttestation<VerifierAttestationClaims>;
+
 export interface DefinitionOfDoneVerifier {
   readonly id: string;
+  readonly attestationVerifier: AttestationVerifier<VerifierAttestationClaims>;
   verify(
     criterion: DefinitionOfDoneCriterion,
     evidence: EvidenceSubmission,
@@ -176,8 +180,10 @@ export async function verifyCriterion(
       `No verifier is registered for ${criterion.type}`,
     );
   }
-  const finding = await verifier.verify(criterion, evidence);
+  const attestation = await verifier.verify(criterion, evidence);
+  const finding = verifier.attestationVerifier.verify(attestation);
   if (
+    finding === undefined ||
     finding.source !== 'registered-verifier' ||
     finding.verifierId !== verifier.id ||
     finding.criterionId !== criterion.id ||
@@ -196,7 +202,7 @@ export async function verifyCriterion(
       criterionId: criterion.id,
       verifierId: verifier.id,
       message: finding.message,
-      attestation: finding,
+      attestation,
     };
   }
   return failedResult(

@@ -1,24 +1,43 @@
 import { describe, expect, it } from 'vitest';
 
-import { evaluatePatchPolicy, type ChangeManifest } from './patch-policy.js';
+import { createAttestationAuthority } from './attestation.js';
+import {
+  evaluatePatchPolicy,
+  type ChangeManifest,
+  type NormalizedChangeClaims,
+} from './patch-policy.js';
+
+const metadataAuthority = createAttestationAuthority<NormalizedChangeClaims>();
 
 const change = (
   path: string,
   overrides: Partial<ChangeManifest['changes'][number]> = {},
-) => ({
-  path,
-  operation: 'modify' as const,
-  sizeBytes: 10,
-  binary: false,
-  symlink: false,
-  metadataTrusted: true as const,
-  ...overrides,
-});
+) => {
+  const fields = {
+    path,
+    operation: 'modify' as const,
+    sizeBytes: 10,
+    binary: false,
+    symlink: false,
+    ...overrides,
+  };
+  return {
+    ...fields,
+    metadataAttestation: metadataAuthority.issuer.issue({
+      path: fields.path,
+      operation: fields.operation,
+      sizeBytes: fields.sizeBytes,
+      binary: fields.binary,
+      symlink: fields.symlink,
+    }),
+  };
+};
 
 const evaluate = (changes: ChangeManifest['changes'], options = {}) =>
   evaluatePatchPolicy(
     { baseSha: 'abc123', changes },
     { currentBaseSha: 'abc123', ...options },
+    metadataAuthority.verifier,
   );
 
 describe('patch policy', () => {
@@ -49,6 +68,7 @@ describe('patch policy', () => {
         ],
       },
       { currentBaseSha: 'current' },
+      metadataAuthority.verifier,
     );
 
     expect(result.allowed).toBe(false);
@@ -147,4 +167,27 @@ describe('patch policy', () => {
       );
     },
   );
+
+  it('rejects structural and cross-authority metadata attestations', () => {
+    const authority = createAttestationAuthority<NormalizedChangeClaims>();
+    const other = createAttestationAuthority<NormalizedChangeClaims>();
+    const trustedShape = change('safe.txt');
+    const forged = {
+      ...trustedShape,
+      metadataAttestation: other.issuer.issue({
+        path: trustedShape.path,
+        operation: trustedShape.operation,
+        sizeBytes: trustedShape.sizeBytes,
+        binary: trustedShape.binary,
+        symlink: trustedShape.symlink,
+      }),
+    };
+
+    const result = evaluatePatchPolicy(
+      { baseSha: 'abc123', changes: [forged] },
+      { currentBaseSha: 'abc123' },
+      authority.verifier,
+    );
+    expect(result.violations[0]?.code).toBe('untrusted_metadata');
+  });
 });

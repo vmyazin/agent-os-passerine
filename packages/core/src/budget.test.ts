@@ -195,4 +195,97 @@ describe('budget decisions', () => {
       ).decision,
     ).toBe('admit');
   });
+
+  it('atomically reserves and releases unique workflow concurrency slots', () => {
+    const concurrencyLimits: BudgetLimits = {
+      workflowMicrodollars: 10_000,
+      dailyMicrodollars: 10_000,
+      concurrency: 2,
+      admissionReservePercent: 100,
+    };
+    const first = reserveBudget(
+      createUsageLedger('2026-08-16'),
+      { reservationId: 'r1', workflowId: 'run-1', estimatedMicrodollars: 1 },
+      concurrencyLimits,
+    );
+    const second = reserveBudget(
+      first.ledger,
+      { reservationId: 'r2', workflowId: 'run-2', estimatedMicrodollars: 1 },
+      concurrencyLimits,
+    );
+    const third = reserveBudget(
+      second.ledger,
+      { reservationId: 'r3', workflowId: 'run-3', estimatedMicrodollars: 1 },
+      concurrencyLimits,
+    );
+    const afterRelease = releaseBudgetReservation(second.ledger, 'r1');
+    const thirdAfterRelease = reserveBudget(
+      afterRelease,
+      { reservationId: 'r3', workflowId: 'run-3', estimatedMicrodollars: 1 },
+      concurrencyLimits,
+    );
+
+    expect(third).toMatchObject({
+      decision: 'cancel',
+      reason: 'concurrency_limit',
+    });
+    expect(thirdAfterRelease.decision).toBe('admit');
+  });
+
+  it('keeps settled reservation replay idempotent without double spending', () => {
+    const request = {
+      reservationId: 'settled-r1',
+      workflowId: 'run-1',
+      estimatedMicrodollars: 500,
+    };
+    const admitted = reserveBudget(
+      createUsageLedger('2026-08-16'),
+      request,
+      limits,
+    );
+    const consumed = consumeBudgetReservation(
+      admitted.ledger,
+      request.reservationId,
+      300,
+    );
+    const retried = reserveBudget(consumed, request, limits);
+    const consumedAgain = consumeBudgetReservation(
+      retried.ledger,
+      request.reservationId,
+      300,
+    );
+
+    expect(retried.decision).toBe('admit');
+    expect(retried.ledger.dailySpentMicrodollars).toBe(300);
+    expect(consumedAgain).toBe(retried.ledger);
+    expect(() =>
+      reserveBudget(
+        consumed,
+        { ...request, estimatedMicrodollars: 501 },
+        limits,
+      ),
+    ).toThrow(/different/i);
+  });
+
+  it('bounds settled reservation history', () => {
+    const generousLimits: BudgetLimits = {
+      workflowMicrodollars: 1_000_000,
+      dailyMicrodollars: 1_000_000,
+      concurrency: 1,
+      admissionReservePercent: 100,
+    };
+    let ledger = createUsageLedger('2026-08-16');
+    for (let index = 0; index < 300; index += 1) {
+      const reservationId = `history-${index}`;
+      ledger = reserveBudget(
+        ledger,
+        { reservationId, workflowId: 'run-1', estimatedMicrodollars: 1 },
+        generousLimits,
+      ).ledger;
+      ledger = releaseBudgetReservation(ledger, reservationId);
+    }
+
+    expect(ledger.settledReservationIds).toHaveLength(256);
+    expect(Object.keys(ledger.settledReservations)).toHaveLength(256);
+  });
 });

@@ -1,4 +1,5 @@
 import { DEFAULT_PROTECTED_PATHS } from './config.js';
+import type { AttestationVerifier, OpaqueAttestation } from './attestation.js';
 
 export type ChangeOperation = 'add' | 'modify' | 'delete';
 
@@ -8,7 +9,15 @@ export interface NormalizedChange {
   readonly sizeBytes: number;
   readonly binary: boolean;
   readonly symlink: boolean;
-  readonly metadataTrusted: true;
+  readonly metadataAttestation: OpaqueAttestation<NormalizedChangeClaims>;
+}
+
+export interface NormalizedChangeClaims {
+  readonly path: string;
+  readonly operation: ChangeOperation;
+  readonly sizeBytes: number;
+  readonly binary: boolean;
+  readonly symlink: boolean;
 }
 
 export interface ChangeManifest {
@@ -97,6 +106,7 @@ function normalizeChangePath(path: string): string | undefined {
 export function evaluatePatchPolicy(
   manifest: ChangeManifest,
   policy: PatchPolicy,
+  metadataVerifier: AttestationVerifier<NormalizedChangeClaims>,
 ): PatchPolicyResult {
   const violations: PatchViolation[] = [];
   const protectedPaths = policy.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
@@ -129,8 +139,14 @@ export function evaluatePatchPolicy(
       });
       continue;
     }
+    const claims = metadataVerifier.verify(change.metadataAttestation);
     if (
-      change.metadataTrusted !== true ||
+      claims === undefined ||
+      claims.path !== change.path ||
+      claims.operation !== change.operation ||
+      claims.sizeBytes !== change.sizeBytes ||
+      claims.binary !== change.binary ||
+      claims.symlink !== change.symlink ||
       typeof change.binary !== 'boolean' ||
       typeof change.symlink !== 'boolean' ||
       !Number.isSafeInteger(change.sizeBytes) ||

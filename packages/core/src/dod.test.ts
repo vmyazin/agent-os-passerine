@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { createAttestationAuthority } from './attestation.js';
 import {
   createFailureFingerprint,
   createVerifierRegistry,
@@ -8,6 +9,8 @@ import {
   submitEvidence,
   verifyCriterion,
   type CommandCriterion,
+  type VerifierAttestation,
+  type VerifierAttestationClaims,
 } from './dod.js';
 
 const criterion: CommandCriterion = {
@@ -37,16 +40,19 @@ describe('Definition of Done verification', () => {
   });
 
   it('only accepts passed from a registered verifier', async () => {
+    const authority = createAttestationAuthority<VerifierAttestationClaims>();
     const registry = registerVerifier(createVerifierRegistry(), 'command', {
       id: 'trusted-command-verifier',
-      verify: async () => ({
-        source: 'registered-verifier',
-        verifierId: 'trusted-command-verifier',
-        criterionId: criterion.id,
-        evidenceId: 'evidence-1',
-        passed: true,
-        message: 'exit 0',
-      }),
+      attestationVerifier: authority.verifier,
+      verify: async () =>
+        authority.issuer.issue({
+          source: 'registered-verifier',
+          verifierId: 'trusted-command-verifier',
+          criterionId: criterion.id,
+          evidenceId: 'evidence-1',
+          passed: true,
+          message: 'exit 0',
+        }),
     });
     const evidence = submitEvidence({
       id: 'evidence-1',
@@ -65,16 +71,19 @@ describe('Definition of Done verification', () => {
   });
 
   it('rejects verifier attestations not bound to the criterion and evidence', async () => {
+    const authority = createAttestationAuthority<VerifierAttestationClaims>();
     const registry = registerVerifier(createVerifierRegistry(), 'command', {
       id: 'trusted-command-verifier',
-      verify: async () => ({
-        source: 'registered-verifier',
-        verifierId: 'trusted-command-verifier',
-        criterionId: 'different-criterion',
-        evidenceId: 'different-evidence',
-        passed: true,
-        message: 'claimed pass',
-      }),
+      attestationVerifier: authority.verifier,
+      verify: async () =>
+        authority.issuer.issue({
+          source: 'registered-verifier',
+          verifierId: 'trusted-command-verifier',
+          criterionId: 'different-criterion',
+          evidenceId: 'different-evidence',
+          passed: true,
+          message: 'claimed pass',
+        }),
     });
     const evidence = submitEvidence({
       id: 'evidence-1',
@@ -82,6 +91,37 @@ describe('Definition of Done verification', () => {
       submittedByAgentId: 'implementer',
       observedAt: new Date('2026-01-01T00:00:00Z'),
       payload: { claimedStatus: 'passed' },
+    });
+
+    await expect(
+      verifyCriterion(registry, criterion, evidence),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      code: 'attestation_mismatch',
+    });
+  });
+
+  it('rejects a structural verifier claim not issued by its authority', async () => {
+    const authority = createAttestationAuthority<VerifierAttestationClaims>();
+    const registry = registerVerifier(createVerifierRegistry(), 'command', {
+      id: 'trusted-command-verifier',
+      attestationVerifier: authority.verifier,
+      verify: async () =>
+        ({
+          source: 'registered-verifier',
+          verifierId: 'trusted-command-verifier',
+          criterionId: criterion.id,
+          evidenceId: 'evidence-1',
+          passed: true,
+          message: 'structural lookalike',
+        }) as unknown as VerifierAttestation,
+    });
+    const evidence = submitEvidence({
+      id: 'evidence-1',
+      criterionId: criterion.id,
+      submittedByAgentId: 'implementer',
+      observedAt: new Date('2026-01-01T00:00:00Z'),
+      payload: {},
     });
 
     await expect(
