@@ -57,9 +57,19 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   await expect(page.getByLabel('Run status: Waiting')).toBeVisible();
 
   await page.goto('/inbox');
+  await expect(page.getByLabel('Agent requests')).toBeVisible();
+  await expect(page.getByLabel('Selected request')).toBeVisible();
+  await page.getByRole('button', { name: /Approval requested/ }).click();
+  await page.getByText('Review request details').click();
   await expect(page.getByText('scope_hash_42')).toBeVisible();
-  await page.getByRole('button', { name: 'Approve' }).click();
+  await page.getByRole('button', { name: 'Approve request' }).click();
   await expect(page.getByText('scope_hash_42')).not.toBeVisible();
+  await expect(
+    page.getByRole('heading', {
+      name: 'Which deployment window should we use?',
+    }),
+  ).toBeVisible();
+  await expect(page.getByLabel('Your reply')).toBeVisible();
 });
 
 test('inbox remains usable on a narrow touch viewport', async ({ page }) => {
@@ -68,6 +78,8 @@ test('inbox remains usable on a narrow touch viewport', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Inbox' })).toBeVisible();
   await expect(page.getByLabel('Primary navigation')).toBeVisible();
+  await expect(page.getByLabel('Agent requests')).toBeVisible();
+  await expect(page.getByLabel('Selected request')).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

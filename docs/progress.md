@@ -49,10 +49,14 @@ deployment, R2 source bundle, paid model session, or GitHub publication was
 exercised in this build. PostgreSQL integration also remains unexecuted when
 `TEST_DATABASE_URL` is absent.
 
-The Playwright build/server path completed in this host, but all three browser
-cases hit the bounded Chromium-launch timeout before reaching application
-assertions; the earlier three-case baseline passed. This host result is a local
-browser-runtime limitation, not evidence that the current UI assertions ran.
+The fresh Playwright control-plane suite passes all three browser cases,
+including approval consumption and the 390 px inbox viewport check.
+
+The operator inbox now uses an email-style request queue and reading pane instead
+of isolated cards. Approvals and questions share one newest-first list, machine
+details use progressive disclosure, replies render as readable correspondence,
+and the layout stacks without horizontal overflow at a 390 px viewport. The
+approval and reply mutations remain unchanged.
 
 ## Remaining product stages
 

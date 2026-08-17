@@ -47,7 +47,7 @@ export function ApprovalActions({
           disabled={pending}
           type="button"
         >
-          Approve
+          Approve request
         </button>
         <button
           className="secondary"
@@ -57,7 +57,7 @@ export function ApprovalActions({
           }
           type="button"
         >
-          Reject
+          Reject request
         </button>
       </div>
       <p aria-live="polite" ref={statusRef} tabIndex={-1}>

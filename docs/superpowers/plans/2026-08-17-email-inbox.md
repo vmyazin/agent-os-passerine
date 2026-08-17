@@ -14,7 +14,7 @@
 
 **Files:**
 
-- Create: `apps/control-plane/src/ui/inbox-view.test.tsx`
+- Create: `apps/control-plane/src/ui/inbox-view.test.ts`
 - Create: `apps/control-plane/src/ui/inbox-view.tsx`
 
 - [ ] **Step 1: Write failing rendering tests**
@@ -25,7 +25,7 @@ metadata, and label item selection accessibly.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run: `pnpm --filter @agentos/control-plane test -- src/ui/inbox-view.test.tsx`
+Run: `pnpm --filter @agentos/control-plane exec vitest run src/ui/inbox-view.test.ts`
 
 Expected: FAIL because `inbox-view.tsx` does not exist.
 
@@ -37,7 +37,7 @@ that embeds `ApprovalActions` or `ReplyForm`.
 
 - [ ] **Step 4: Run the focused test and verify GREEN**
 
-Run: `pnpm --filter @agentos/control-plane test -- src/ui/inbox-view.test.tsx`
+Run: `pnpm --filter @agentos/control-plane exec vitest run src/ui/inbox-view.test.ts`
 
 Expected: all focused tests pass.
 
