@@ -2,7 +2,20 @@ import { spawn } from 'node:child_process';
 
 import type { JsonValue } from '@agentos/core';
 
-import type { FeatureWorkflowInput, TrustedCommandExecutor } from './types.js';
+import type {
+  FeatureWorkflowInput,
+  TrustedCommandObservation,
+} from './types.js';
+
+interface TestOnlyCommandExecutor {
+  execute(input: {
+    readonly workflow: FeatureWorkflowInput;
+    readonly stepId: string;
+    readonly command: string;
+    readonly changeSet: JsonValue;
+    readonly changeSetDigest: string;
+  }): Promise<TrustedCommandObservation>;
+}
 
 export interface TrustedWorkspaceMaterializer {
   prepare(input: {
@@ -22,7 +35,7 @@ export function createNodeTrustedCommandExecutor(options: {
   readonly allowedCommands: Readonly<Record<string, TrustedCommandDefinition>>;
   readonly clock: () => string;
   readonly timeoutMs?: number;
-}): TrustedCommandExecutor {
+}): TestOnlyCommandExecutor {
   const timeoutMs = options.timeoutMs ?? 10 * 60_000;
   if (
     !Number.isSafeInteger(timeoutMs) ||
@@ -31,7 +44,7 @@ export function createNodeTrustedCommandExecutor(options: {
   )
     throw new Error('trusted command timeout is invalid');
   return Object.freeze({
-    async execute(input: Parameters<TrustedCommandExecutor['execute']>[0]) {
+    async execute(input: Parameters<TestOnlyCommandExecutor['execute']>[0]) {
       const definition = options.allowedCommands[input.command];
       if (definition === undefined)
         throw new Error('test command is not in the trusted allowlist');

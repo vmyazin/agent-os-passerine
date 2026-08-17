@@ -176,3 +176,18 @@ export const reviewArtifactSchema = z
     findings: z.array(z.string().max(2_000)).max(100),
   })
   .strict();
+
+export const trustedCommandObservationSchema = z
+  .object({
+    runId: z.string().min(1).max(128),
+    stepId: z.string().min(1).max(128),
+    command: z.string().min(1).max(8_000),
+    exitCode: z.number().int().min(0).max(255),
+    startedAt: z.iso.datetime({ offset: true }),
+    completedAt: z.iso.datetime({ offset: true }),
+    repositorySha: z.string().regex(/^[0-9a-f]{40}$/),
+    sourceSnapshotDigest: digest,
+    changeSetDigest: digest,
+    configDigest: digest,
+  })
+  .strict();

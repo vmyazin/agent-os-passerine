@@ -1,16 +1,17 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   canonicalPublicationManifestDigest,
   canonicalPublicationPolicyDigest,
+  canonicalJsonValue,
+  createArtifactCapabilityIssuer,
   createHmacAttestationIssuer,
   createHmacAttestationVerifier,
   normalizePublicationPolicySnapshot,
   parseAgentOsConfig,
   persistenceId,
   type AgentOsConfig,
+  type ArtifactCapabilityKey,
   type ArtifactMetadata,
   type ConfigSnapshot,
   type PublicationAuthorizationClaims,
@@ -29,7 +30,6 @@ import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
 import { createFeatureWorkflowTaskHandler } from './task-handler.js';
 import { createTriggerApprovalWaiter } from './trigger-adapter.js';
-import { createNodeTrustedCommandExecutor } from './trusted-command-executor.js';
 import type { WorkflowPublicationAuthority } from './types.js';
 import { createTrustedWorkflowVerifier } from './verifier.js';
 import { createDurableFeatureWorkflow } from './workflow.js';
@@ -39,6 +39,16 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const sourceBundleSchema = z
   .object({
     version: z.literal('source-bundle-v1'),
+    repository: z
+      .object({
+        owner: z.string().min(1).max(100),
+        name: z.string().min(1).max(100),
+        repositoryId: z.number().int().positive().safe(),
+      })
+      .strict(),
+    baseBranch: z.string().min(1).max(255),
+    repositorySha: z.string().regex(/^[0-9a-f]{40}$/),
+    treeSha: z.string().regex(/^[0-9a-f]{40}$/),
     files: z
       .array(
         z
@@ -95,6 +105,37 @@ function parsedJson<T>(environment: Environment, name: string): T {
   }
 }
 
+function collectArtifactMetadata(value: unknown): ArtifactMetadata[] {
+  const result = new Map<string, ArtifactMetadata>();
+  const visit = (candidate: unknown, depth: number): void => {
+    if (depth > 8 || result.size > 24)
+      throw new Error('runtime input artifact manifest is too complex');
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry, depth + 1);
+      return;
+    }
+    if (typeof candidate !== 'object' || candidate === null) return;
+    const record = candidate as Record<string, unknown>;
+    if (
+      typeof record.key === 'string' &&
+      typeof record.projectId === 'string' &&
+      typeof record.runId === 'string' &&
+      typeof record.stepId === 'string' &&
+      typeof record.artifactId === 'string' &&
+      typeof record.digest === 'string' &&
+      typeof record.sizeBytes === 'number'
+    ) {
+      result.set(record.key, candidate as ArtifactMetadata);
+      return;
+    }
+    for (const entry of Object.values(record)) visit(entry, depth + 1);
+  };
+  visit(value, 0);
+  return [...result.values()].sort((left, right) =>
+    left.key.localeCompare(right.key),
+  );
+}
+
 function policy(config: AgentOsConfig) {
   return normalizePublicationPolicySnapshot({
     version: 'publication-policy-v1',
@@ -109,52 +150,30 @@ function policy(config: AgentOsConfig) {
   });
 }
 
-function workspacePath(root: string, candidate: string): string {
-  if (
-    candidate.startsWith('/') ||
-    candidate.includes('\\') ||
-    candidate.includes('\0')
-  )
-    throw new Error('source/change path is unsafe');
-  const target = resolve(root, candidate);
-  if (target !== root && !target.startsWith(`${root}${sep}`))
-    throw new Error('source/change path escapes workspace');
-  return target;
+const MATERIALIZE_SCRIPT = `import { readFile, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
+import { dirname, resolve, sep } from 'node:path';
+const root = '/workspace/repo';
+const safe = (p) => { if (typeof p !== 'string' || p.startsWith('/') || p.includes('\\\\') || p.includes('\\0')) throw new Error('unsafe path'); const t=resolve(root,p); if(t!==root&&!t.startsWith(root+sep)) throw new Error('escape'); return t; };
+const source=JSON.parse(await readFile('/workspace/inputs/source-bundle.json','utf8'));
+const changes=JSON.parse(await readFile('/workspace/inputs/changes.json','utf8'));
+for (const f of source.files) { const t=safe(f.path); await mkdir(dirname(t),{recursive:true}); await writeFile(t,f.content,{mode:f.mode==='100755'?0o755:0o644}); }
+for (const c of changes.changes) { const t=safe(c.path); if(c.operation==='delete') await rm(t,{force:true}); else { await mkdir(dirname(t),{recursive:true}); await writeFile(t,c.content,{mode:c.mode==='100755'?0o755:0o644}); await chmod(t,c.mode==='100755'?0o755:0o644); } }
+`;
+
+function shellQuote(value: string): string {
+  if (value.includes('\0') || value.length > 2_000)
+    throw new Error('trusted test command argument is invalid');
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-export function createSourceBundleMaterializer(sourceBundle: unknown) {
-  const source = sourceBundleSchema.parse(sourceBundle);
-  return Object.freeze({
-    async prepare(input: { readonly changeSet: unknown }) {
-      const root = await mkdtemp(join(tmpdir(), 'agentos-verify-'));
-      try {
-        for (const file of source.files) {
-          const target = workspacePath(root, file.path);
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, file.content, {
-            mode: file.mode === '100755' ? 0o755 : 0o644,
-          });
-        }
-        for (const change of changeSetSchema.parse(input.changeSet).changes) {
-          const target = workspacePath(root, change.path);
-          if (change.operation === 'delete') await rm(target, { force: true });
-          else {
-            await mkdir(dirname(target), { recursive: true });
-            await writeFile(target, change.content, {
-              mode: change.mode === '100755' ? 0o755 : 0o644,
-            });
-          }
-        }
-        return {
-          cwd: root,
-          cleanup: () => rm(root, { recursive: true, force: true }),
-        };
-      } catch (error) {
-        await rm(root, { recursive: true, force: true });
-        throw error;
-      }
-    },
-  });
+function exactTrustedCommand(definition: {
+  readonly executable: string;
+  readonly arguments: readonly string[];
+}): string {
+  const invocation = [definition.executable, ...definition.arguments]
+    .map(shellQuote)
+    .join(' ');
+  return `set +e; rm -rf /workspace/repo; mkdir -p /workspace/repo; node /workspace/inputs/materialize.mjs && cd /workspace/repo && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
 }
 
 function priceUsage(
@@ -198,6 +217,21 @@ export async function createProductionFeatureWorkflowFromEnv(
     apiKey: required(environment, 'ANTHROPIC_API_KEY'),
     ownershipSecret: required(environment, 'AGENTOS_RUNTIME_OWNERSHIP_SECRET'),
   });
+  const artifactMcpUrl = new URL(
+    required(environment, 'AGENTOS_ARTIFACT_MCP_URL'),
+  ).toString();
+  if (!artifactMcpUrl.startsWith('https://'))
+    throw new Error('AGENTOS_ARTIFACT_MCP_URL must use HTTPS');
+  const artifactCapabilityKeys = parsedJson<ArtifactCapabilityKey[]>(
+    environment,
+    'ARTIFACT_CAPABILITY_KEYS_JSON',
+  );
+  const artifactCapabilityKey = artifactCapabilityKeys[0];
+  if (artifactCapabilityKey === undefined)
+    throw new Error('at least one Artifact MCP capability key is required');
+  const artifactCapabilityIssuer = createArtifactCapabilityIssuer(
+    artifactCapabilityKey,
+  );
   const handleSealer = createAesWorkflowHandleSealer(
     Buffer.from(
       required(environment, 'AGENTOS_RUNTIME_HANDLE_KEY'),
@@ -210,6 +244,17 @@ export async function createProductionFeatureWorkflowFromEnv(
   const activeKey = publicationKeys[0];
   if (activeKey === undefined)
     throw new Error('at least one GitHub publication key is required');
+  const testReportKeys = parsedJson<
+    Array<{ readonly keyId: string; readonly secret: string }>
+  >(environment, 'AGENTOS_TEST_REPORT_KEYS_JSON');
+  const testReportKey = testReportKeys[0];
+  if (testReportKey === undefined)
+    throw new Error('at least one trusted test report key is required');
+  const testReportIssuer = createHmacAttestationIssuer({
+    keyId: testReportKey.keyId,
+    secret: testReportKey.secret,
+    kind: 'trusted-test-report',
+  });
   const selectedRepositories = parsedJson<
     PublicationManifestBody['repository'][]
   >(environment, 'GITHUB_SELECTED_REPOSITORIES_JSON');
@@ -257,7 +302,11 @@ export async function createProductionFeatureWorkflowFromEnv(
       readonly body: z.infer<typeof sourceBundleSchema>;
     }
   >();
-  const loadSource = async (projectId: string, runId: string) => {
+  const loadSource = async (
+    projectId: string,
+    runId: string,
+    repositorySha: string,
+  ) => {
     const page = await artifacts.list({
       scope: { projectId, runId, stepId: 'source' },
       artifactPrefix: 'bundle',
@@ -275,6 +324,9 @@ export async function createProductionFeatureWorkflowFromEnv(
     const body = sourceBundleSchema.parse(
       JSON.parse(new TextDecoder().decode(value.bytes)),
     );
+    if (body.repositorySha !== repositorySha) {
+      throw new Error('source bundle repository binding mismatch');
+    }
     const result = { metadata, body };
     sourceBundles.set(runId, result);
     return result;
@@ -282,11 +334,11 @@ export async function createProductionFeatureWorkflowFromEnv(
   return createFeatureWorkflowTaskHandler({
     repository,
     sourceSnapshot: {
-      resolve: async ({ projectId, runId }) =>
+      resolve: async ({ projectId, runId, repositorySha }) =>
         ((loaded) => ({
           digest: loaded.metadata.digest,
           artifactKey: loaded.metadata.key,
-        }))(await loadSource(projectId, runId)),
+        }))(await loadSource(projectId, runId, repositorySha)),
     },
     workflowForSnapshot: async (snapshot: ConfigSnapshot, execution) => {
       const config = parseAgentOsConfig(snapshot.config);
@@ -312,20 +364,45 @@ export async function createProductionFeatureWorkflowFromEnv(
         Record<string, { executable: string; arguments: string[] }>
       >(environment, 'AGENTOS_TRUSTED_TEST_COMMANDS_JSON');
       const verifier = createTrustedWorkflowVerifier({
-        executor: createNodeTrustedCommandExecutor({
-          allowedCommands: commands,
-          clock: () => new Date().toISOString(),
-          materializer: createSourceBundleMaterializer(source.body),
-        }),
         policy: {
           protectedPaths: config.policies.protectedPaths,
           maxFiles: 100,
           maxFileBytes: config.policies.maxFileBytes,
           maxTotalBytes: 5_000_000,
         },
+        artifacts,
+        attest: (evidence) => {
+          const evidenceDigest = createHash('sha256')
+            .update(canonicalJsonValue(evidence))
+            .digest('hex');
+          return testReportIssuer.issue({
+            subject: `${snapshot.runId}:verification:${evidenceDigest}`,
+            issuedAt: snapshot.createdAt,
+            claims: {
+              source: 'managed-agent-command-observer',
+              runId: snapshot.runId,
+              evidenceDigest,
+            },
+          }) as unknown as import('@agentos/core').JsonValue;
+        },
       });
       const publicationAuthority: WorkflowPublicationAuthority = {
-        authorize: async ({ workflow, changeSet, artifacts: evidence }) => {
+        authorize: async ({
+          workflow,
+          changeSet,
+          verification,
+          artifacts: evidence,
+        }) => {
+          const trustedReports = evidence.filter(
+            (item) =>
+              item.stepId === 'verification' &&
+              item.artifactId === 'trusted-test-report',
+          );
+          if (
+            trustedReports.length !== 1 ||
+            trustedReports[0]!.digest !== verification.evidenceDigest
+          )
+            throw new Error('trusted publication evidence is unavailable');
           const manifest: PublicationManifestBody = {
             version: 'publication-manifest-v1',
             projectId: workflow.projectId,
@@ -339,12 +416,10 @@ export async function createProductionFeatureWorkflowFromEnv(
             configDigest: workflow.digests.config,
             policyDigest: workflow.digests.policy,
             sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
-            testEvidence: evidence
-              .filter((item) => item.artifactId === 'tests')
-              .map((item) => ({
-                kind: 'test-report' as const,
-                artifactDigest: item.digest,
-              })),
+            testEvidence: trustedReports.map((item) => ({
+              kind: 'test-report' as const,
+              artifactDigest: item.digest,
+            })),
             changes: changeSetSchema.parse(changeSet).changes,
           };
           const manifestDigest = canonicalPublicationManifestDigest(manifest);
@@ -378,16 +453,135 @@ export async function createProductionFeatureWorkflowFromEnv(
           };
         },
       };
+      const roleDefinitions = resolveFeatureRolesFromSnapshot(snapshot, {
+        artifactMcpUrl,
+      });
+      const runtimeAccess = {
+        prepare: async (request: {
+          workflow: {
+            projectId: string;
+            runId: string;
+            source: { sourceSnapshotDigest: string };
+          };
+          stepId: string;
+          role:
+            | 'specification'
+            | 'planning'
+            | 'implementation'
+            | 'review'
+            | 'verification';
+          stepInput: unknown;
+          idempotencyKey: string;
+        }) => {
+          const loadedSource = sourceBundles.get(request.workflow.runId);
+          if (
+            loadedSource === undefined ||
+            loadedSource.metadata.digest !==
+              request.workflow.source.sourceSnapshotDigest
+          )
+            throw new Error('runtime source bundle binding mismatch');
+          const inputs = collectArtifactMetadata(request.stepInput);
+          const files = [
+            {
+              filename: 'source-bundle.json',
+              mediaType: 'application/json',
+              bytes: new TextEncoder().encode(
+                JSON.stringify(loadedSource.body),
+              ),
+              mountPath: '/workspace/inputs/source-bundle.json',
+            },
+          ];
+          for (const metadata of inputs) {
+            if (
+              metadata.projectId !== request.workflow.projectId ||
+              metadata.runId !== request.workflow.runId
+            )
+              throw new Error('runtime input artifact binding mismatch');
+            const value = await artifacts.get({
+              scope: {
+                projectId: metadata.projectId,
+                runId: metadata.runId,
+                stepId: metadata.stepId,
+              },
+              key: metadata.key,
+              maxBytes: metadata.sizeBytes,
+            });
+            if (
+              value === undefined ||
+              value.digest !== metadata.digest ||
+              value.sizeBytes !== metadata.sizeBytes
+            )
+              throw new Error('runtime input artifact is unavailable');
+            files.push({
+              filename: `${metadata.stepId}-${metadata.artifactId}.json`,
+              mediaType: value.mediaType,
+              bytes: Uint8Array.from(value.bytes),
+              mountPath:
+                request.role === 'verification' &&
+                metadata.artifactId === 'changes'
+                  ? '/workspace/inputs/changes.json'
+                  : `/workspace/inputs/${metadata.stepId}-${metadata.artifactId}.json`,
+            });
+          }
+          if (request.role === 'verification') {
+            files.push({
+              filename: 'materialize.mjs',
+              mediaType: 'text/javascript',
+              bytes: new TextEncoder().encode(MATERIALIZE_SCRIPT),
+              mountPath: '/workspace/inputs/materialize.mjs',
+            });
+            return runtime.provisionSessionAccess({
+              idempotencyKey: request.idempotencyKey,
+              files,
+            });
+          }
+          const issuedAt = new Date();
+          const bearerToken = artifactCapabilityIssuer.issue(
+            {
+              purpose: 'agent-artifact-access',
+              audience: 'artifact-mcp',
+              methods: ['artifact.get', 'artifact.put', 'artifact.list'],
+              projectId: request.workflow.projectId,
+              runId: request.workflow.runId,
+              stepId: request.stepId,
+              maxBytes: 1_000_000,
+              maxCalls: 1_000,
+              maxCumulativeBytes: 16 * 1024 * 1024,
+              notBefore: issuedAt.toISOString(),
+              expiresAt: new Date(
+                issuedAt.getTime() + 59 * 60_000,
+              ).toISOString(),
+              nonce: createHash('sha256')
+                .update(request.idempotencyKey)
+                .digest('base64url'),
+            },
+            issuedAt,
+          );
+          return runtime.provisionSessionAccess({
+            idempotencyKey: request.idempotencyKey,
+            mcpUrl: artifactMcpUrl,
+            bearerToken,
+            files,
+          });
+        },
+      };
       return createDurableFeatureWorkflow({
         repository,
         checkpoints,
         artifacts,
         runtime,
         approval: createTriggerApprovalWaiter(),
-        roles: resolveFeatureRolesFromSnapshot(snapshot),
+        roles: roleDefinitions,
+        runtimeAccess,
         clock: () => new Date().toISOString(),
         priceUsage: (usage, model) => priceUsage(config, usage, model),
         verifier,
+        resolveTestCommand: (commandKey) => {
+          const definition = commands[commandKey];
+          if (definition === undefined)
+            throw new Error('test command is not in the trusted allowlist');
+          return exactTrustedCommand(definition);
+        },
         publicationAuthority,
         publisher: { publish: async (input) => publisher.publish(input) },
         execution:

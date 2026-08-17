@@ -23,10 +23,12 @@ import {
 import { normalizeEvent } from './normalization.js';
 import type {
   ManagedAgentsClient,
+  ManagedAgentsEvent,
   ManagedAgentsRemoteSession,
 } from './sdk-contract.js';
 import type {
   ManagedAgentsCustomToolResult,
+  ManagedAgentsSessionAccess,
   ManagedAgentsLimits,
   ManagedAgentsProvider,
   ManagedAgentsRuntimeEnvironment,
@@ -45,6 +47,7 @@ const SESSION_CAPABILITY_HASH = 'agentos.session_capability_hash';
 const RUN_ID = 'agentos.run_id';
 const STEP_ID = 'agentos.step_id';
 const IDEMPOTENCY_KEY_HASH = 'agentos.idempotency_key_hash';
+const SESSION_DEADLINE = 'agentos.session_deadline';
 const MANAGED_AGENTS_BETA = 'managed-agents-2026-04-01' as const;
 const WEB_EGRESS_TOOLS = new Set(['web_fetch', 'web_search']);
 const BUILT_IN_TOOLS = new Set([
@@ -86,7 +89,7 @@ const DEFAULT_LIMITS: RequiredLimits = {
   maxListedEvents: 1_000,
   maxEventBytes: 256 * 1024,
   maxOutputBytes: 1024 * 1024,
-  maxStreamDurationMs: 15 * 60_000,
+  maxStreamDurationMs: 21 * 60_000,
   maxStreamReconnects: 3,
   streamReconnectDelayMs: 100,
 };
@@ -125,6 +128,142 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     return this.#serializeSync(this.#agentSyncs, agent.id, () =>
       this.#syncAgent(agent),
     );
+  }
+
+  async provisionSessionAccess(input: {
+    readonly idempotencyKey: string;
+    readonly mcpUrl?: string;
+    readonly bearerToken?: string;
+    readonly files: readonly {
+      filename: string;
+      mediaType: string;
+      bytes: Uint8Array;
+      mountPath: string;
+    }[];
+  }): Promise<ManagedAgentsSessionAccess> {
+    validateLocalId(input.idempotencyKey, 'access.idempotencyKey');
+    if ((input.mcpUrl === undefined) !== (input.bearerToken === undefined))
+      throw new ManagedAgentsConfigurationError(
+        'MCP URL and bearer capability must be provided together',
+      );
+    const keyHash = createHash('sha256')
+      .update(input.idempotencyKey)
+      .digest('hex');
+    const resources = [] as Array<{
+      type: 'file';
+      fileId: string;
+      mountPath: string;
+    }>;
+    const listedFiles = await this.#wrap(async () =>
+      collectBounded(
+        await this.#client.beta.files.list({ betas: [MANAGED_AGENTS_BETA] }),
+        this.#limits.maxRemoteResources,
+      ),
+    );
+    for (const file of input.files) {
+      if (file.bytes.byteLength > this.#limits.maxOutputBytes)
+        throw new ManagedAgentsLimitError('Access file exceeds maxOutputBytes');
+      const contentHash = createHash('sha256').update(file.bytes).digest('hex');
+      const filename = `agentos-${keyHash.slice(0, 16)}-${contentHash.slice(0, 16)}-${safeFilename(file.filename)}`;
+      const matches = listedFiles.filter(
+        (candidate) =>
+          candidate.filename === filename &&
+          candidate.size_bytes === file.bytes.byteLength &&
+          candidate.mime_type === file.mediaType,
+      );
+      if (matches.length > 1)
+        throw new ManagedAgentsConflictError(
+          'Duplicate Managed Agent access files',
+        );
+      const remote =
+        matches[0] ??
+        (await this.#wrap(() =>
+          this.#client.beta.files.upload({
+            file: new File(
+              [
+                file.bytes.buffer.slice(
+                  file.bytes.byteOffset,
+                  file.bytes.byteOffset + file.bytes.byteLength,
+                ) as ArrayBuffer,
+              ],
+              filename,
+              { type: file.mediaType },
+            ),
+            betas: [MANAGED_AGENTS_BETA],
+          }),
+        ));
+      resources.push({
+        type: 'file',
+        fileId: remote.id,
+        mountPath: file.mountPath,
+      });
+    }
+    if (input.mcpUrl === undefined || input.bearerToken === undefined)
+      return { resources, credentialRefs: [] };
+    const mcpUrl = validatedMcpUrl(input.mcpUrl);
+    const vaults = await this.#wrap(async () =>
+      collectBounded(
+        await this.#client.beta.vaults.list({
+          include_archived: false,
+          betas: [MANAGED_AGENTS_BETA],
+        }),
+        this.#limits.maxRemoteResources,
+      ),
+    );
+    const matches = vaults.filter(
+      (vault) =>
+        vault.archived_at === null &&
+        vault.metadata['agentos.access_key_hash'] === keyHash,
+    );
+    if (matches.length > 1)
+      throw new ManagedAgentsConflictError(
+        'Duplicate Managed Agent access vaults',
+      );
+    const vault =
+      matches[0] ??
+      (await this.#wrap(() =>
+        this.#client.beta.vaults.create({
+          display_name: `agentos:${input.idempotencyKey}`,
+          metadata: {
+            'agentos.owner': OWNER,
+            'agentos.access_key_hash': keyHash,
+          },
+          betas: [MANAGED_AGENTS_BETA],
+        }),
+      ));
+    const credentials = await this.#wrap(async () =>
+      collectBounded(
+        await this.#client.beta.vaults.credentials.list(vault.id, {
+          include_archived: false,
+          betas: [MANAGED_AGENTS_BETA],
+        }),
+        10,
+      ),
+    );
+    const credentialMatches = credentials.filter(
+      (credential) =>
+        credential.archived_at === null &&
+        credential.metadata['agentos.access_key_hash'] === keyHash,
+    );
+    if (credentialMatches.length > 1)
+      throw new ManagedAgentsConflictError(
+        'Duplicate Managed Agent MCP credentials',
+      );
+    if (credentialMatches.length === 0) {
+      await this.#wrap(() =>
+        this.#client.beta.vaults.credentials.create(vault.id, {
+          auth: {
+            type: 'static_bearer',
+            token: input.bearerToken!,
+            mcp_server_url: mcpUrl,
+          },
+          display_name: 'AgentOS scoped Artifact MCP capability',
+          metadata: { 'agentos.access_key_hash': keyHash },
+          betas: [MANAGED_AGENTS_BETA],
+        }),
+      );
+    }
+    return { resources, credentialRefs: [vault.id] };
   }
 
   async #syncAgent(agent: RuntimeAgent): Promise<void> {
@@ -319,6 +458,13 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       throw new ManagedAgentsLimitError('Session resource limit exceeded');
     }
     const resources = (managed.resources ?? []).map(mapResource);
+    const deadlineAt =
+      request.timeoutMs === undefined
+        ? undefined
+        : new Date(
+            this.#clock.now().getTime() + request.timeoutMs,
+          ).toISOString();
+    const budget = managedBudget(request.maxCostMicrodollars);
     const ownershipCapability = this.#sessionCapability(request);
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.create({
@@ -338,9 +484,16 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
             : {
                 [IDEMPOTENCY_KEY_HASH]: hashCapability(request.idempotencyKey),
               }),
+          ...(deadlineAt === undefined
+            ? {}
+            : { [SESSION_DEADLINE]: deadlineAt }),
         },
         initial_events: [userMessage(input)],
         resources,
+        ...(request.credentialRefs === undefined
+          ? {}
+          : { vault_ids: [...request.credentialRefs] }),
+        ...(budget === undefined ? {} : { budget }),
       }),
     );
     return {
@@ -351,6 +504,13 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       runId: request.runId,
       stepId: request.stepId,
       ownershipCapability,
+      ...(deadlineAt === undefined ? {} : { deadlineAt }),
+      ...(request.credentialRefs === undefined
+        ? {}
+        : { credentialRefs: [...request.credentialRefs] }),
+      ...(resources.length === 0
+        ? {}
+        : { uploadedFileIds: resources.map((resource) => resource.file_id) }),
     };
   }
 
@@ -394,6 +554,19 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       runId: request.runId,
       stepId: request.stepId,
       ownershipCapability: capability,
+      ...(session.metadata[SESSION_DEADLINE] === undefined
+        ? {}
+        : { deadlineAt: validDeadline(session.metadata[SESSION_DEADLINE]) }),
+      ...(session.vault_ids === undefined || session.vault_ids.length === 0
+        ? {}
+        : { credentialRefs: [...session.vault_ids] }),
+      ...(session.resources.length === 0
+        ? {}
+        : {
+            uploadedFileIds: session.resources
+              .filter((resource) => resource.type === 'file')
+              .map((resource) => resource.id),
+          }),
     };
     assertSessionOwnership(handle, session.metadata);
     return handle;
@@ -416,6 +589,14 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   async *events(handle: RuntimeHandle): AsyncIterable<RuntimeEvent> {
     const seen = new Set<string>();
     const startedAt = this.#clock.now().getTime();
+    const hardDeadline =
+      isManagedHandle(handle) && handle.deadlineAt !== undefined
+        ? Date.parse(handle.deadlineAt)
+        : startedAt + this.#limits.maxStreamDurationMs;
+    const streamDeadline = Math.min(
+      hardDeadline,
+      startedAt + this.#limits.maxStreamDurationMs,
+    );
     for (
       let connection = 0;
       connection <= this.#limits.maxStreamReconnects;
@@ -432,16 +613,12 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           yield event;
         }
       }
-      if (
-        this.#clock.now().getTime() - startedAt >
-        this.#limits.maxStreamDurationMs
-      ) {
+      if (this.#clock.now().getTime() >= streamDeadline) {
         throw new ManagedAgentsLimitError('Stream exceeds maxStreamDurationMs');
       }
       const remainingMs = Math.max(
         1,
-        this.#limits.maxStreamDurationMs -
-          (this.#clock.now().getTime() - startedAt),
+        streamDeadline - this.#clock.now().getTime(),
       );
       const signal = AbortSignal.timeout(remainingMs);
       try {
@@ -451,10 +628,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           { signal },
         );
         for await (const providerEvent of stream) {
-          if (
-            this.#clock.now().getTime() - startedAt >
-            this.#limits.maxStreamDurationMs
-          ) {
+          if (this.#clock.now().getTime() >= streamDeadline) {
             throw new ManagedAgentsLimitError(
               'Stream exceeds maxStreamDurationMs',
             );
@@ -593,6 +767,64 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     };
   }
 
+  async observeCommand(
+    handle: RuntimeHandle,
+    expectedCommand: string,
+  ): Promise<{
+    command: string;
+    exitCode: number;
+    startedAt: string;
+    completedAt: string;
+  }> {
+    if (expectedCommand.length < 1 || expectedCommand.length > 8_000)
+      throw new ManagedAgentsConfigurationError('expected command is invalid');
+    await this.#ownedSession(handle);
+    const source = await this.#wrap(() =>
+      this.#client.beta.sessions.events.list(handle.id, { order: 'asc' }),
+    );
+    const events: ManagedAgentsEvent[] = [];
+    for await (const event of source) {
+      events.push(event);
+      if (events.length > this.#limits.maxListedEvents)
+        throw new ManagedAgentsLimitError('Event collection limit exceeded');
+    }
+    const uses = events.filter((event) => event.type === 'agent.tool_use');
+    if (uses.length !== 1)
+      throw new Error('trusted verification must execute exactly one tool');
+    const use = uses[0]!;
+    const input = isRecord(use.input) ? use.input : undefined;
+    if (
+      use.name !== 'bash' ||
+      input?.command !== expectedCommand ||
+      typeof use.id !== 'string' ||
+      typeof use.processed_at !== 'string'
+    )
+      throw new Error('trusted verification command mismatch');
+    const results = events.filter(
+      (event) =>
+        event.type === 'agent.tool_result' && event.tool_use_id === use.id,
+    );
+    if (results.length !== 1)
+      throw new Error('trusted verification result is missing');
+    const result = results[0]!;
+    if (typeof result.processed_at !== 'string')
+      throw new Error('trusted verification result is malformed');
+    const content = rawTextContent(result.content);
+    const exitMatches = [
+      ...content.matchAll(/(?:^|\n)AGENTOS_EXIT_CODE=(\d{1,3})(?:\n|$)/g),
+    ];
+    if (exitMatches.length !== 1)
+      throw new Error('trusted verification exit code is missing');
+    const exitCode = Number(exitMatches[0]![1]);
+    if (!Number.isSafeInteger(exitCode) || exitCode < 0 || exitCode > 255)
+      throw new Error('trusted verification exit code is invalid');
+    const startedAt = validEventTimestamp(use.processed_at);
+    const completedAt = validEventTimestamp(result.processed_at);
+    if (Date.parse(completedAt) < Date.parse(startedAt))
+      throw new Error('trusted verification timestamps are invalid');
+    return { command: expectedCommand, exitCode, startedAt, completedAt };
+  }
+
   async usage(handle: RuntimeHandle): Promise<RuntimeUsage> {
     const session = await this.#wrap(() =>
       this.#client.beta.sessions.retrieve(handle.id),
@@ -621,19 +853,52 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
 
   async cleanup(handle: RuntimeHandle): Promise<void> {
     if (this.#cleanedSessions.has(handle.id)) return;
-    let session = await this.#ownedSession(handle);
-    let status = normalizeSessionStatus(session.status);
-    if (status === 'running' || status === 'rescheduling') {
-      await this.#sendInterrupt(handle.id);
-      session = await this.#ownedSession(handle);
-      status = normalizeSessionStatus(session.status);
+    try {
+      let session = await this.#ownedSession(handle);
+      let status = normalizeSessionStatus(session.status);
+      if (status === 'running' || status === 'rescheduling') {
+        await this.#sendInterrupt(handle.id);
+        session = await this.#ownedSession(handle);
+        status = normalizeSessionStatus(session.status);
+      }
+      if (status !== 'idle' && status !== 'terminated') {
+        throw new Error('Session remained active after interrupt');
+      }
+      await this.#wrap(() => this.#client.beta.sessions.archive(handle.id));
+      await this.#ownedSession(handle);
+      await this.#wrap(() => this.#client.beta.sessions.delete(handle.id));
+      if (isManagedHandle(handle)) {
+        for (const vaultId of handle.credentialRefs ?? []) {
+          await ignoreNotFound(() =>
+            this.#wrap(() =>
+              this.#client.beta.vaults.archive(vaultId, {
+                betas: [MANAGED_AGENTS_BETA],
+              }),
+            ),
+          );
+          await ignoreNotFound(() =>
+            this.#wrap(() =>
+              this.#client.beta.vaults.delete(vaultId, {
+                betas: [MANAGED_AGENTS_BETA],
+              }),
+            ),
+          );
+        }
+        for (const fileId of handle.uploadedFileIds ?? []) {
+          await ignoreNotFound(() =>
+            this.#wrap(() =>
+              this.#client.beta.files.delete(fileId, {
+                betas: [MANAGED_AGENTS_BETA],
+              }),
+            ),
+          );
+        }
+      }
+    } catch (error) {
+      if (!isProviderNotFound(error)) throw error;
+      // A previous cleanup may have deleted the session before its local
+      // checkpoint committed. Provider absence is the desired terminal state.
     }
-    if (status !== 'idle' && status !== 'terminated') {
-      throw new Error('Session remained active after interrupt');
-    }
-    await this.#wrap(() => this.#client.beta.sessions.archive(handle.id));
-    await this.#ownedSession(handle);
-    await this.#wrap(() => this.#client.beta.sessions.delete(handle.id));
     this.#cleanedSessions.add(handle.id);
   }
 
@@ -844,7 +1109,7 @@ function agentDefinition(agent: RuntimeAgent): Record<string, unknown> {
         mcp_server_name: server.name,
         default_config: {
           enabled: true,
-          permission_policy: { type: 'always_ask' },
+          permission_policy: { type: 'always_allow' },
         },
       })),
     ],
@@ -1012,24 +1277,110 @@ async function collectBounded<T>(
 function mapResource(
   resource: NonNullable<ManagedAgentsStartRequest['resources']>[number],
 ) {
-  if (resource.type === 'file') {
-    return {
-      type: 'file',
-      file_id: resource.fileId,
-      ...(resource.mountPath === undefined
-        ? {}
-        : { mount_path: resource.mountPath }),
-    };
-  }
   return {
-    type: 'github_repository',
-    url: resource.repositoryUrl,
-    authorization_token: resource.authorizationToken,
-    checkout: { type: 'commit', sha: resource.commitSha },
+    type: 'file',
+    file_id: resource.fileId,
     ...(resource.mountPath === undefined
       ? {}
       : { mount_path: resource.mountPath }),
   };
+}
+
+function managedBudget(maxCostMicrodollars: number | undefined):
+  | {
+      readonly type: 'limit';
+      readonly max_list_cost: {
+        readonly amount: string;
+        readonly currency: 'USD';
+      };
+    }
+  | undefined {
+  if (maxCostMicrodollars === undefined) return undefined;
+  if (
+    !Number.isSafeInteger(maxCostMicrodollars) ||
+    maxCostMicrodollars < 10_000
+  )
+    throw new ManagedAgentsConfigurationError(
+      'maxCostMicrodollars must fund at least one USD cent',
+    );
+  // Managed Agents budgets use integer minor currency units. Flooring keeps
+  // the remote hard limit at or below the locally reserved amount.
+  return {
+    type: 'limit',
+    max_list_cost: {
+      amount: String(Math.floor(maxCostMicrodollars / 10_000)),
+      currency: 'USD',
+    },
+  };
+}
+
+function isManagedHandle(
+  handle: RuntimeHandle,
+): handle is ManagedAgentsRuntimeHandle {
+  return 'runId' in handle && 'stepId' in handle;
+}
+
+function validDeadline(value: string): string {
+  if (!Number.isFinite(Date.parse(value)))
+    throw new ManagedAgentsConfigurationError(
+      'persisted session deadline is invalid',
+    );
+  return value;
+}
+
+function validEventTimestamp(value: string): string {
+  if (!Number.isFinite(Date.parse(value)))
+    throw new Error('trusted verification timestamp is malformed');
+  return value;
+}
+
+function rawTextContent(value: unknown): string {
+  if (!Array.isArray(value))
+    throw new Error('trusted verification result is malformed');
+  return value
+    .map((block) => {
+      if (
+        !isRecord(block) ||
+        block.type !== 'text' ||
+        typeof block.text !== 'string'
+      )
+        throw new Error('trusted verification result is malformed');
+      return block.text;
+    })
+    .join('');
+}
+
+function safeFilename(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, '-').slice(-96);
+  if (sanitized.length === 0) return 'artifact.json';
+  return sanitized;
+}
+
+function validatedMcpUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ManagedAgentsConfigurationError('Artifact MCP URL is invalid');
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.hash !== ''
+  )
+    throw new ManagedAgentsConfigurationError('Artifact MCP URL is invalid');
+  return url.toString();
+}
+
+async function ignoreNotFound(
+  operation: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (!isProviderNotFound(error)) throw error;
+  }
 }
 
 function userMessage(text: string): Record<string, unknown> {
@@ -1222,6 +1573,13 @@ function isLocalError(error: unknown): boolean {
         error.message === 'Malformed provider file metadata' ||
         error.message === 'Unsupported provider event' ||
         error.message === 'Unsupported provider status'))
+  );
+}
+
+function isProviderNotFound(error: unknown): boolean {
+  return (
+    error instanceof ManagedAgentsProviderError &&
+    (error.status === 404 || error.code === 'not_found_error')
   );
 }
 

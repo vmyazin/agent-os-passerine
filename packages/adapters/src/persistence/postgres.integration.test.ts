@@ -162,6 +162,54 @@ describePostgres('PostgreSQL persistence integration', () => {
       }),
     ).resolves.toEqual({ settled: true });
 
+    const expiredReservation = `reservation:${runId}:implementation`;
+    await expect(
+      store.admitSession({
+        reservationKey: expiredReservation,
+        projectId,
+        runId,
+        stepKey: 'implementation',
+        estimatedMicrodollars: 100_000,
+        workflowSpentMicrodollars: 0,
+        dailySpentMicrodollars: 0,
+        workflowLimitMicrodollars: 2_000_000,
+        dailyLimitMicrodollars: 5_000_000,
+        admissionNumerator: 80,
+        admissionDenominator: 100,
+        now: at,
+        leaseExpiresAt: isoTimestamp('2026-08-17T12:01:00.000Z'),
+      }),
+    ).resolves.toEqual({ admitted: true });
+    await expect(
+      store.admitSession({
+        reservationKey: `reservation:${runId}:review`,
+        projectId,
+        runId,
+        stepKey: 'review',
+        estimatedMicrodollars: 100_000,
+        workflowSpentMicrodollars: 0,
+        dailySpentMicrodollars: 0,
+        workflowLimitMicrodollars: 2_000_000,
+        dailyLimitMicrodollars: 5_000_000,
+        admissionNumerator: 80,
+        admissionDenominator: 100,
+        now: isoTimestamp('2026-08-17T12:02:00.000Z'),
+        leaseExpiresAt: isoTimestamp('2026-08-17T12:22:00.000Z'),
+      }),
+    ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
+    await store.settleSession({
+      reservationKey: expiredReservation,
+      runId,
+      stepKey: 'implementation',
+      actualMicrodollars: 100_000,
+      workflowSpentMicrodollars: 100_000,
+      dailySpentMicrodollars: 100_000,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      now: isoTimestamp('2026-08-17T12:02:00.000Z'),
+    });
+    await store.releaseSession(runId, 'implementation');
+
     const fencedDraft = {
       ...effect,
       key: `publisher:${suffix}`,

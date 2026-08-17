@@ -2,16 +2,21 @@ import { createHash } from 'node:crypto';
 
 import {
   createDurableTriggerOutbox,
+  createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createRepositoryRuntimeHandleVault,
+  createR2ArtifactStore,
+  createTrustedSourceSnapshotIngestor,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
 } from '@agentos/adapters';
 import {
   isoTimestamp,
+  parseAgentOsConfig,
   persistenceId,
+  type PublicationManifestBody,
   type RuntimeHandle,
   type RuntimeProvider,
 } from '@agentos/core';
@@ -32,6 +37,14 @@ function requiredRuntime(name: string): string {
   if (value === undefined || value.trim() === '')
     throw new Error(`${name} is required to control an active runtime session`);
   return value;
+}
+
+function parsedRuntimeJson<T>(name: string): T {
+  try {
+    return JSON.parse(requiredRuntime(name)) as T;
+  } catch {
+    throw new Error(`${name} must contain valid JSON`);
+  }
 }
 
 function cancellationRuntime(): RuntimeProvider {
@@ -68,6 +81,54 @@ export function workflowDispatchFromEnv() {
     );
   }
   const repository = repositoryFromEnv();
+  const selectedRepositories = parsedRuntimeJson<
+    PublicationManifestBody['repository'][]
+  >('GITHUB_SELECTED_REPOSITORIES_JSON');
+  if (selectedRepositories.length !== 1)
+    throw new Error('the POC requires exactly one selected repository');
+  const artifacts = createR2ArtifactStore({
+    accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
+    bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
+    accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
+    secretAccessKey: requiredRuntime(
+      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
+    ),
+    manifest: createDomainArtifactManifestStore(repository),
+  });
+  const sourceSnapshot = createTrustedSourceSnapshotIngestor({
+    githubApp: {
+      appId: Number(requiredRuntime('GITHUB_APP_ID')),
+      privateKey: requiredRuntime('GITHUB_APP_PRIVATE_KEY'),
+    },
+    artifacts,
+    resolveBinding: async (runId) => {
+      const run = await repository.getRun(persistenceId('run', runId));
+      if (run === undefined || run.pipeline !== 'feature')
+        throw new Error('source snapshot feature run does not exist');
+      const snapshots = await repository.listConfigSnapshots(run.id, {
+        limit: 2,
+      });
+      if (snapshots.length !== 1)
+        throw new Error('source snapshot config binding is unavailable');
+      const config = parseAgentOsConfig(snapshots[0]!.config);
+      const provenance = run.input as {
+        provenance?: { repositorySha?: unknown };
+      };
+      const repositorySha = provenance.provenance?.repositorySha;
+      if (
+        typeof repositorySha !== 'string' ||
+        !/^[0-9a-f]{40}$/.test(repositorySha)
+      )
+        throw new Error('source snapshot repository SHA is invalid');
+      return {
+        projectId: run.projectId,
+        runId: run.id,
+        repositorySha,
+        baseBranch: config.project.defaultBranch,
+        repository: selectedRepositories[0]!,
+      };
+    },
+  });
   let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;
   const runtimeHandles = () =>
     (vault ??= createRepositoryRuntimeHandleVault({
@@ -91,6 +152,7 @@ export function workflowDispatchFromEnv() {
       markCleaned: (externalId, at) =>
         runtimeHandles().markCleaned(externalId, at),
     },
+    sourceSnapshot,
   });
 }
 

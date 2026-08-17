@@ -1,7 +1,8 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   canonicalJsonValue,
+  isRuntimeEventType,
   isoTimestamp,
   persistenceId,
   type ArtifactMetadata,
@@ -29,10 +30,12 @@ import {
   reviewOutputSchema,
   specificationOutputSchema,
   testEvidenceSchema,
+  trustedCommandObservationSchema,
 } from './schemas.js';
 import { createAesWorkflowHandleSealer } from './handle-sealer.js';
 import {
   FEATURE_WORKFLOW_DEFAULTS,
+  FEATURE_WORKFLOW_TASK_ID,
   FeatureWorkflowTaskTransientError,
   type DurableFeatureWorkflowDependencies,
   type FeatureRole,
@@ -41,18 +44,6 @@ import {
   type WorkflowEffect,
   type WorkflowEffectLease,
 } from './types.js';
-
-const SAFE_RUNTIME_EVENTS = new Set([
-  'session.created',
-  'session.updated',
-  'session.completed',
-  'session.failed',
-  'session.cancelled',
-  'message.created',
-  'message.completed',
-  'tool.started',
-  'tool.completed',
-]);
 
 const asJson = (value: unknown): JsonValue => {
   const encoded = JSON.stringify(value);
@@ -65,6 +56,54 @@ function isJsonObject(
   value: JsonValue | undefined,
 ): value is { readonly [key: string]: JsonValue } {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseRuntimeAccess(value: JsonValue | undefined): {
+  readonly resources: readonly {
+    readonly type: 'file';
+    readonly fileId: string;
+    readonly mountPath?: string;
+  }[];
+  readonly credentialRefs: readonly string[];
+} {
+  if (
+    !isJsonObject(value) ||
+    !Array.isArray(value.resources) ||
+    !Array.isArray(value.credentialRefs)
+  )
+    throw new WorkflowPermanentError('runtime access checkpoint is invalid');
+  const resources = value.resources.map((resource) => {
+    if (
+      !isJsonObject(resource) ||
+      resource.type !== 'file' ||
+      typeof resource.fileId !== 'string' ||
+      resource.fileId.length < 1 ||
+      resource.fileId.length > 256 ||
+      (resource.mountPath !== undefined &&
+        (typeof resource.mountPath !== 'string' ||
+          resource.mountPath.length > 1_024))
+    )
+      throw new WorkflowPermanentError('runtime access checkpoint is invalid');
+    return {
+      type: 'file' as const,
+      fileId: resource.fileId,
+      ...(resource.mountPath === undefined
+        ? {}
+        : { mountPath: resource.mountPath }),
+    };
+  });
+  const credentialRefs = value.credentialRefs.map((credential) => {
+    if (
+      typeof credential !== 'string' ||
+      credential.length < 1 ||
+      credential.length > 256
+    )
+      throw new WorkflowPermanentError('runtime access checkpoint is invalid');
+    return credential;
+  });
+  if (resources.length > 32 || credentialRefs.length > 4)
+    throw new WorkflowPermanentError('runtime access checkpoint is invalid');
+  return { resources, credentialRefs };
 }
 
 const hash = (value: unknown): string =>
@@ -371,7 +410,7 @@ async function consumeEvents(
       typeof event.id !== 'string' ||
       event.id.length < 1 ||
       event.id.length > 256 ||
-      !SAFE_RUNTIME_EVENTS.has(event.type) ||
+      !isRuntimeEventType(event.type) ||
       !(event.occurredAt instanceof Date) ||
       !Number.isFinite(event.occurredAt.getTime())
     ) {
@@ -445,6 +484,10 @@ async function runAgentStep<T>(
   schema: ZodType<T>,
   ownerId: string,
   handleSealer: NonNullable<DurableFeatureWorkflowDependencies['handleSealer']>,
+  finalizeOutput?: (
+    handle: RuntimeHandle,
+    output: RuntimeOutput,
+  ) => Promise<unknown>,
 ): Promise<T> {
   const inputFingerprint = hash(input);
   const existing = await dependencies.repository.listStepRuns(
@@ -617,10 +660,23 @@ async function runAgentStep<T>(
 
     let handle: RuntimeHandle | undefined;
     let externalSessionId: ExternalSessionId | undefined;
-    let usageSettled = false;
+    let usageRecorded = false;
+    let recordedMicrodollars = 0;
     let runtimeStartAttempted = false;
-    const settleUsage = async (candidate?: RuntimeHandle): Promise<void> => {
-      if (usageSettled) return;
+    let completedResult: T | undefined;
+    let settlementFailure: WorkflowBudgetExhaustedError | undefined;
+    let runtimeAccess:
+      | {
+          readonly resources: readonly {
+            readonly type: 'file';
+            readonly fileId: string;
+            readonly mountPath?: string;
+          }[];
+          readonly credentialRefs: readonly string[];
+        }
+      | undefined;
+    const recordUsage = async (candidate?: RuntimeHandle): Promise<void> => {
+      if (usageRecorded) return;
       let usage = {
         inputTokens: 0,
         outputTokens: 0,
@@ -658,23 +714,46 @@ async function runAgentStep<T>(
         microdollars,
         recordedAt: at(dependencies.clock()),
       });
-      const settlement = await dependencies.checkpoints.settleSession({
-        reservationKey,
-        runId: workflow.runId,
-        stepKey,
-        actualMicrodollars: microdollars,
-        workflowSpentMicrodollars: workflowSpent + microdollars,
-        dailySpentMicrodollars: dailySpent + microdollars,
-        workflowLimitMicrodollars:
-          FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
-        dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
-        now: dependencies.clock(),
-      });
-      usageSettled = true;
-      if (!settlement.settled)
-        throw new WorkflowBudgetExhaustedError(settlement.reason);
+      recordedMicrodollars = microdollars;
+      usageRecorded = true;
     };
     try {
+      if (dependencies.runtimeAccess !== undefined) {
+        const accessKey = `runtime-access:${workflow.runId}:${stepKey}:${String(attempt)}`;
+        const accessClaim = await claimEffect(
+          dependencies,
+          ownerId,
+          effectDraft(
+            workflow.runId,
+            accessKey,
+            'runtime-session-access',
+            { stepKey, attempt, inputFingerprint },
+            dependencies.clock(),
+          ),
+          2 * 60_000,
+        );
+        if (accessClaim.effect.status === 'succeeded') {
+          runtimeAccess = parseRuntimeAccess(accessClaim.effect.output);
+        } else {
+          await dependencies.checkpoints.markEffectStarted(
+            accessClaim.lease,
+            dependencies.clock(),
+          );
+          runtimeAccess = await dependencies.runtimeAccess.prepare({
+            workflow,
+            stepId,
+            role,
+            stepInput: input,
+            idempotencyKey: accessKey,
+          });
+          runtimeAccess = parseRuntimeAccess(asJson(runtimeAccess));
+          await dependencies.checkpoints.completeEffect(
+            accessClaim.lease,
+            asJson(runtimeAccess),
+            dependencies.clock(),
+          );
+        }
+      }
       await dependencies.runtime.syncAgent(roleDefinition.agent);
       await dependencies.runtime.syncEnvironment(roleDefinition.environment);
       const started = await dependencies.checkpoints.markEffectStarted(
@@ -690,6 +769,12 @@ async function runAgentStep<T>(
         timeoutMs: FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs,
         idempotencyKey: effectKey,
         maxCostMicrodollars: estimatedMicrodollars,
+        ...(runtimeAccess === undefined
+          ? {}
+          : {
+              resources: runtimeAccess.resources,
+              credentialRefs: runtimeAccess.credentialRefs,
+            }),
       };
       if (
         started.status === 'started' &&
@@ -719,7 +804,13 @@ async function runAgentStep<T>(
           try {
             handle = await dependencies.runtime.start(startRequest);
           } catch (startError) {
-            if (startError instanceof WorkflowTransientError) throw startError;
+            if (startError instanceof WorkflowTransientError) {
+              // The stable provider contract uses WorkflowTransientError only
+              // when it knows no remote session was created. Ambiguous create
+              // failures are reconciled below and retain the reservation.
+              runtimeStartAttempted = false;
+              throw startError;
+            }
             const classified = classifiedRuntimeError(startError);
             if (!(classified instanceof WorkflowTransientError))
               throw classified;
@@ -734,11 +825,6 @@ async function runAgentStep<T>(
               );
           }
         }
-        await dependencies.checkpoints.attachExternalRef(
-          claim.lease,
-          handle.id,
-          dependencies.clock(),
-        );
         const externalId = persistenceId(
           'externalSession',
           `runtime:${handle.id}`,
@@ -769,6 +855,14 @@ async function runAgentStep<T>(
             createdAt: at(dependencies.clock()),
           });
         }
+        // The sealed restart handle is authoritative recovery state. Persist it
+        // before exposing the remote reference on the effect so a crash cannot
+        // leave an unrecoverable paid session.
+        await dependencies.checkpoints.attachExternalRef(
+          claim.lease,
+          handle.id,
+          dependencies.clock(),
+        );
       } else {
         externalSessionId = persistenceId(
           'externalSession',
@@ -782,14 +876,41 @@ async function runAgentStep<T>(
           external.state.version !== 'sealed-runtime-handle-state-v1' ||
           typeof external.state.sealedHandle !== 'string'
         ) {
-          throw new WorkflowPermanentError(
-            'persisted runtime handle is unavailable',
+          if (dependencies.runtime.reconcileStart === undefined)
+            throw new WorkflowPermanentError(
+              'persisted runtime handle is unavailable',
+            );
+          runtimeStartAttempted = true;
+          const repaired =
+            await dependencies.runtime.reconcileStart(startRequest);
+          if (repaired === undefined || repaired.id !== started.externalRef)
+            throw new RuntimeStartPendingError(
+              'runtime handle repair is pending reconciliation',
+            );
+          handle = repaired;
+          const aad = handleAad(workflow, stepId, role, started.externalRef);
+          const sealedHandle = await handleSealer.seal(repaired, aad);
+          await dependencies.repository.createExternalSession({
+            id: externalSessionId,
+            runId: persistenceId('run', workflow.runId),
+            stepRunId: stepId,
+            provider: 'runtime',
+            externalId: repaired.id,
+            status: 'active',
+            state: {
+              version: 'sealed-runtime-handle-state-v1',
+              sealedHandle,
+              aad,
+              role,
+            },
+            createdAt: at(dependencies.clock()),
+          });
+        } else {
+          handle = await handleSealer.open(
+            external.state.sealedHandle,
+            handleAad(workflow, stepId, role, started.externalRef),
           );
         }
-        handle = await handleSealer.open(
-          external.state.sealedHandle,
-          handleAad(workflow, stepId, role, started.externalRef),
-        );
         if (handle.id !== started.externalRef)
           throw new WorkflowPermanentError('persisted runtime handle mismatch');
       }
@@ -806,8 +927,12 @@ async function runAgentStep<T>(
           ),
         ),
       );
-      await settleUsage(handle);
-      const parsed = schema.safeParse(runtimeOutput.data);
+      await recordUsage(handle);
+      const candidate =
+        finalizeOutput === undefined
+          ? runtimeOutput.data
+          : await finalizeOutput(handle, runtimeOutput);
+      const parsed = schema.safeParse(candidate);
       if (!parsed.success)
         throw new WorkflowPermanentError(
           `runtime output for ${stepKey} is invalid`,
@@ -834,7 +959,7 @@ async function runAgentStep<T>(
           updatedAt: at(dependencies.clock()),
         });
       }
-      return parsed.data;
+      completedResult = parsed.data;
     } catch (rawError) {
       if (rawError instanceof RuntimeStartPendingError) {
         await dependencies.checkpoints.renewEffect(
@@ -846,7 +971,7 @@ async function runAgentStep<T>(
       }
       let failure = rawError;
       try {
-        await settleUsage(handle);
+        await recordUsage(handle);
       } catch (settlementError) {
         failure = settlementError;
       }
@@ -899,9 +1024,35 @@ async function runAgentStep<T>(
           updatedAt: at(dependencies.clock()),
         });
       }
-      if (usageSettled)
+      // A wall-clock-expired lease may still own a paid remote session. Keep
+      // both the reservation and global fence until cleanup confirms the
+      // session stopped. Ambiguous starts (attempted without a handle) are
+      // deliberately left for start/orphan reconciliation.
+      const safeToSettle =
+        !runtimeStartAttempted || (handle !== undefined && cleaned);
+      if (safeToSettle) {
+        if (!usageRecorded) await recordUsage(handle);
+        const settlement = await dependencies.checkpoints.settleSession({
+          reservationKey,
+          runId: workflow.runId,
+          stepKey,
+          actualMicrodollars: recordedMicrodollars,
+          workflowSpentMicrodollars: workflowSpent + recordedMicrodollars,
+          dailySpentMicrodollars: dailySpent + recordedMicrodollars,
+          workflowLimitMicrodollars:
+            FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
+          dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
+          now: dependencies.clock(),
+        });
         await dependencies.checkpoints.releaseSession(workflow.runId, stepKey);
+        if (!settlement.settled)
+          settlementFailure = new WorkflowBudgetExhaustedError(
+            settlement.reason,
+          );
+      }
     }
+    if (settlementFailure !== undefined) throw settlementFailure;
+    if (completedResult !== undefined) return completedResult;
   }
   throw lastError ?? new WorkflowPermanentError(`step ${stepKey} failed`);
 }
@@ -949,7 +1100,6 @@ export function createDurableFeatureWorkflow(
   dependencies: DurableFeatureWorkflowDependencies,
 ): { run(input: unknown): Promise<FeatureWorkflowResult> } {
   assertRoleIsolation(dependencies.roles);
-  const executionOwner = `workflow:${randomUUID()}`;
   const handleSealer =
     dependencies.handleSealer ?? createAesWorkflowHandleSealer(randomBytes(32));
   return Object.freeze({
@@ -958,6 +1108,7 @@ export function createDurableFeatureWorkflow(
       if (!parsed.success)
         throw new WorkflowPermanentError('invalid workflow input');
       const workflow = parsed.data;
+      const executionOwner = `workflow:${dependencies.execution?.triggerRunId ?? workflow.runId}:${dependencies.execution?.taskVersion ?? FEATURE_WORKFLOW_TASK_ID}`;
       const runId = persistenceId('run', workflow.runId);
       const run = await dependencies.repository.getRun(runId);
       if (run === undefined)
@@ -1063,11 +1214,20 @@ export function createDurableFeatureWorkflow(
             waitClaim.lease,
             dependencies.clock(),
           );
-          const waitpoint = await dependencies.approval.create({
-            idempotencyKey: waitEffectKey,
-            timeout: triggerWaitDuration(deadlineMs, dependencies.clock()),
-            tags: [`run:${workflow.runId}`, `approval:${approvalId}`],
-          });
+          let waitpoint: { readonly id: string };
+          try {
+            waitpoint = await dependencies.approval.create({
+              idempotencyKey: waitEffectKey,
+              timeout: triggerWaitDuration(deadlineMs, dependencies.clock()),
+              tags: [`run:${workflow.runId}`, `approval:${approvalId}`],
+            });
+          } catch {
+            // Trigger token creation is retried with the exact deterministic
+            // idempotency key. An ambiguous transport response is not terminal.
+            throw new WorkflowTransientError(
+              'approval waitpoint creation is pending reconciliation',
+            );
+          }
           waitpointId = waitpoint.id;
           await dependencies.checkpoints.attachExternalRef(
             waitClaim.lease,
@@ -1295,6 +1455,54 @@ export function createDurableFeatureWorkflow(
           }
         }
         await assertContinuable(dependencies, workflow, deadlineMs);
+        if (
+          dependencies.resolveTestCommand === undefined ||
+          dependencies.runtime.observeCommand === undefined
+        )
+          throw new WorkflowPermanentError(
+            'isolated trusted verification runtime is not configured',
+          );
+        const exactCommand = dependencies.resolveTestCommand(
+          testEvidence.command,
+        );
+        if (exactCommand.length < 1 || exactCommand.length > 8_000)
+          throw new WorkflowPermanentError('trusted test command is invalid');
+        const changeSetDigest = hash(asJson(changeSet));
+        const trustedCommandObservation = await runAgentStep(
+          dependencies,
+          workflow,
+          deadlineMs,
+          'verification',
+          'verification',
+          asJson({
+            version: 'trusted-verification-request-v1',
+            exactCommand,
+            instruction:
+              'Run exactly this command once with Bash. Do not invoke any other tool or command.',
+            sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
+            changeSetDigest,
+            changeSetArtifact: implementation.changeSet,
+            configDigest: workflow.digests.config,
+          }),
+          trustedCommandObservationSchema,
+          executionOwner,
+          handleSealer,
+          async (handle) => {
+            const observed = await dependencies.runtime.observeCommand!(
+              handle,
+              exactCommand,
+            );
+            return {
+              ...observed,
+              runId: workflow.runId,
+              stepId: 'verification',
+              repositorySha: workflow.source.repositorySha,
+              sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
+              changeSetDigest,
+              configDigest: workflow.digests.config,
+            };
+          },
+        );
         const verification = await dependencies.verifier.verify({
           runId: workflow.runId,
           workflow,
@@ -1303,6 +1511,7 @@ export function createDurableFeatureWorkflow(
           changeSet: asJson(changeSet),
           testEvidence: asJson(testEvidence),
           review: asJson(reviewBody),
+          trustedCommandObservation,
         });
         if (!verification.passed) {
           throw new WorkflowPermanentError(
@@ -1312,6 +1521,17 @@ export function createDurableFeatureWorkflow(
         if (!/^[0-9a-f]{64}$/.test(verification.evidenceDigest))
           throw new WorkflowPermanentError(
             'trusted verifier returned an invalid digest',
+          );
+        if (
+          verification.evidenceArtifact === undefined ||
+          verification.evidenceArtifact.projectId !== workflow.projectId ||
+          verification.evidenceArtifact.runId !== workflow.runId ||
+          verification.evidenceArtifact.stepId !== 'verification' ||
+          verification.evidenceArtifact.artifactId !== 'trusted-test-report' ||
+          verification.evidenceArtifact.digest !== verification.evidenceDigest
+        )
+          throw new WorkflowPermanentError(
+            'trusted verifier evidence artifact binding is invalid',
           );
         await assertContinuable(dependencies, workflow, deadlineMs);
         const publicationRequest =
@@ -1324,6 +1544,7 @@ export function createDurableFeatureWorkflow(
               implementation.changeSet,
               implementation.testEvidence,
               specification.definitionOfDone,
+              verification.evidenceArtifact,
             ],
           });
         const publicationKey = `publisher:${workflow.runId}`;

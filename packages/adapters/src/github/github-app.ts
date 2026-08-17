@@ -325,6 +325,29 @@ function createClient(
       });
       return { sha: responseSha, truncated: value.truncated, entries };
     },
+    async getBlob(blobSha: string) {
+      const value = record(
+        await request('GET', `${repo}/git/blobs/${pathSegment(blobSha)}`),
+      );
+      const responseSha = sha(value?.sha);
+      const size =
+        positiveInteger(value?.size) ?? (value?.size === 0 ? 0 : undefined);
+      const encoding = string(value?.encoding);
+      const content = string(value?.content);
+      if (
+        responseSha !== blobSha ||
+        size === undefined ||
+        encoding !== 'base64' ||
+        content === undefined ||
+        !/^[A-Za-z0-9+/=\r\n]*$/.test(content)
+      )
+        fail();
+      const bytes = Uint8Array.from(
+        Buffer.from(content.replace(/[\r\n]/g, ''), 'base64'),
+      );
+      if (bytes.byteLength !== size) fail();
+      return { sha: responseSha, size, bytes };
+    },
     async createBlob(input) {
       const value = record(
         await request('POST', `${repo}/git/blobs`, {

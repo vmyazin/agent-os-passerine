@@ -4,6 +4,7 @@ import {
   canonicalJsonValue,
   DEFAULT_PUBLICATION_POLICY,
   evaluatePublicationPolicy,
+  type ArtifactStore,
   type JsonValue,
 } from '@agentos/core';
 import { z } from 'zod';
@@ -14,7 +15,7 @@ import {
   reviewArtifactSchema,
   testEvidenceSchema,
 } from './schemas.js';
-import type { TrustedCommandExecutor, WorkflowVerifier } from './types.js';
+import type { WorkflowVerifier } from './types.js';
 
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const observationSchema = z
@@ -37,8 +38,9 @@ function hash(value: unknown): string {
 }
 
 export function createTrustedWorkflowVerifier(options: {
-  readonly executor: TrustedCommandExecutor;
   readonly policy?: unknown;
+  readonly artifacts?: ArtifactStore;
+  readonly attest?: (evidence: JsonValue) => JsonValue;
 }): WorkflowVerifier {
   const verifier: WorkflowVerifier = {
     async verify(input) {
@@ -57,18 +59,11 @@ export function createTrustedWorkflowVerifier(options: {
           throw new Error('final trusted review is not approved');
         const changeSetDigest = hash(changeSet);
         const observed = observationSchema.parse(
-          await options.executor.execute({
-            workflow: input.workflow,
-            stepId: input.producingStepId,
-            command: testEvidence.command,
-            changeSet: changeSet as JsonValue,
-            changeSetDigest,
-          }),
+          input.trustedCommandObservation,
         );
         const expected = {
           runId: input.runId,
-          stepId: input.producingStepId,
-          command: testEvidence.command,
+          stepId: 'verification',
           repositorySha: input.workflow.source.repositorySha,
           sourceSnapshotDigest: input.workflow.source.sourceSnapshotDigest,
           changeSetDigest,
@@ -85,14 +80,38 @@ export function createTrustedWorkflowVerifier(options: {
           throw new Error('trusted test command failed');
         }
         const evidence: JsonValue = {
-          version: 'workflow-verification-v2',
+          version: 'workflow-verification-v3',
           runId: input.runId,
           definitionOfDone,
           changeSet,
+          testEvidence,
           trustedCommandObservation: observed,
           review,
         };
-        return { passed: true, evidenceDigest: hash(evidence) };
+        if (options.artifacts === undefined || options.attest === undefined)
+          throw new Error('trusted verification attestation is not configured');
+        const report: JsonValue = {
+          version: 'trusted-test-report-v1',
+          evidence,
+          attestation: options.attest(evidence),
+        };
+        const evidenceArtifact = await options.artifacts.put({
+          scope: {
+            projectId: input.workflow.projectId,
+            runId: input.workflow.runId,
+            stepId: 'verification',
+          },
+          artifactId: 'trusted-test-report',
+          version: 1,
+          bytes: new TextEncoder().encode(canonicalJsonValue(report)),
+          mediaType: 'application/json',
+          retentionClass: 'working',
+        });
+        return {
+          passed: true,
+          evidenceDigest: evidenceArtifact.digest,
+          evidenceArtifact,
+        };
       } catch (error) {
         const message =
           error instanceof Error

@@ -80,7 +80,7 @@ describe('workflow checkpoint store', () => {
     ).resolves.toEqual({ admitted: false, reason: 'daily_budget' });
   });
 
-  it('does not let an old reservation bypass a newer global session lease', async () => {
+  it('does not let an expired reservation release the global session lease', async () => {
     const store = new InMemoryWorkflowCheckpointStore();
     const original = {
       reservationKey: 'reservation:run-1:specification',
@@ -108,14 +108,17 @@ describe('workflow checkpoint store', () => {
         now: '2026-08-17T12:02:00.000Z',
         leaseExpiresAt: '2026-08-17T12:22:00.000Z',
       }),
-    ).resolves.toEqual({ admitted: true });
+    ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
+    await store.releaseSession('run-1', 'specification');
     await expect(
       store.admitSession({
         ...original,
+        reservationKey: 'reservation:run-2:specification',
+        runId: 'run-2',
         now: '2026-08-17T12:02:01.000Z',
         leaseExpiresAt: '2026-08-17T12:22:01.000Z',
       }),
-    ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
+    ).resolves.toEqual({ admitted: true });
   });
 
   it('does not treat an ambiguous started runtime effect as safe to restart', async () => {

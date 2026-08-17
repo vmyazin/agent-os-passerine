@@ -1,5 +1,9 @@
+import { createHash } from 'node:crypto';
+
+import { canonicalJsonValue } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
+import { createInMemoryArtifactStorage } from '../artifacts/in-memory.js';
 import { createTrustedWorkflowVerifier } from './verifier.js';
 
 const digest = 'a'.repeat(64);
@@ -17,25 +21,27 @@ const workflow = {
     policy: digest,
   },
 };
-const executor = {
-  execute: async (input: {
-    workflow: typeof workflow;
-    stepId: string;
-    command: string;
-    changeSetDigest: string;
-  }) => ({
-    runId: input.workflow.runId,
-    stepId: input.stepId,
-    command: input.command,
-    exitCode: 0,
-    startedAt: '2026-08-17T12:00:00.000Z',
-    completedAt: '2026-08-17T12:00:01.000Z',
-    repositorySha: input.workflow.source.repositorySha,
-    sourceSnapshotDigest: input.workflow.source.sourceSnapshotDigest,
-    changeSetDigest: input.changeSetDigest,
-    configDigest: input.workflow.digests.config,
-  }),
-};
+const observation = (changeSet: unknown) => ({
+  runId: workflow.runId,
+  stepId: 'verification',
+  command:
+    "set +e; 'pnpm' 'test'; code=$?; printf 'AGENTOS_EXIT_CODE=%s' \"$code\"; exit \"$code\"",
+  exitCode: 0,
+  startedAt: '2026-08-17T12:00:00.000Z',
+  completedAt: '2026-08-17T12:00:01.000Z',
+  repositorySha: workflow.source.repositorySha,
+  sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
+  changeSetDigest: createHash('sha256')
+    .update(canonicalJsonValue(changeSet))
+    .digest('hex'),
+  configDigest: workflow.digests.config,
+});
+
+const verifier = () =>
+  createTrustedWorkflowVerifier({
+    artifacts: createInMemoryArtifactStorage().store,
+    attest: (evidence) => ({ kind: 'test-attestation', evidence }),
+  });
 
 const base = {
   runId: 'run-1',
@@ -58,23 +64,25 @@ const base = {
 
 describe('trusted workflow verifier', () => {
   it('produces deterministic evidence for a bounded allowed change set', async () => {
-    const verifier = createTrustedWorkflowVerifier({ executor });
+    const changeSet = {
+      version: 'change-set-v1' as const,
+      changes: [
+        {
+          operation: 'add' as const,
+          path: 'src/status.ts',
+          mode: '100644' as const,
+          content: 'export {};\n',
+        },
+      ],
+    };
     const input = {
       ...base,
-      changeSet: {
-        version: 'change-set-v1',
-        changes: [
-          {
-            operation: 'add',
-            path: 'src/status.ts',
-            mode: '100644',
-            content: 'export {};\n',
-          },
-        ],
-      },
+      changeSet,
+      trustedCommandObservation: observation(changeSet),
     };
-    const first = await verifier.verify(input);
-    const second = await verifier.verify(input);
+    const subject = verifier();
+    const first = await subject.verify(input);
+    const second = await subject.verify(input);
     expect(first).toEqual(second);
     expect(first).toMatchObject({
       passed: true,
@@ -83,19 +91,21 @@ describe('trusted workflow verifier', () => {
   });
 
   it('fails protected paths before publication', async () => {
-    const result = await createTrustedWorkflowVerifier({ executor }).verify({
+    const changeSet = {
+      version: 'change-set-v1' as const,
+      changes: [
+        {
+          operation: 'add' as const,
+          path: '.github/workflows/pwn.yml',
+          mode: '100644' as const,
+          content: 'name: pwn\n',
+        },
+      ],
+    };
+    const result = await verifier().verify({
       ...base,
-      changeSet: {
-        version: 'change-set-v1',
-        changes: [
-          {
-            operation: 'add',
-            path: '.github/workflows/pwn.yml',
-            mode: '100644',
-            content: 'name: pwn\n',
-          },
-        ],
-      },
+      changeSet,
+      trustedCommandObservation: observation(changeSet),
     });
     expect(result).toMatchObject({ passed: false });
     expect(result.findings?.join(' ')).toMatch(/denied path/i);

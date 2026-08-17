@@ -199,7 +199,6 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
       }
       if (
         this.#session !== undefined &&
-        this.#session.leaseExpiresAt > request.now &&
         (this.#session.runId !== request.runId ||
           this.#session.stepKey !== request.stepKey)
       ) {
@@ -250,7 +249,6 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
       return { admitted: false, reason: 'daily_budget' };
     if (
       this.#session !== undefined &&
-      this.#session.leaseExpiresAt > request.now &&
       (this.#session.runId !== request.runId ||
         this.#session.stepKey !== request.stepKey)
     ) {

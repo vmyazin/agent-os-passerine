@@ -157,4 +157,39 @@ describe('workflow outbox reconciliation', () => {
       'workflow-cleanup:deadline-run',
     ]);
   });
+
+  it('advances beyond one thousand old runs without starving later intents', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'fairness-project');
+    await repository.createProject({
+      id: projectId,
+      name: 'Fairness',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let index = 0; index < 1_001; index += 1) {
+      await repository.createRun({
+        id: persistenceId('run', `cancelled-${String(index).padStart(4, '0')}`),
+        projectId,
+        pipeline: 'feature',
+        status: 'cancelled',
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    const cancelled: string[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async ({ runId }) => {
+        cancelled.push(runId);
+      },
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({ scannedRuns: 1_001, delivered: 1_001, failed: 0 });
+    expect(cancelled).toHaveLength(1_001);
+    expect(cancelled).toContain('cancelled-1000');
+  });
 });

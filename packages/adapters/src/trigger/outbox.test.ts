@@ -61,6 +61,13 @@ function collaborators(
         wake: vi.fn(),
       },
       clock: () => now,
+      sourceSnapshot: {
+        ensure: vi.fn(async () => ({
+          key: 'source/bundle',
+          digest: 'b'.repeat(64),
+          sizeBytes: 123,
+        })),
+      },
       ...(runtime === undefined ? {} : { runtime }),
       ...(repository === undefined ? {} : { repository }),
       ...(runtime === undefined
@@ -79,8 +86,96 @@ function collaborators(
   };
 }
 
+describe('durable Trigger outbox start', () => {
+  it('ingests the SHA-bound source before one idempotent Trigger start', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const calls: string[] = [];
+    const ensure = vi.fn(async () => {
+      calls.push('source');
+      return {
+        key: 'source/bundle-v1',
+        digest: 'b'.repeat(64),
+        sizeBytes: 123,
+      };
+    });
+    const startFeature = vi.fn(async () => {
+      calls.push('trigger');
+      return { externalRunRef: 'trigger-run-1' };
+    });
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: { startFeature, cancel: vi.fn() },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: { ensure },
+      clock: () => now,
+    });
+    const request = { idempotencyKey: 'workflow-start:run-1', runId: 'run-1' };
+
+    await outbox.requestStart(request);
+    await outbox.requestStart(request);
+
+    expect(calls).toEqual(['source', 'trigger']);
+    await expect(checkpoints.getEffect('source:run-1')).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'source/bundle-v1',
+    });
+    await expect(
+      checkpoints.getEffect('workflow-start:run-1'),
+    ).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'trigger-run-1',
+    });
+  });
+
+  it('reconciles crashes after both source write and remote Trigger creation', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    let sourceAttempts = 0;
+    const ensure = vi.fn(async () => {
+      sourceAttempts += 1;
+      if (sourceAttempts === 1)
+        throw new Error('response lost after content-addressed source write');
+      return {
+        key: 'source/bundle-v1',
+        digest: 'b'.repeat(64),
+        sizeBytes: 123,
+      };
+    });
+    let triggerAttempts = 0;
+    const startFeature = vi.fn(async () => {
+      triggerAttempts += 1;
+      if (triggerAttempts === 1)
+        throw new Error('response lost after idempotent Trigger creation');
+      return { externalRunRef: 'trigger-run-1' };
+    });
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: { startFeature, cancel: vi.fn() },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: { ensure },
+      clock: () => now,
+    });
+    const request = { idempotencyKey: 'workflow-start:run-1', runId: 'run-1' };
+
+    await expect(outbox.requestStart(request)).rejects.toThrow('source write');
+    await expect(outbox.requestStart(request)).rejects.toThrow(
+      'Trigger creation',
+    );
+    await expect(outbox.requestStart(request)).resolves.toBeUndefined();
+    await expect(outbox.requestStart(request)).resolves.toBeUndefined();
+
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(startFeature).toHaveBeenCalledTimes(2);
+    await expect(
+      checkpoints.getEffect('workflow-start:run-1'),
+    ).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'trigger-run-1',
+    });
+  });
+});
+
 describe('durable Trigger outbox cancellation', () => {
-  it('does not stop Trigger when an active runtime cannot be cancelled safely', async () => {
+  it('still cancels Trigger when an active runtime cannot be cancelled safely', async () => {
     const { checkpoints, cancelTrigger, outbox } = collaborators();
     await startedEffect(checkpoints, {
       key: 'trigger:run-1',
@@ -97,7 +192,7 @@ describe('durable Trigger outbox cancellation', () => {
       outbox.requestCancel({ idempotencyKey: 'cancel:run-1', runId: 'run-1' }),
     ).rejects.toThrow('trusted runtime provider');
 
-    expect(cancelTrigger).not.toHaveBeenCalled();
+    expect(cancelTrigger).toHaveBeenCalledOnce();
     await expect(checkpoints.getEffect('cancel:run-1')).resolves.toMatchObject({
       status: 'started',
     });
@@ -138,6 +233,37 @@ describe('durable Trigger outbox cancellation', () => {
       },
       'authoritative run cancellation',
     );
+  });
+
+  it('signals Trigger even when runtime cancellation fails and retries only the failed side', async () => {
+    let runtimeAttempts = 0;
+    const runtime = {
+      cancel: vi.fn(async () => {
+        runtimeAttempts += 1;
+        if (runtimeAttempts === 1) throw new Error('provider unavailable');
+      }),
+      cleanup: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, cancelTrigger, outbox } = collaborators(runtime);
+    await startedEffect(checkpoints, {
+      key: 'trigger:run-1',
+      kind: 'trigger-workflow-start',
+      externalRef: 'trigger-run-1',
+    });
+    await startedEffect(checkpoints, {
+      key: 'runtime:run-1:implementation:1',
+      kind: 'runtime-session',
+      externalRef: 'runtime-session-1',
+    });
+    const request = { idempotencyKey: 'cancel:run-1', runId: 'run-1' };
+
+    await expect(outbox.requestCancel(request)).rejects.toThrow(
+      'provider unavailable',
+    );
+    expect(cancelTrigger).toHaveBeenCalledOnce();
+    await expect(outbox.requestCancel(request)).resolves.toBeUndefined();
+    expect(runtime.cancel).toHaveBeenCalledTimes(2);
+    expect(cancelTrigger).toHaveBeenCalledOnce();
   });
 
   it('conservatively charges an expired crash reservation before releasing it', async () => {
@@ -185,6 +311,98 @@ describe('durable Trigger outbox cancellation', () => {
       expect.objectContaining({
         model: 'conservative-reservation',
         microdollars: 700_000,
+      }),
+    ]);
+    await expect(
+      checkpoints.listExpiredReservations('run-1', now),
+    ).resolves.toEqual([]);
+  });
+
+  it('stops and charges an orphan before releasing its global concurrency fence', async () => {
+    const repository = new InMemoryDomainRepository();
+    const at = isoTimestamp('2026-08-17T11:00:00.000Z');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Orphan reconciliation',
+      createdAt: at,
+      updatedAt: at,
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'run-1'),
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const runtime = {
+      cancel: vi.fn(async () => undefined),
+      usage: vi.fn(async () => ({
+        inputTokens: 11,
+        outputTokens: 7,
+        runtimeMs: 1_200_000,
+      })),
+      cleanup: vi.fn(async () => undefined),
+    } as unknown as RuntimeProvider;
+    const { checkpoints, outbox } = collaborators(runtime, repository);
+    await startedEffect(checkpoints, {
+      key: 'runtime:run-1:implementation:1',
+      kind: 'runtime-session',
+      externalRef: 'runtime-session-1',
+    });
+    await checkpoints.admitSession({
+      reservationKey: 'reservation:runtime:run-1:implementation:1',
+      projectId: 'project-1',
+      runId: 'run-1',
+      stepKey: 'implementation',
+      estimatedMicrodollars: 700_000,
+      workflowSpentMicrodollars: 0,
+      dailySpentMicrodollars: 0,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      admissionNumerator: 80,
+      admissionDenominator: 100,
+      now: '2026-08-17T11:00:00.000Z',
+      leaseExpiresAt: '2026-08-17T11:21:00.000Z',
+    });
+    await expect(
+      checkpoints.admitSession({
+        reservationKey: 'reservation:runtime:run-2:specification:1',
+        projectId: 'project-1',
+        runId: 'run-2',
+        stepKey: 'specification',
+        estimatedMicrodollars: 100_000,
+        workflowSpentMicrodollars: 0,
+        dailySpentMicrodollars: 0,
+        workflowLimitMicrodollars: 2_000_000,
+        dailyLimitMicrodollars: 5_000_000,
+        admissionNumerator: 80,
+        admissionDenominator: 100,
+        now,
+        leaseExpiresAt: '2026-08-17T12:21:00.000Z',
+      }),
+    ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
+
+    await outbox.requestOrphanReconciliation({
+      idempotencyKey: 'orphan:run-1',
+      runId: 'run-1',
+    });
+
+    expect(runtime.cancel).toHaveBeenCalledOnce();
+    expect(runtime.cleanup).toHaveBeenCalledOnce();
+    await expect(
+      repository.getRun(persistenceId('run', 'run-1')),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'orphaned_runtime_session' },
+    });
+    await expect(
+      repository.listUsage(persistenceId('run', 'run-1')),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        microdollars: 700_000,
+        inputTokens: 11,
+        outputTokens: 7,
       }),
     ]);
     await expect(

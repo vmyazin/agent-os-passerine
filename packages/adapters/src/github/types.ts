@@ -34,6 +34,11 @@ export interface GitHubInstallationClient {
     readonly truncated: boolean;
     readonly entries: readonly GitTreeEntry[];
   }>;
+  getBlob(sha: string): Promise<{
+    readonly sha: string;
+    readonly size: number;
+    readonly bytes: Uint8Array;
+  }>;
   createBlob(input: {
     readonly content: string;
     readonly encoding: 'utf-8';

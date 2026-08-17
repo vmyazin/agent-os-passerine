@@ -26,8 +26,10 @@ export async function reconcileWorkflowOutbox(
   let delivered = 0;
   let failed = 0;
   let after: TimestampListCursor<WorkflowRunId> | undefined;
-  // A bounded sweep avoids an accidental infinite poll; the next cron continues.
-  for (let page = 0; page < 10; page += 1) {
+  // Keep a strict advancing cursor and scan the complete bounded POC domain.
+  // The former ten-page cap restarted from the oldest run every cron and could
+  // permanently starve actionable runs after the first 1,000.
+  for (let page = 0; page < 10_000; page += 1) {
     const runs = await repository.listRuns({
       limit: 100,
       ...(after === undefined ? {} : { after }),
@@ -45,6 +47,20 @@ export async function reconcileWorkflowOutbox(
       };
       let run = listedRun;
       const now = clock();
+      if (
+        run.pipeline === 'feature' &&
+        ['pending', 'running', 'waiting'].includes(run.status) &&
+        outbox.requestOrphanReconciliation !== undefined
+      ) {
+        await deliver(() =>
+          outbox.requestOrphanReconciliation!({
+            idempotencyKey: `workflow-orphan-reconcile:${run.id}`,
+            runId: run.id,
+          }),
+        );
+        const refreshed = await repository.getRun(run.id);
+        if (refreshed !== undefined) run = refreshed;
+      }
       if (
         run.pipeline === 'feature' &&
         ['pending', 'running', 'waiting'].includes(run.status) &&

@@ -58,20 +58,23 @@ export interface ManagedAgentsFileResource {
   readonly mountPath?: string;
 }
 
-export interface ManagedAgentsSourceSnapshotResource {
-  readonly type: 'source_snapshot';
-  readonly repositoryUrl: string;
-  readonly commitSha: string;
-  readonly authorizationToken: string;
-  readonly mountPath?: string;
-}
-
-export type ManagedAgentsSessionResource =
-  ManagedAgentsFileResource | ManagedAgentsSourceSnapshotResource;
+export type ManagedAgentsSessionResource = ManagedAgentsFileResource;
 
 export interface ManagedAgentsStartRequest extends RuntimeStartRequest {
   readonly roleId?: string;
   readonly resources?: readonly ManagedAgentsSessionResource[];
+}
+
+export interface ManagedAgentsAccessFile {
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly bytes: Uint8Array;
+  readonly mountPath: string;
+}
+
+export interface ManagedAgentsSessionAccess {
+  readonly resources: readonly ManagedAgentsFileResource[];
+  readonly credentialRefs: readonly string[];
 }
 
 export interface ManagedAgentsRuntimeHandle extends RuntimeHandle {
@@ -81,6 +84,9 @@ export interface ManagedAgentsRuntimeHandle extends RuntimeHandle {
   readonly runId: string;
   readonly stepId: string;
   readonly ownershipCapability: string;
+  readonly deadlineAt?: string;
+  readonly credentialRefs?: readonly string[];
+  readonly uploadedFileIds?: readonly string[];
 }
 
 export interface ManagedAgentsCustomToolResult {
@@ -110,6 +116,12 @@ export interface ManagedAgentsStatus {
 }
 
 export interface ManagedAgentsProvider extends RuntimeProvider {
+  provisionSessionAccess(input: {
+    readonly idempotencyKey: string;
+    readonly mcpUrl?: string;
+    readonly bearerToken?: string;
+    readonly files: readonly ManagedAgentsAccessFile[];
+  }): Promise<ManagedAgentsSessionAccess>;
   start(
     request: ManagedAgentsStartRequest,
   ): Promise<ManagedAgentsRuntimeHandle>;
@@ -119,4 +131,8 @@ export interface ManagedAgentsProvider extends RuntimeProvider {
   syncEnvironment(environment: ManagedAgentsRuntimeEnvironment): Promise<void>;
   listEvents(handle: RuntimeHandle): Promise<readonly RuntimeEvent[]>;
   status(handle: RuntimeHandle): Promise<ManagedAgentsStatus>;
+  observeCommand(
+    handle: RuntimeHandle,
+    expectedCommand: string,
+  ): Promise<import('@agentos/core').RuntimeObservedCommand>;
 }

@@ -39,6 +39,7 @@ export interface ManagedAgentsRemoteSession {
   metadata: Record<string, string>;
   status: 'rescheduling' | 'running' | 'idle' | 'terminated';
   resources: Array<{ id: string; type: string; [key: string]: unknown }>;
+  vault_ids?: string[];
   archived_at: string | null;
   usage: {
     input_tokens?: number;
@@ -69,6 +70,13 @@ export interface ManagedAgentsRemoteFile {
   size_bytes: number;
   downloadable?: boolean;
   scope?: { type: 'session'; id: string } | null;
+}
+
+export interface ManagedAgentsRemoteVault {
+  id: string;
+  type: 'vault';
+  metadata: Record<string, string>;
+  archived_at: string | null;
 }
 
 interface ManagedAgentsAgentsResource {
@@ -112,9 +120,70 @@ export interface ManagedAgentsClient {
     readonly sessions: ManagedAgentsSessionsResource;
     readonly files: {
       list(params: {
-        scope_id: string;
+        scope_id?: string;
         betas: readonly ['managed-agents-2026-04-01'];
       }): Promise<AsyncIterable<ManagedAgentsRemoteFile>>;
+      upload(params: {
+        file: unknown;
+        betas: readonly ['managed-agents-2026-04-01'];
+      }): Promise<ManagedAgentsRemoteFile>;
+      delete(
+        id: string,
+        params: {
+          betas: readonly ['managed-agents-2026-04-01'];
+        },
+      ): Promise<unknown>;
+    };
+    readonly vaults: {
+      list(params: {
+        include_archived: boolean;
+        betas: readonly ['managed-agents-2026-04-01'];
+      }): Promise<AsyncIterable<ManagedAgentsRemoteVault>>;
+      create(params: {
+        display_name: string;
+        metadata?: Record<string, string>;
+        betas: readonly ['managed-agents-2026-04-01'];
+      }): Promise<ManagedAgentsRemoteVault>;
+      archive(
+        id: string,
+        params: {
+          betas: readonly ['managed-agents-2026-04-01'];
+        },
+      ): Promise<ManagedAgentsRemoteVault>;
+      delete(
+        id: string,
+        params: {
+          betas: readonly ['managed-agents-2026-04-01'];
+        },
+      ): Promise<unknown>;
+      credentials: {
+        list(
+          vaultId: string,
+          params: {
+            include_archived: boolean;
+            betas: readonly ['managed-agents-2026-04-01'];
+          },
+        ): Promise<
+          AsyncIterable<{
+            id: string;
+            metadata: Record<string, string>;
+            archived_at: string | null;
+          }>
+        >;
+        create(
+          vaultId: string,
+          params: {
+            auth: {
+              type: 'static_bearer';
+              token: string;
+              mcp_server_url: string;
+            };
+            display_name: string;
+            metadata?: Record<string, string>;
+            betas: readonly ['managed-agents-2026-04-01'];
+          },
+        ): Promise<unknown>;
+      };
     };
   };
 }

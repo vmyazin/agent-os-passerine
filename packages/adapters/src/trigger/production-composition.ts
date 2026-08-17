@@ -10,10 +10,12 @@ const FEATURE_ROLES: readonly FeatureRole[] = [
   'planning',
   'implementation',
   'review',
+  'verification',
 ];
 
 export function resolveFeatureRolesFromSnapshot(
   snapshot: ConfigSnapshot,
+  options?: { readonly artifactMcpUrl: string },
 ): FeatureWorkflowRoles {
   const config = parseAgentOsConfig(snapshot.config);
   const pipeline = config.pipelines.feature;
@@ -30,6 +32,26 @@ export function resolveFeatureRolesFromSnapshot(
         throw new Error(`${role} has no explicit environment`);
       const environment = config.environments[environmentId]!;
       const model = config.models[agent.model]!;
+      const configuredMcps = [...new Set([...agent.mcps, ...environment.mcps])];
+      if (
+        options !== undefined &&
+        role !== 'verification' &&
+        (configuredMcps.length !== 1 || configuredMcps[0] !== 'artifacts')
+      )
+        throw new Error(`${role} must allow only the artifacts MCP`);
+      if (
+        role === 'verification' &&
+        (configuredMcps.length !== 0 ||
+          agent.tools.length !== 1 ||
+          agent.tools[0] !== 'bash')
+      )
+        throw new Error('verification must be Bash-only with no MCP access');
+      if (environment.networking?.type === 'unrestricted')
+        throw new Error(`${role} cannot use unrestricted networking`);
+      const artifactHost =
+        options === undefined
+          ? undefined
+          : new URL(options.artifactMcpUrl).hostname;
       return [
         role,
         {
@@ -38,13 +60,39 @@ export function resolveFeatureRolesFromSnapshot(
             model: model.model,
             instructions: agent.prompt,
             tools: [...agent.tools],
-            mcps: [...agent.mcps],
+            mcps:
+              role === 'verification'
+                ? []
+                : options === undefined
+                  ? [...agent.mcps]
+                  : [options.artifactMcpUrl],
           },
           environment: {
             id: environmentId,
             runtime: environment.runtime,
             image: environment.image,
             variables: { ...environment.variables },
+            networking: {
+              type: 'limited' as const,
+              allowedHosts: [
+                ...new Set([
+                  ...(environment.networking?.type === 'limited'
+                    ? environment.networking.allowedHosts
+                    : []),
+                  ...(artifactHost === undefined || role === 'verification'
+                    ? []
+                    : [artifactHost]),
+                ]),
+              ],
+              allowMcpServers: options !== undefined && role !== 'verification',
+              allowPackageManagers:
+                environment.networking?.type === 'limited'
+                  ? environment.networking.allowPackageManagers
+                  : false,
+            },
+            ...(environment.packages === undefined
+              ? {}
+              : { packages: environment.packages }),
           },
           maxReservationMicrodollars: 700_000,
         },

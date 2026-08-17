@@ -7,6 +7,7 @@ import type {
   RuntimeEnvironment,
   RuntimeProvider,
   RuntimeHandle,
+  RuntimeFileResource,
   RuntimeUsage,
 } from '@agentos/core';
 
@@ -33,7 +34,7 @@ export class FeatureWorkflowTaskTransientError extends Error {
 }
 
 export type FeatureRole =
-  'specification' | 'planning' | 'implementation' | 'review';
+  'specification' | 'planning' | 'implementation' | 'review' | 'verification';
 
 export interface FeatureRoleDefinition {
   readonly agent: RuntimeAgent;
@@ -92,6 +93,7 @@ export interface WorkflowApprovalWaiter {
 export interface WorkflowVerificationResult {
   readonly passed: boolean;
   readonly evidenceDigest: string;
+  readonly evidenceArtifact?: ArtifactMetadata;
   readonly findings?: readonly string[];
 }
 
@@ -104,6 +106,7 @@ export interface WorkflowVerifier {
     readonly changeSet: JsonValue;
     readonly testEvidence: JsonValue;
     readonly review: JsonValue;
+    readonly trustedCommandObservation: TrustedCommandObservation;
   }): Promise<WorkflowVerificationResult>;
 }
 
@@ -118,16 +121,6 @@ export interface TrustedCommandObservation {
   readonly sourceSnapshotDigest: string;
   readonly changeSetDigest: string;
   readonly configDigest: string;
-}
-
-export interface TrustedCommandExecutor {
-  execute(input: {
-    readonly workflow: FeatureWorkflowInput;
-    readonly stepId: string;
-    readonly command: string;
-    readonly changeSet: JsonValue;
-    readonly changeSetDigest: string;
-  }): Promise<TrustedCommandObservation>;
 }
 
 export interface WorkflowHandleSealer {
@@ -288,6 +281,18 @@ export interface DurableFeatureWorkflowDependencies {
   readonly checkpoints: WorkflowCheckpointStore;
   readonly artifacts: ArtifactStore;
   readonly runtime: RuntimeProvider;
+  readonly runtimeAccess?: {
+    prepare(input: {
+      readonly workflow: FeatureWorkflowInput;
+      readonly stepId: string;
+      readonly role: FeatureRole;
+      readonly stepInput: JsonValue;
+      readonly idempotencyKey: string;
+    }): Promise<{
+      readonly resources: readonly RuntimeFileResource[];
+      readonly credentialRefs: readonly string[];
+    }>;
+  };
   readonly approval: WorkflowApprovalWaiter;
   readonly roles: FeatureWorkflowRoles;
   readonly clock: () => string;
@@ -297,11 +302,13 @@ export interface DurableFeatureWorkflowDependencies {
     projectId: string,
   ) => Promise<number>;
   readonly verifier: WorkflowVerifier;
+  readonly resolveTestCommand?: (commandKey: string) => string;
   readonly publicationAuthority: WorkflowPublicationAuthority;
   readonly publisher: WorkflowPublisher;
   readonly execution?: {
     readonly taskVersion: string;
     readonly deploymentVersion: string;
+    readonly triggerRunId?: string;
   };
   readonly handleSealer?: WorkflowHandleSealer;
 }

@@ -229,7 +229,7 @@ function normalizeIdle(
 function threadStatus(
   base: { id: string; occurredAt: Date },
   event: ManagedAgentsEvent,
-  status: string,
+  status: 'running' | 'idle' | 'rescheduling' | 'terminated',
   fingerprint: string | undefined,
 ): RuntimeEvent {
   return {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { isRuntimeEventType } from '@agentos/core';
 
 import type {
   ManagedAgentsClient,
@@ -49,6 +50,24 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
     mime_type: string;
     size_bytes: number;
     scope?: { type: 'session'; id: string } | null;
+  }> = [];
+  readonly vaults: Array<{
+    id: string;
+    type: 'vault';
+    metadata: Record<string, string>;
+    archived_at: string | null;
+  }> = [];
+  readonly credentials = new Map<
+    string,
+    Array<{
+      id: string;
+      metadata: Record<string, string>;
+      archived_at: string | null;
+    }>
+  >();
+  readonly credentialCreates: Array<{
+    vaultId: string;
+    params: unknown;
   }> = [];
   readonly eventListCalls = new Map<string, number>();
   readonly eventListYields = new Map<string, number>();
@@ -158,6 +177,14 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
           agent: { id: agent.id, version: agent.version },
           environment_id: String(request.environment_id),
           metadata: request.metadata as Record<string, string>,
+          resources: (
+            (request.resources as
+              Array<{ file_id?: string; type: string }> | undefined) ?? []
+          ).map((resource) => ({
+            id: resource.file_id ?? 'resource',
+            type: resource.type,
+          })),
+          vault_ids: (request.vault_ids as string[] | undefined) ?? [],
         });
         this.sessions.set(session.id, session);
         this.eventHistory.set(session.id, []);
@@ -224,6 +251,73 @@ class FakeManagedAgentsClient implements ManagedAgentsClient {
       list: async (params?: unknown) => {
         this.fileListParams.push(params);
         return this.iterate(this.files);
+      },
+      upload: async (params: unknown) => {
+        const file = (params as { file: File }).file;
+        const created = {
+          id: `file_${this.files.length + 1}`,
+          type: 'file' as const,
+          filename: file.name,
+          mime_type: file.type,
+          size_bytes: file.size,
+          downloadable: true,
+          scope: null,
+        };
+        this.files.push(created);
+        return created;
+      },
+      delete: async (id: string) => {
+        const index = this.files.findIndex((file) => file.id === id);
+        if (index < 0)
+          throw Object.assign(new Error('not found'), { status: 404 });
+        this.files.splice(index, 1);
+        return { id, type: 'file_deleted' };
+      },
+    },
+    vaults: {
+      list: async () => this.iterate(this.vaults),
+      create: async (params: unknown) => {
+        const request = params as { metadata?: Record<string, string> };
+        const vault = {
+          id: `vault_${this.vaults.length + 1}`,
+          type: 'vault' as const,
+          metadata: request.metadata ?? {},
+          archived_at: null,
+        };
+        this.vaults.push(vault);
+        return vault;
+      },
+      archive: async (id: string) => {
+        const vault = this.vaults.find((candidate) => candidate.id === id);
+        if (!vault)
+          throw Object.assign(new Error('not found'), { status: 404 });
+        vault.archived_at = NOW.toISOString();
+        return vault;
+      },
+      delete: async (id: string) => {
+        const index = this.vaults.findIndex((vault) => vault.id === id);
+        if (index < 0)
+          throw Object.assign(new Error('not found'), { status: 404 });
+        this.vaults.splice(index, 1);
+        return { id, type: 'vault_deleted' };
+      },
+      credentials: {
+        list: async (vaultId: string) =>
+          this.iterate(this.credentials.get(vaultId) ?? []),
+        create: async (vaultId: string, params: unknown) => {
+          this.credentialCreates.push({ vaultId, params });
+          const request = params as { metadata?: Record<string, string> };
+          const credential = {
+            id: `credential_${(this.credentials.get(vaultId)?.length ?? 0) + 1}`,
+            metadata: request.metadata ?? {},
+            archived_at: null,
+          };
+          this.credentials.set(vaultId, [
+            ...(this.credentials.get(vaultId) ?? []),
+            credential,
+          ]);
+          return credential;
+        },
       },
     },
   };
@@ -409,7 +503,7 @@ describe('declarative resource sync', () => {
             type: 'mcp_toolset',
             default_config: {
               enabled: true,
-              permission_policy: { type: 'always_ask' },
+              permission_policy: { type: 'always_allow' },
             },
           }),
         ]),
@@ -519,7 +613,7 @@ describe('declarative resource sync', () => {
       }),
     );
     const provider = await createManagedAgentsRuntimeProvider({
-      apiKey: 'key',
+      apiKey: 'test-key',
       client,
     });
     const conflict = Object.assign(new Error('remote payload with secret'), {
@@ -705,6 +799,104 @@ describe('declarative resource sync', () => {
 });
 
 describe('sessions and controls', () => {
+  it('provisions restart-idempotent scoped MCP vault auth and mounted files without putting the bearer in session input', async () => {
+    const { client, provider } = await syncedProvider();
+    const accessRequest = {
+      idempotencyKey: 'runtime-access-1',
+      mcpUrl: 'https://agentos.example/api/mcp/artifacts',
+      bearerToken: 'aoc1.secret-scoped-capability',
+      files: [
+        {
+          filename: 'source-bundle.json',
+          mediaType: 'application/json',
+          bytes: new TextEncoder().encode('{"version":"source-bundle-v1"}'),
+          mountPath: '/workspace/inputs/source-bundle.json',
+        },
+      ],
+    };
+    const first = await provider.provisionSessionAccess(accessRequest);
+    const second = await provider.provisionSessionAccess(accessRequest);
+    expect(second).toEqual(first);
+    expect(client.files).toHaveLength(1);
+    expect(client.vaults).toHaveLength(1);
+    expect(client.credentialCreates).toHaveLength(1);
+    expect(client.credentialCreates[0]).toMatchObject({
+      vaultId: first.credentialRefs[0],
+      params: {
+        auth: {
+          type: 'static_bearer',
+          token: accessRequest.bearerToken,
+          mcp_server_url: accessRequest.mcpUrl,
+        },
+      },
+    });
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: { artifactAccess: 'vault-bound' },
+      resources: first.resources,
+      credentialRefs: first.credentialRefs,
+      idempotencyKey: 'runtime-session-1',
+    });
+    expect(client.sessionCreates[0]).toMatchObject({
+      vault_ids: first.credentialRefs,
+      resources: [
+        {
+          type: 'file',
+          file_id: first.resources[0]!.fileId,
+          mount_path: '/workspace/inputs/source-bundle.json',
+        },
+      ],
+    });
+    expect(JSON.stringify(client.sessionCreates[0])).not.toContain(
+      accessRequest.bearerToken,
+    );
+    await provider.cleanup(handle);
+    expect(client.vaults).toHaveLength(0);
+    expect(client.files).toHaveLength(0);
+  });
+
+  it('derives trusted command evidence only from one exact provider-observed Bash call and its result', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'verification',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'verify',
+    });
+    const command =
+      "set +e; 'pnpm' 'test'; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' \"$code\"; exit \"$code\"";
+    client.eventHistory.set(handle.id, [
+      {
+        id: 'tool-1',
+        type: 'agent.tool_use',
+        name: 'bash',
+        input: { command },
+        processed_at: '2026-08-17T12:00:00.000Z',
+      },
+      {
+        id: 'result-1',
+        type: 'agent.tool_result',
+        tool_use_id: 'tool-1',
+        content: [{ type: 'text', text: 'ok\nAGENTOS_EXIT_CODE=0\n' }],
+        is_error: false,
+        processed_at: '2026-08-17T12:00:01.000Z',
+      },
+    ]);
+    await expect(provider.observeCommand(handle, command)).resolves.toEqual({
+      command,
+      exitCode: 0,
+      startedAt: '2026-08-17T12:00:00.000Z',
+      completedAt: '2026-08-17T12:00:01.000Z',
+    });
+    await expect(
+      provider.observeCommand(handle, `${command} && curl attacker.test`),
+    ).rejects.toThrow('mismatch');
+  });
+
   it('reconciles an idempotent start across provider replicas', async () => {
     const { client, provider } = await syncedProvider();
     const request = {
@@ -737,13 +929,6 @@ describe('sessions and controls', () => {
       input: { task: 'Implement it' },
       resources: [
         { type: 'file', fileId: 'file_1', mountPath: '/workspace/spec.md' },
-        {
-          type: 'source_snapshot',
-          repositoryUrl: 'https://github.com/example/repo',
-          commitSha: '0123456789abcdef',
-          authorizationToken: 'github-secret',
-          mountPath: '/workspace/repo',
-        },
       ],
     });
 
@@ -778,23 +963,63 @@ describe('sessions and controls', () => {
         ],
         resources: [
           { type: 'file', file_id: 'file_1', mount_path: '/workspace/spec.md' },
-          {
-            type: 'github_repository',
-            url: 'https://github.com/example/repo',
-            authorization_token: 'github-secret',
-            checkout: { type: 'commit', sha: '0123456789abcdef' },
-            mount_path: '/workspace/repo',
-          },
         ],
       }),
     );
     expect(JSON.stringify(client.sessionCreates[0])).not.toContain(
       handle.ownershipCapability,
     );
+    expect(JSON.stringify(client.sessionCreates[0])).not.toMatch(
+      /github|authorization_token/i,
+    );
     expect(
       (client.sessionCreates[0] as { metadata: Record<string, string> })
         .metadata,
     ).not.toHaveProperty('agentos.provider_instance_id');
+  });
+
+  it('passes a conservative hard USD budget and restart-stable deadline to Managed Agents', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'bounded work',
+      timeoutMs: 20 * 60_000,
+      maxCostMicrodollars: 705_999,
+      idempotencyKey: 'bounded-session-1',
+    });
+    expect(client.sessionCreates[0]).toEqual(
+      expect.objectContaining({
+        budget: {
+          type: 'limit',
+          max_list_cost: { amount: '70', currency: 'USD' },
+        },
+        metadata: expect.objectContaining({
+          'agentos.session_deadline': '2026-08-17T12:20:00.000Z',
+        }),
+      }),
+    );
+    expect(handle).toMatchObject({ deadlineAt: '2026-08-17T12:20:00.000Z' });
+    const replica = await createManagedAgentsRuntimeProvider({
+      apiKey: 'test-key',
+      client,
+    });
+    await replica.syncAgent(agent);
+    await replica.syncEnvironment(environment);
+    await expect(
+      replica.reconcileStart({
+        runId: 'run-1',
+        stepId: 'step-1',
+        agentId: 'writer',
+        environmentId: 'node',
+        input: 'bounded work',
+        timeoutMs: 20 * 60_000,
+        maxCostMicrodollars: 705_999,
+        idempotencyKey: 'bounded-session-1',
+      }),
+    ).resolves.toMatchObject({ deadlineAt: '2026-08-17T12:20:00.000Z' });
   });
 
   it('always creates separate sessions, including distinct roles', async () => {
@@ -1137,6 +1362,9 @@ describe('bounded normalization, replay, output, and usage', () => {
       },
     ]);
     const normalized = await provider.listEvents(handle);
+    expect(normalized.every((event) => isRuntimeEventType(event.type))).toBe(
+      true,
+    );
     expect(normalized.map((event) => event.type)).toEqual([
       'requires_action',
       'retries_exhausted',

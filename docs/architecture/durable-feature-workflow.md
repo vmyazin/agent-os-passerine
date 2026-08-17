@@ -7,19 +7,24 @@ session leases.
 
 ## Execution path
 
-1. `POST /api/features` creates the idempotent `pending` domain run. Only after
-   that commit does the control plane request the versioned Trigger task.
+1. `POST /api/features` creates the idempotent `pending` domain run. A durable
+   outbox effect then reads the exact base commit with the selected GitHub App,
+   validates and writes a bounded `source/bundle-v1` artifact, and only then
+   requests the versioned Trigger task.
 2. The specification role writes separately hashed specification and measurable
    Definition-of-Done artifacts.
 3. The workflow creates a scope hash over the run, configuration, specification,
    and DoD. It stores a domain approval and a Trigger waitpoint reference. The
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
-4. Planning, implementation/testing, and review use distinct agents,
+4. Planning, implementation/testing, review, and trusted verification use distinct agents,
    environments, and runtime sessions. A requested fix gets one fresh
    implementation session followed by a fresh final-review session; a final
    `changes_requested` decision cannot publish.
-5. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
+5. Verification runs the allowlisted test command in a separate, secretless
+   Managed sandbox with only source/change inputs and Bash. Provider-observed
+   tool-use/result records are bound into a signed, bounded test-report artifact.
+6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
    protected-path policy. A trusted publication authority—not an agent—creates
    the publisher input. The GitHub App publisher revalidates the stale base and
    creates only a draft PR.
@@ -44,15 +49,18 @@ Managed Agents session listing reconstructs the same HMAC-derived ownership
 capability across replicas. Publication retries re-enter the composite GitHub
 publisher's durable reconciliation. Full runtime handles are AES-GCM sealed in
 Postgres with run/step/source/config AAD; neither DTOs nor logs receive the
-capability. Cancellation rehydrates that handle, cancels the paid session before
-Trigger, and persists cleanup effects for bounded reconciliation after process
-termination.
+capability. Cancellation rehydrates that handle and independently persists and
+retries runtime-session and Trigger-run cancellation effects, so one provider
+failure cannot suppress the other. Cleanup is a separate durable effect and is
+reconciled after process termination.
 
 The bounded control-plane sweep also CAS-fails active feature runs once their
 absolute 60-minute domain deadline passes, expires any still-pending scoped
 approval, and redelivers cancellation plus cleanup. Expired spend reservations
-are conservatively charged at their reserved amount before their global session
-lease is released, so a killed worker cannot silently erase paid usage.
+retain the global fence until reconciliation has cancelled and cleaned the
+remote session. The reconciler records observed usage when available and
+otherwise charges the full reservation before releasing the fence, so a killed
+worker cannot silently erase paid usage or admit a second paid session.
 
 Trigger retries the version-locked task at most once. Invalid inputs,
 unregistered composition, and unclassified handler failures use Trigger's
@@ -106,11 +114,21 @@ For Trigger.dev local development, set `TRIGGER_PROJECT_REF`,
 `TRIGGER_SECRET_KEY`, and `DATABASE_URL`, then run `pnpm trigger:dev`. The task
 registers a lazy, fail-closed production handler at module load.
 `createProductionFeatureWorkflowFromEnv` wires Neon domain/checkpoint stores,
-R2 plus its durable manifest, source-bundle materialization, Managed Agents,
-the trusted command executor/verifier, publication authorization, and the
-composite GitHub publisher. The control plane uses the same Neon repository and
+R2 plus its durable manifest, Managed Agents, scoped Artifact MCP vaults, the
+isolated command-observation verifier, publication authorization, and the
+composite GitHub publisher. Repository code is materialized and tested only in
+the limited verification sandbox; it is never executed in the secret-bearing
+Trigger worker. The control plane uses the same Neon repository and
 handle-sealing key for cancellation reconciliation. Missing secrets fail only
 when execution needs the component, never silently during Trigger discovery.
+
+Production feature configuration must contain exact `specification`,
+`planning`, `implementation`, `review`, and `verification` step IDs, each with
+a separate limited-network environment. The first four may use only the
+`artifacts` MCP alias. Verification must be Bash-only with no MCP. Required
+server-only values include `AGENTOS_ARTIFACT_MCP_URL`,
+`ARTIFACT_CAPABILITY_KEYS_JSON`, `AGENTOS_TEST_REPORT_KEYS_JSON`, and the
+runtime/R2/GitHub credentials documented in `.env.example`.
 
 `CRON_SECRET` must be 32–256 bytes and protects both internal reconciliation
 and retention routes. Never expose Trigger secrets, waitpoint callback URLs, or

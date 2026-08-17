@@ -7,7 +7,6 @@ export * from './schemas.js';
 export * from './outbox.js';
 export * from './types.js';
 export * from './trigger-adapter.js';
-export * from './trusted-command-executor.js';
 export * from './task-handler.js';
 export * from './verifier.js';
 export * from './workflow.js';

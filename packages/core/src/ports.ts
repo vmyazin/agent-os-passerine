@@ -16,6 +16,28 @@ export interface RuntimeEnvironment {
   readonly runtime: string;
   readonly image?: string;
   readonly variables: Readonly<Record<string, string>>;
+  readonly networking?:
+    | {
+        readonly type: 'limited';
+        readonly allowedHosts?: readonly string[];
+        readonly allowMcpServers?: boolean;
+        readonly allowPackageManagers?: boolean;
+      }
+    | { readonly type: 'unrestricted' };
+  readonly packages?: Readonly<{
+    apt?: readonly string[];
+    cargo?: readonly string[];
+    gem?: readonly string[];
+    go?: readonly string[];
+    npm?: readonly string[];
+    pip?: readonly string[];
+  }>;
+}
+
+export interface RuntimeFileResource {
+  readonly type: 'file';
+  readonly fileId: string;
+  readonly mountPath?: string;
 }
 
 export interface RuntimeHandle {
@@ -31,11 +53,46 @@ export interface RuntimeStartRequest {
   readonly timeoutMs?: number;
   readonly idempotencyKey?: string;
   readonly maxCostMicrodollars?: number;
+  readonly resources?: readonly RuntimeFileResource[];
+  /** Opaque provider credential references; never raw credentials. */
+  readonly credentialRefs?: readonly string[];
+}
+
+/** Provider-neutral event vocabulary accepted by durable workflows. */
+export const RUNTIME_EVENT_TYPES = [
+  'message',
+  'progress',
+  'message_summary',
+  'tool_call',
+  'tool_result',
+  'running',
+  'rescheduling',
+  'terminated',
+  'idle',
+  'error',
+  'usage',
+  'thread_created',
+  'thread_running',
+  'thread_idle',
+  'thread_rescheduling',
+  'thread_terminated',
+  'thread_message',
+  'input_acknowledged',
+  'session_updated',
+  'deleted',
+  'requires_action',
+  'retries_exhausted',
+] as const;
+
+export type RuntimeEventType = (typeof RUNTIME_EVENT_TYPES)[number];
+
+export function isRuntimeEventType(value: string): value is RuntimeEventType {
+  return (RUNTIME_EVENT_TYPES as readonly string[]).includes(value);
 }
 
 export interface RuntimeEvent {
   readonly id: Identifier;
-  readonly type: string;
+  readonly type: RuntimeEventType;
   readonly occurredAt: Date;
   readonly payload?: unknown;
 }
@@ -54,6 +111,13 @@ export interface RuntimeUsage {
   readonly runtimeMs: number;
 }
 
+export interface RuntimeObservedCommand {
+  readonly command: string;
+  readonly exitCode: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+}
+
 export interface RuntimeProvider {
   syncAgent(agent: RuntimeAgent): Promise<void>;
   syncEnvironment(environment: RuntimeEnvironment): Promise<void>;
@@ -68,6 +132,10 @@ export interface RuntimeProvider {
   collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput>;
   usage(handle: RuntimeHandle): Promise<RuntimeUsage>;
   cleanup(handle: RuntimeHandle): Promise<void>;
+  observeCommand?(
+    handle: RuntimeHandle,
+    expectedCommand: string,
+  ): Promise<RuntimeObservedCommand>;
 }
 
 export interface RuntimeArtifactReference {

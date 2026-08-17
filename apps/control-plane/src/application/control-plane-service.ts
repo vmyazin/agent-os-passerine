@@ -69,6 +69,10 @@ export interface WorkflowDispatchOutbox {
     readonly idempotencyKey: string;
     readonly runId: string;
   }): Promise<void>;
+  requestOrphanReconciliation?(request: {
+    readonly idempotencyKey: string;
+    readonly runId: string;
+  }): Promise<void>;
 }
 
 export interface ConfigurationInput {

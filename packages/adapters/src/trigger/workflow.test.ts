@@ -12,6 +12,7 @@ import {
   type RuntimeHandle,
   type RuntimeOutput,
   type RuntimeProvider,
+  type RuntimeEvent,
 } from '@agentos/core';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -58,10 +59,10 @@ class FakeRuntime implements RuntimeProvider {
   async reconcileStart() {
     return this.reconciled;
   }
-  async *events() {
+  async *events(): AsyncGenerator<RuntimeEvent> {
     yield {
       id: 'event-1',
-      type: 'session.completed',
+      type: 'idle',
       occurredAt: new Date(now),
     };
   }
@@ -80,6 +81,14 @@ class FakeRuntime implements RuntimeProvider {
   }
   async cleanup(handle: RuntimeHandle) {
     this.cleaned.push(handle);
+  }
+  async observeCommand(_handle: RuntimeHandle, expectedCommand: string) {
+    return {
+      command: expectedCommand,
+      exitCode: 0,
+      startedAt: now,
+      completedAt: now,
+    };
   }
 }
 
@@ -134,6 +143,19 @@ const roles: FeatureWorkflowRoles = {
       id: 'review-env',
       runtime: 'managed',
       variables: { ARTIFACT_CAPABILITY: 'scoped' },
+    },
+  },
+  verification: {
+    agent: {
+      id: 'verify-agent',
+      model: 'sonnet',
+      tools: ['bash'],
+      mcps: [],
+    },
+    environment: {
+      id: 'verify-env',
+      runtime: 'managed',
+      variables: {},
     },
   },
 };
@@ -226,6 +248,12 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
   const changeMeta = await put(artifacts, 'implementation', 'changes', changes);
   const testMeta = await put(artifacts, 'implementation', 'tests', tests);
   const reviewMeta = await put(artifacts, 'review', 'review', review);
+  const verificationMeta = await put(
+    artifacts,
+    'verification',
+    'trusted-test-report',
+    JSON.stringify({ version: 'trusted-test-report-v1' }),
+  );
   const runtime = new FakeRuntime([
     {
       artifacts: [],
@@ -252,6 +280,7 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
         decision: 'approved',
       },
     },
+    { artifacts: [], data: {} },
   ]);
   const waitpointCreates: unknown[] = [];
   const waiter: WorkflowApprovalWaiter = {
@@ -285,7 +314,14 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
       return { status: 'completed' };
     },
   };
-  return { repository, artifacts, runtime, waiter, waitpointCreates };
+  return {
+    repository,
+    artifacts,
+    runtime,
+    waiter,
+    waitpointCreates,
+    verificationMeta,
+  };
 }
 
 const input = {
@@ -334,8 +370,13 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
-        verify: async () => ({ passed: true, evidenceDigest: digest('ok') }),
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
       },
       publicationAuthority: { authorize: async () => ({}) },
       publisher: {
@@ -377,8 +418,13 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
-        verify: async () => ({ passed: true, evidenceDigest: digest('ok') }),
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
       },
       publicationAuthority: { authorize: async () => ({}) },
       publisher: { publish },
@@ -400,10 +446,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: {
@@ -443,10 +491,14 @@ describe('durable feature workflow', () => {
           agentId: 'review-agent',
           environmentId: 'review-env',
         }),
+        expect.objectContaining({
+          agentId: 'verify-agent',
+          environmentId: 'verify-env',
+        }),
       ]),
     );
     expect(new Set(f.runtime.starts.map(({ handle }) => handle.id)).size).toBe(
-      4,
+      5,
     );
     expect(JSON.stringify(f.runtime.starts)).not.toMatch(
       /github|private.?key|installation.?token/i,
@@ -455,7 +507,7 @@ describe('durable feature workflow', () => {
     expect(f.waitpointCreates).toEqual([
       expect.objectContaining({ timeout: '3600s' }),
     ]);
-    expect(f.runtime.cleaned).toHaveLength(4);
+    expect(f.runtime.cleaned).toHaveLength(5);
   });
 
   it('stops after authoritative rejection even when the waitpoint wakes', async () => {
@@ -469,10 +521,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -500,10 +554,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -535,10 +591,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -557,7 +615,7 @@ describe('durable feature workflow', () => {
     const first = await workflow.run(input);
     const second = await createDurableFeatureWorkflow(dependencies).run(input);
     expect(second).toEqual(first);
-    expect(f.runtime.starts).toHaveLength(4);
+    expect(f.runtime.starts).toHaveLength(5);
     expect(publishCalls).toBe(1);
   });
 
@@ -579,10 +637,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -595,7 +655,7 @@ describe('durable feature workflow', () => {
       },
     }).run(input);
     expect(result.status).toBe('succeeded');
-    expect(attempts).toBe(5);
+    expect(attempts).toBe(6);
   });
 
   it('fails closed on malformed agent output and never reaches publication', async () => {
@@ -613,10 +673,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -653,10 +715,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -685,10 +749,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 2_000_001,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -726,11 +792,13 @@ describe('durable feature workflow', () => {
       ) as FeatureWorkflowRoles,
       clock: () => now,
       priceUsage: () => 1_600_001,
+      resolveTestCommand: () => 'pnpm test',
       dailyUsageMicrodollars: async () => 3_500_000,
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -761,6 +829,7 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => {
           await f.repository.updateRun(persistenceId('run', 'run-1'), {
@@ -768,7 +837,11 @@ describe('durable feature workflow', () => {
             updatedAt: now,
             completedAt: now,
           });
-          return { passed: true, evidenceDigest: digest('verified') };
+          return {
+            passed: true,
+            evidenceDigest: f.verificationMeta.digest,
+            evidenceArtifact: f.verificationMeta,
+          };
         },
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -795,6 +868,7 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: false,
@@ -829,10 +903,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({ authorized: true }) },
@@ -861,10 +937,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({ authorized: true }) },
@@ -932,10 +1010,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({ authorized: true }) },
@@ -1014,10 +1094,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -1030,7 +1112,7 @@ describe('durable feature workflow', () => {
       },
     }).run(input);
     expect(result).toMatchObject({ status: 'succeeded' });
-    expect(f.runtime.starts).toHaveLength(3);
+    expect(f.runtime.starts).toHaveLength(4);
     await expect(checkpoints.getEffect(effectKey)).resolves.toMatchObject({
       status: 'succeeded',
       externalRef: 'session-reconciled',
@@ -1062,10 +1144,12 @@ describe('durable feature workflow', () => {
       roles,
       clock: () => now,
       priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
       verifier: {
         verify: async () => ({
           passed: true,
-          evidenceDigest: digest('verified'),
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
         }),
       },
       publicationAuthority: { authorize: async () => ({}) },
@@ -1079,6 +1163,6 @@ describe('durable feature workflow', () => {
     }).run(input);
 
     expect(result.status).toBe('succeeded');
-    expect(f.runtime.starts).toHaveLength(4);
+    expect(f.runtime.starts).toHaveLength(5);
   });
 });

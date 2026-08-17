@@ -155,6 +155,11 @@ class FakeGitHub implements GitHubInstallationClient {
     }
   }
 
+  async getBlob(sha: string) {
+    const bytes = new TextEncoder().encode(this.blobs.get(sha) ?? '');
+    return { sha, size: bytes.byteLength, bytes };
+  }
+
   async getRepository() {
     this.record('getRepository');
     return {

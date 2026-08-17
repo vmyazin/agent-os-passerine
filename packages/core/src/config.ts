@@ -65,6 +65,30 @@ export const EnvironmentDefinitionSchema = z
     variables: z.record(z.string(), z.string()).default({}),
     tools: z.array(Identifier).default([]),
     mcps: z.array(Identifier).default([]),
+    networking: z
+      .discriminatedUnion('type', [
+        z
+          .object({
+            type: z.literal('limited'),
+            allowedHosts: z.array(Identifier).default([]),
+            allowMcpServers: z.boolean().default(false),
+            allowPackageManagers: z.boolean().default(false),
+          })
+          .strict(),
+        z.object({ type: z.literal('unrestricted') }).strict(),
+      ])
+      .optional(),
+    packages: z
+      .object({
+        apt: z.array(Identifier).optional(),
+        cargo: z.array(Identifier).optional(),
+        gem: z.array(Identifier).optional(),
+        go: z.array(Identifier).optional(),
+        npm: z.array(Identifier).optional(),
+        pip: z.array(Identifier).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
