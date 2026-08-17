@@ -1,0 +1,60 @@
+version: 1
+project:
+  name: example
+  defaultBranch: main
+models:
+  standard:
+    provider: local
+    model: test-model
+    inputMicrodollarsPerMillionTokens: 0
+    outputMicrodollarsPerMillionTokens: 0
+    runtimeMicrodollarsPerMinute: 0
+agents:
+  implementer:
+    model: standard
+    environment: default
+    tools: []
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
+environments:
+  default:
+    runtime: process
+    variables: {}
+    tools: []
+    mcps: []
+pipelines:
+  feature:
+    steps:
+      - id: implement
+        agent: implementer
+policies:
+  protectedPaths:
+    - .github/workflows/**
+    - CODEOWNERS
+    - '**/CODEOWNERS'
+    - .gitmodules
+    - .env*
+    - '**/.env*'
+    - agentos/**
+  allowBinary: false
+  allowSymlinks: false
+  maxFileBytes: 1000000
+  tools:
+    allow: []
+    deny: []
+  mcp:
+    allow: []
+    deny: []
+budgets:
+  workflowMicrodollars: 1000000
+  dailyMicrodollars: 10000000
+  concurrency: 2
+  admissionReservePercent: 80
+goals:
+  maxSteps: 20
+  maxRetries: 2
+  timeoutMs: 3600000
+runtime:
+  provider: local
+  routing: {}
