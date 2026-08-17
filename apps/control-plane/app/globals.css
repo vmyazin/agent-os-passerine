@@ -608,9 +608,49 @@ textarea {
   text-wrap: pretty;
 }
 
+.inbox-thread,
 div.inbox-message-copy {
   display: grid;
   gap: 1rem;
+}
+
+.inbox-thread-entry {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.inbox-thread-entry + .inbox-thread-entry {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 1.25rem;
+}
+
+.inbox-thread-operator {
+  border-radius: 0.6rem;
+  background: var(--surface-inset);
+  padding: 1rem;
+}
+
+.inbox-thread-header,
+.inbox-thread-header > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.inbox-thread-header strong {
+  font-size: 0.88rem;
+}
+
+.inbox-thread-header time {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+}
+
+.inbox-sent-label {
+  color: var(--signal-violet-dark);
+  font-size: 0.75rem;
+  font-weight: 750;
 }
 
 .inbox-message-copy p,

@@ -54,9 +54,10 @@ including approval consumption and the 390 px inbox viewport check.
 
 The operator inbox now uses an email-style request queue and reading pane instead
 of isolated cards. Approvals and questions share one newest-first list, machine
-details use progressive disclosure, replies render as readable correspondence,
-and the layout stacks without horizontal overflow at a 390 px viewport. The
-approval and reply mutations remain unchanged.
+details use progressive disclosure, and completed questions retain both the
+original agent message and the operator's sent reply as visible conversation
+history after reload. The layout stacks without horizontal overflow at a 390 px
+viewport. The approval and reply mutations remain unchanged.
 
 ## Remaining product stages
 

@@ -6,6 +6,7 @@ import type {
   InboxProjection,
 } from '../application/control-plane-service';
 import {
+  createInboxConversation,
   createInboxItems,
   inboxItemPreview,
   inboxItemSubject,
@@ -78,5 +79,27 @@ describe('inbox view model', () => {
     );
 
     expect(inboxItemPreview(item!)).toBe('Reply sent');
+  });
+
+  it('retains the original message and sent reply as conversation history', () => {
+    const conversation = createInboxConversation({
+      ...question,
+      status: 'replied',
+      reply: { text: 'Use Tuesday morning.' },
+      repliedAt: isoTimestamp('2026-08-17T12:05:00.000Z'),
+    });
+
+    expect(conversation).toEqual([
+      {
+        author: 'agent',
+        at: '2026-08-17T12:00:00.000Z',
+        lines: ['Which deployment window should we use?'],
+      },
+      {
+        author: 'operator',
+        at: '2026-08-17T12:05:00.000Z',
+        lines: ['Use Tuesday morning.'],
+      },
+    ]);
   });
 });

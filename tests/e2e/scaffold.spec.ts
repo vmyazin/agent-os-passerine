@@ -70,6 +70,15 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
     }),
   ).toBeVisible();
   await expect(page.getByLabel('Your reply')).toBeVisible();
+  await page.getByLabel('Your reply').fill('Use Tuesday morning.');
+  await page.getByRole('button', { name: 'Send reply' }).click();
+  await expect(
+    page.getByLabel('Sent reply').getByText('Use Tuesday morning.'),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByLabel('Sent reply').getByText('Use Tuesday morning.'),
+  ).toBeVisible();
 });
 
 test('inbox remains usable on a narrow touch viewport', async ({ page }) => {

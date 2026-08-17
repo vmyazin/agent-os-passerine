@@ -7,11 +7,11 @@ import type {
   InboxProjection,
 } from '../application/control-plane-service';
 import {
+  createInboxConversation,
   createInboxItems,
   type InboxItem,
   inboxItemPreview,
   inboxItemSubject,
-  inboxMessageLines,
 } from './inbox-view-model';
 import { ApprovalActions, ReplyForm } from './mutation-forms';
 
@@ -65,33 +65,58 @@ function ApprovalMessage({ approval }: { approval: ApprovalProjection }) {
 }
 
 function QuestionMessage({ message }: { message: InboxProjection }) {
-  const lines = inboxMessageLines(message.body);
+  const conversation = createInboxConversation(message);
   return (
     <>
-      <div className="inbox-message-copy">
-        {lines.length === 0 ? (
-          <p>The agent requested your input.</p>
-        ) : (
-          lines.map((line) => <p key={line}>{line}</p>)
-        )}
-        {message.body.options && message.body.options.length > 0 ? (
-          <div className="inbox-options">
-            <h3>Suggested options</h3>
-            <ul>
-              {message.body.options.map((option) => (
-                <li key={option}>{option}</li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
+      <div className="inbox-thread">
+        {conversation.map((entry) => (
+          <section
+            aria-label={
+              entry.author === 'operator' ? 'Sent reply' : 'Agent message'
+            }
+            className={`inbox-thread-entry inbox-thread-${entry.author}`}
+            key={`${entry.author}:${entry.at}`}
+          >
+            <header className="inbox-thread-header">
+              <strong>
+                {entry.author === 'operator' ? 'You' : 'Agent OS'}
+              </strong>
+              <span>
+                {entry.author === 'operator' ? (
+                  <span className="inbox-sent-label">Sent</span>
+                ) : null}
+                <time dateTime={entry.at}>{formatReceived(entry.at)} UTC</time>
+              </span>
+            </header>
+            <div className="inbox-message-copy">
+              {entry.lines.length === 0 ? (
+                <p>
+                  {entry.author === 'operator'
+                    ? 'Reply content unavailable.'
+                    : 'The agent requested your input.'}
+                </p>
+              ) : (
+                entry.lines.map((line) => <p key={line}>{line}</p>)
+              )}
+              {entry.author === 'agent' &&
+              message.body.options &&
+              message.body.options.length > 0 ? (
+                <div className="inbox-options">
+                  <h3>Suggested options</h3>
+                  <ul>
+                    {message.body.options.map((option) => (
+                      <li key={option}>{option}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        ))}
       </div>
       {message.status === 'pending' ? (
         <ReplyForm messageId={message.id} />
-      ) : (
-        <p className="notice" role="status">
-          Reply sent
-        </p>
-      )}
+      ) : null}
     </>
   );
 }
