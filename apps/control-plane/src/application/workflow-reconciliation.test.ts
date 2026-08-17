@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto';
 
 import { InMemoryDomainRepository } from '@agentos/adapters';
 import {
+  canonicalConfigHash,
   canonicalJsonValue,
+  canonicalPublicationPolicyDigest,
   isoTimestamp,
   loadAgentOsConfig,
+  normalizePublicationPolicySnapshot,
+  parseAgentOsConfig,
   persistenceId,
   type JsonValue,
   type TimestampListCursor,
@@ -33,20 +37,47 @@ runtime: { provider: local }
   return JSON.parse(canonicalJsonValue(config)) as JsonValue;
 }
 
+function goalProvenance(configValue: JsonValue) {
+  const config = parseAgentOsConfig(configValue);
+  const hash = (value: unknown) =>
+    createHash('sha256').update(canonicalJsonValue(value)).digest('hex');
+  return {
+    repositorySha: 'a'.repeat(40),
+    configDigest: canonicalConfigHash(config),
+    modelDigest: hash(config.models),
+    promptDigest: hash(
+      Object.fromEntries(
+        Object.entries(config.agents).map(([name, agent]) => [
+          name,
+          agent.prompt ?? '',
+        ]),
+      ),
+    ),
+    environmentDigest: hash(config.environments),
+    policyDigest: canonicalPublicationPolicyDigest(
+      normalizePublicationPolicySnapshot({
+        version: 'publication-policy-v1',
+        protectedPaths: config.policies.protectedPaths,
+        maxFiles: 100,
+        maxFileBytes: config.policies.maxFileBytes,
+        maxTotalBytes: 5_000_000,
+        allowBinary: config.policies.allowBinary,
+        allowSymlinks: config.policies.allowSymlinks,
+        allowDeletes: true,
+        allowedModes: ['100644', '100755'],
+      }),
+    ),
+  };
+}
+
 describe('workflow outbox reconciliation', () => {
   it('repairs a pending goal snapshot and criterion set before goal dispatch', async () => {
     const repository = new InMemoryDomainRepository();
     const projectId = persistenceId('project', 'goal-repair-project');
     const runId = persistenceId('run', 'goal-repair-run');
     const revisionId = persistenceId('configRevision', 'goal-repair-revision');
-    const provenance = {
-      repositorySha: 'a'.repeat(40),
-      configDigest: 'b'.repeat(64),
-      modelDigest: 'c'.repeat(64),
-      promptDigest: 'd'.repeat(64),
-      environmentDigest: 'e'.repeat(64),
-      policyDigest: 'f'.repeat(64),
-    };
+    const config = goalConfig();
+    const provenance = goalProvenance(config);
     await repository.createProject({
       id: projectId,
       name: 'Goal repair',
@@ -57,7 +88,7 @@ describe('workflow outbox reconciliation', () => {
       id: revisionId,
       projectId,
       revision: 1,
-      config: goalConfig(),
+      config,
       ...provenance,
       createdAt: now,
     });
@@ -111,6 +142,75 @@ describe('workflow outbox reconciliation', () => {
         pipeline: 'goal',
       },
     ]);
+  });
+
+  it('does not repair or dispatch a goal with a noncanonical criterion definition', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'malformed-goal-project');
+    const runId = persistenceId('run', 'malformed-goal-run');
+    const revisionId = persistenceId(
+      'configRevision',
+      'malformed-goal-revision',
+    );
+    const provenance = {
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'b'.repeat(64),
+      modelDigest: 'c'.repeat(64),
+      promptDigest: 'd'.repeat(64),
+      environmentDigest: 'e'.repeat(64),
+      policyDigest: 'f'.repeat(64),
+    };
+    await repository.createProject({
+      id: projectId,
+      name: 'Malformed goal',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createConfigRevision({
+      id: revisionId,
+      projectId,
+      revision: 1,
+      config: goalConfig(),
+      ...provenance,
+      createdAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      configRevisionId: revisionId,
+      pipeline: 'goal',
+      status: 'pending',
+      input: {
+        idempotencyKey: 'malformed-goal',
+        title: 'Reject me',
+        description: 'This criterion has an untrusted extra property.',
+        provenance,
+        criteria: [
+          {
+            id: 'tests',
+            type: 'command',
+            description: 'Tests pass',
+            command: 'pnpm test',
+            unexpected: true,
+          },
+        ],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    const starts: unknown[] = [];
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async (request) => {
+        starts.push(request);
+      },
+      requestApprovalResume: async () => undefined,
+    };
+
+    await expect(
+      reconcileWorkflowOutbox(repository, outbox, () => now),
+    ).resolves.toEqual({ scannedRuns: 1, delivered: 0, failed: 1 });
+    await expect(repository.listGoalCriteria(runId)).resolves.toEqual([]);
+    expect(starts).toEqual([]);
   });
 
   it('uses the configured bounded goal timeout before the one-hour ceiling', async () => {

@@ -58,6 +58,18 @@ const goalRunInputSchema = z
     criteria: z.array(commandCriterionSchema).min(1).max(20),
   })
   .strict();
+export type GoalRunInput = z.infer<typeof goalRunInputSchema>;
+
+export function parseGoalRunInput(input: JsonValue | undefined): GoalRunInput {
+  const parsed = goalRunInputSchema.parse(input);
+  const ids = new Set<string>();
+  for (const criterion of parsed.criteria) {
+    if (ids.has(criterion.id))
+      throw new Error('goal criterion IDs must be unique');
+    ids.add(criterion.id);
+  }
+  return parsed;
+}
 const verificationResultSchema = z.discriminatedUnion('status', [
   z
     .object({
@@ -144,7 +156,7 @@ function componentHash(value: unknown): string {
 function validateSnapshot(
   run: WorkflowRun,
   snapshot: ConfigSnapshot,
-  input: z.infer<typeof goalRunInputSchema>,
+  input: GoalRunInput,
 ): number {
   if (
     snapshot.runId !== run.id ||
@@ -192,7 +204,7 @@ function validateSnapshot(
 
 function validateCriteria(
   records: readonly GoalCriterion[],
-  input: z.infer<typeof goalRunInputSchema>,
+  input: GoalRunInput,
 ): readonly CommandCriterion[] {
   if (records.length !== input.criteria.length)
     throw new Error('goal criterion set is incomplete');
@@ -218,6 +230,25 @@ function validateCriteria(
       throw new Error('goal criterion definition mismatch');
     return definition;
   });
+}
+
+export function validateDurableGoalInputs(
+  run: WorkflowRun,
+  snapshots: readonly ConfigSnapshot[],
+  records: readonly GoalCriterion[],
+): {
+  readonly input: GoalRunInput;
+  readonly snapshot: ConfigSnapshot;
+  readonly definitions: readonly CommandCriterion[];
+  readonly maxSteps: number;
+} {
+  const input = parseGoalRunInput(run.input);
+  if (snapshots.length !== 1)
+    throw new Error('goal run must have exactly one config snapshot');
+  const snapshot = snapshots[0]!;
+  const definitions = validateCriteria(records, input);
+  const maxSteps = validateSnapshot(run, snapshot, input);
+  return { input, snapshot, definitions, maxSteps };
 }
 
 function childProgressId(runId: string, step: number) {
@@ -583,18 +614,18 @@ export function createDurableGoalWorkflow(
         throw new Error('authoritative goal run does not exist');
       if (['succeeded', 'failed'].includes(parent.status))
         return genericTerminalResult(parent);
-      const stored = goalRunInputSchema.parse(parent.input);
       const snapshots = await dependencies.repository.listConfigSnapshots(
         runId,
         { limit: 2 },
       );
-      if (snapshots.length !== 1)
-        throw new Error('goal run must have exactly one config snapshot');
       const records = await dependencies.repository.listGoalCriteria(runId, {
         limit: 21,
       });
-      const definitions = validateCriteria(records, stored);
-      const maxSteps = validateSnapshot(parent, snapshots[0]!, stored);
+      const { definitions, maxSteps } = validateDurableGoalInputs(
+        parent,
+        snapshots,
+        records,
+      );
       const progress = await dependencies.repository.listGoalProgress(runId, {
         limit: 100,
       });

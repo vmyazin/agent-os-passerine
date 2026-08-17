@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import {
+  parseGoalRunInput,
+  validateDurableGoalInputs,
+} from '@agentos/adapters';
+import {
   canonicalJsonValue,
   isoTimestamp,
   parseAgentOsConfig,
@@ -31,31 +35,9 @@ function goalDefinitionsFromInput(input: JsonValue | undefined): readonly {
   readonly description: string;
   readonly definition: JsonValue;
 }[] {
-  if (!isObject(input) || !Array.isArray(input.criteria))
-    throw new Error('goal run input has no criterion set');
-  if (input.criteria.length < 1 || input.criteria.length > 20)
-    throw new Error('goal criterion set is outside its bounded size');
-  const ids = new Set<string>();
-  return input.criteria.map((candidate) => {
-    if (!isObject(candidate)) throw new Error('goal criterion is invalid');
-    const id = candidate.id;
-    const type = candidate.type;
-    const description = candidate.description;
-    const command = candidate.command;
-    if (
-      type !== 'command' ||
-      typeof id !== 'string' ||
-      id.trim().length === 0 ||
-      typeof description !== 'string' ||
-      description.trim().length === 0 ||
-      typeof command !== 'string' ||
-      command.trim().length === 0 ||
-      ids.has(id)
-    )
-      throw new Error('goal command criteria are invalid');
-    ids.add(id);
+  return parseGoalRunInput(input).criteria.map((candidate) => {
     return {
-      description,
+      description: candidate.description,
       definition: JSON.parse(canonicalJsonValue(candidate)) as JsonValue,
     };
   });
@@ -325,6 +307,18 @@ export async function reconcileWorkflowOutbox(
           await cursorStore?.save(after);
           continue;
         }
+        let goalDefinitions:
+          ReturnType<typeof goalDefinitionsFromInput> | undefined;
+        if (run.pipeline === 'goal') {
+          try {
+            goalDefinitions = goalDefinitionsFromInput(run.input);
+          } catch {
+            failed += 1;
+            after = { at: listedRun.createdAt, id: listedRun.id };
+            await cursorStore?.save(after);
+            continue;
+          }
+        }
         let snapshots = await repository.listConfigSnapshots(run.id, {
           limit: 2,
         });
@@ -363,15 +357,7 @@ export async function reconcileWorkflowOutbox(
           continue;
         }
         if (run.pipeline === 'goal') {
-          let definitions: ReturnType<typeof goalDefinitionsFromInput>;
-          try {
-            definitions = goalDefinitionsFromInput(run.input);
-          } catch {
-            failed += 1;
-            after = { at: listedRun.createdAt, id: listedRun.id };
-            await cursorStore?.save(after);
-            continue;
-          }
+          const definitions = goalDefinitions!;
           let criteria = await repository.listGoalCriteria(run.id, {
             limit: 21,
           });
@@ -423,6 +409,14 @@ export async function reconcileWorkflowOutbox(
               );
             })
           ) {
+            failed += 1;
+            after = { at: listedRun.createdAt, id: listedRun.id };
+            await cursorStore?.save(after);
+            continue;
+          }
+          try {
+            validateDurableGoalInputs(run, snapshots, criteria);
+          } catch {
             failed += 1;
             after = { at: listedRun.createdAt, id: listedRun.id };
             await cursorStore?.save(after);

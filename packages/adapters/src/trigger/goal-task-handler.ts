@@ -1,5 +1,7 @@
 import { persistenceId, type DomainRepository } from '@agentos/core';
 
+import { validateDurableGoalInputs } from './goal-workflow.js';
+
 export interface GoalWorkflowTaskExecution {
   readonly taskVersion: string;
   readonly deploymentVersion: string;
@@ -39,13 +41,10 @@ export function createGoalWorkflowTaskHandler(
       const snapshots = await options.repository.listConfigSnapshots(run.id, {
         limit: 2,
       });
-      if (snapshots.length !== 1)
-        throw new Error('goal run must have exactly one config snapshot');
       const criteria = await options.repository.listGoalCriteria(run.id, {
         limit: 21,
       });
-      if (criteria.length < 1 || criteria.length > 20)
-        throw new Error('goal run must have a bounded criterion set');
+      validateDurableGoalInputs(run, snapshots, criteria);
       const workflow = options.workflowForExecution
         ? await options.workflowForExecution(execution)
         : options.workflow;
