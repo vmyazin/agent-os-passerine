@@ -17,6 +17,7 @@ import {
   StaleConfigurationError,
 } from './errors.js';
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
+import { createPostgresPublicationStoreForTest } from '../github/postgres-store.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
 import * as schema from './schema.js';
@@ -128,6 +129,77 @@ describePostgres('PostgreSQL persistence integration', () => {
     expect(results.find((entry) => entry.status === 'rejected')).toMatchObject({
       reason: expect.any(StaleConfigurationError),
     });
+  });
+
+  it('atomically claims and checkpoints a publication with its append-only event', async () => {
+    const { projectId, runId } = await seed(`publication-${randomUUID()}`);
+    const store = createPostgresPublicationStoreForTest({
+      execute: async (query, parameters) =>
+        (await client.unsafe(query, [
+          ...parameters,
+        ] as never[])) as readonly unknown[],
+    });
+    const claim = {
+      key: createHash('sha256')
+        .update(`publication-${randomUUID()}`)
+        .digest('hex'),
+      bindingKey: createHash('sha256')
+        .update(`binding-${randomUUID()}`)
+        .digest('hex'),
+      projectId,
+      runId,
+      repositoryId: 314159,
+      manifestDigest: 'a'.repeat(64),
+      policyDigest: 'b'.repeat(64),
+      baseSha: 'c'.repeat(40),
+      branch: 'agentos/integration-12345678',
+      now: '2026-08-17T12:00:00.000Z',
+    } as const;
+    const [first, replay] = await Promise.all([
+      store.claim(claim),
+      store.claim(claim),
+    ]);
+    expect(replay).toEqual(first);
+    const blobs = await store.save(
+      claim.key,
+      first.revision,
+      {
+        phase: 'blobs_created',
+        blobShas: {},
+        updatedAt: '2026-08-17T12:00:00.500Z',
+      },
+      {
+        publicationKey: claim.key,
+        phase: 'blobs_created',
+        at: '2026-08-17T12:00:00.500Z',
+        details: { count: 0 },
+      },
+    );
+    const saved = await store.save(
+      claim.key,
+      blobs.revision,
+      {
+        phase: 'tree_created',
+        treeSha: 'd'.repeat(40),
+        updatedAt: '2026-08-17T12:00:01.000Z',
+      },
+      {
+        publicationKey: claim.key,
+        phase: 'tree_created',
+        at: '2026-08-17T12:00:01.000Z',
+        details: { treeSha: 'd'.repeat(40) },
+      },
+    );
+    expect(saved).toMatchObject({ phase: 'tree_created', revision: 2 });
+    expect(
+      (await store.listEvents()).filter(
+        (event) => event.publicationKey === claim.key,
+      ),
+    ).toEqual([
+      expect.objectContaining({ phase: 'claimed' }),
+      expect.objectContaining({ phase: 'blobs_created' }),
+      expect.objectContaining({ phase: 'tree_created' }),
+    ]);
   });
 
   async function seed(suffix: string) {

@@ -33,6 +33,8 @@ describe('domain persistence migration', () => {
     'webhook_receipts',
     'goal_criteria',
     'goal_progress',
+    'publication_records',
+    'publication_events',
   ])('creates the %s table', (table) => {
     expect(migration).toContain(`create table "${table}"`);
   });
@@ -137,6 +139,22 @@ describe('domain persistence migration', () => {
     expect(migration).toContain('pg_advisory_xact_lock');
     expect(migration).toContain('hashtextextended');
     expect(migration).toContain('agentos_event_conflict');
+  });
+
+  it('atomically claims and checkpoints trusted GitHub publications with events', () => {
+    expect(migration).toContain('function "agentos_claim_publication"');
+    expect(migration).toContain('function "agentos_save_publication"');
+    expect(migration).toContain('unique("binding_key")');
+    expect(migration).toContain('"manifest_digest" text not null');
+    expect(migration).toContain('"base_sha" text not null');
+    expect(migration).toContain('"revision" bigint not null');
+    expect(migration).toContain('pg_advisory_xact_lock');
+    expect(migration).toContain('agentos_publication_conflict');
+    expect(migration).toContain(
+      `when 'claimed' then p_phase in ('blobs_created', 'failed', 'cancelled')`,
+    );
+    expect(migration).toContain('publication_records_phase_checkpoint_shape');
+    expect(migration).toContain(`p_phase = 'blobs_created'`);
   });
 
   it('bounds bigint values and indexes every production list path', () => {

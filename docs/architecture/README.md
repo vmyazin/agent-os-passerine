@@ -22,6 +22,10 @@ independent from delivery surfaces and third-party integrations.
 The scoped artifact manifest, R2, MCP capability, quota, and retention design is
 documented in [artifact-storage.md](./artifact-storage.md).
 
+The GitHub App credential boundary, immutable Git Data publication sequence,
+and crash recovery rules are documented in
+[trusted-github-publisher.md](./trusted-github-publisher.md).
+
 Dependencies point inward: delivery apps and adapters can depend on core, while
 core stays portable. Apps do not import one another, and provider-specific types
 must not leak through public core APIs.

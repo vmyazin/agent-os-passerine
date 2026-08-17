@@ -10,7 +10,7 @@ test.beforeEach(async ({ context, page }) => {
       clientId: 'e2e',
       clientSecret: 'e2e',
       allowedLogin: 'test-operator',
-      publicUrl: 'http://localhost:3000',
+      publicUrl: 'http://127.0.0.1:3107',
       sessionSecret: '0123456789abcdef0123456789abcdef',
     },
     'test-operator',
@@ -20,7 +20,7 @@ test.beforeEach(async ({ context, page }) => {
     {
       name: SESSION_COOKIE,
       value: session,
-      url: 'https://localhost:3000',
+      url: 'https://127.0.0.1:3107',
       httpOnly: true,
       secure: true,
       sameSite: 'Lax',

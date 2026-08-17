@@ -3,6 +3,8 @@ import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigint,
+  bigserial,
+  boolean,
   check,
   customType,
   index,
@@ -568,6 +570,98 @@ export const goalProgress = pgTable(
       table.runId,
       table.recordedAt,
       bytewise(table.id),
+    ),
+  ],
+);
+
+export const publicationRecords = pgTable(
+  'publication_records',
+  {
+    key: text('publication_key').primaryKey(),
+    bindingKey: text('binding_key').notNull(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    runId: text('run_id')
+      .notNull()
+      .references(() => workflowRuns.id, { onDelete: 'cascade' }),
+    repositoryId: bigint('repository_id', { mode: 'number' }).notNull(),
+    manifestDigest: text('manifest_digest').notNull(),
+    policyDigest: text('policy_digest').notNull(),
+    baseSha: text('base_sha').notNull(),
+    branch: text('branch').notNull(),
+    phase: text('phase').notNull(),
+    blobShas: jsonb('blob_shas').$type<Record<string, string>>(),
+    treeSha: text('tree_sha'),
+    commitSha: text('commit_sha'),
+    pullRequestNumber: bigint('pull_request_number', { mode: 'number' }),
+    pullRequestUrl: text('pull_request_url'),
+    draft: boolean('draft'),
+    errorCode: text('error_code'),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    unique('publication_records_binding_key_unique').on(table.bindingKey),
+    check(
+      'publication_records_repository_id_positive',
+      sql`${table.repositoryId} > 0`,
+    ),
+    check(
+      'publication_records_repository_id_safe',
+      sql`${table.repositoryId} <= 9007199254740991`,
+    ),
+    check('publication_records_revision_positive', sql`${table.revision} > 0`),
+    check(
+      'publication_records_revision_safe',
+      sql`${table.revision} <= 9007199254740991`,
+    ),
+    check(
+      'publication_records_phase_valid',
+      sql`${table.phase} in ('claimed','blobs_created','tree_created','commit_created','ref_created','pr_created','succeeded','cancelled','failed')`,
+    ),
+    check(
+      'publication_records_key_digest',
+      sql`${table.key} ~ '^[0-9a-f]{64}$' and ${table.bindingKey} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'publication_records_manifest_policy_digests',
+      sql`${table.manifestDigest} ~ '^[0-9a-f]{64}$' and ${table.policyDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      'publication_records_git_shas',
+      sql`${table.baseSha} ~ '^[0-9a-f]{40}$' and (${table.treeSha} is null or ${table.treeSha} ~ '^[0-9a-f]{40}$') and (${table.commitSha} is null or ${table.commitSha} ~ '^[0-9a-f]{40}$')`,
+    ),
+    check(
+      'publication_records_branch_namespace',
+      sql`${table.branch} ~ '^agentos/[a-z0-9._-]{1,100}-[0-9a-f]{8}$'`,
+    ),
+    check(
+      'publication_records_pull_request_shape',
+      sql`(${table.pullRequestNumber} is null or ${table.pullRequestNumber} > 0) and (${table.draft} is null or ${table.draft} is true) and (${table.pullRequestUrl} is null or ${table.pullRequestUrl} like 'https://github.com/%')`,
+    ),
+    index('publication_records_run_idx').on(table.runId, table.createdAt),
+  ],
+);
+
+export const publicationEvents = pgTable(
+  'publication_events',
+  {
+    sequence: bigserial('sequence', { mode: 'number' }).primaryKey(),
+    publicationKey: text('publication_key')
+      .notNull()
+      .references(() => publicationRecords.key, { onDelete: 'cascade' }),
+    phase: text('phase').notNull(),
+    at: instant('at').notNull(),
+    details: jsonb('details')
+      .$type<Record<string, string | number | boolean>>()
+      .notNull(),
+  },
+  (table) => [
+    index('publication_events_order_idx').on(
+      table.publicationKey,
+      table.sequence,
     ),
   ],
 );

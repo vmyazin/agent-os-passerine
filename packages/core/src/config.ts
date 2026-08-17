@@ -8,6 +8,9 @@ export const MAX_CANONICAL_CONFIG_BYTES = 384 * 1024;
 export const MAX_CONFIGURATION_APPLY_BODY_BYTES = 512 * 1024;
 
 export const DEFAULT_PROTECTED_PATHS = [
+  '.git',
+  '.git/**',
+  '.github/workflows',
   '.github/workflows/**',
   'CODEOWNERS',
   '**/CODEOWNERS',
@@ -15,6 +18,7 @@ export const DEFAULT_PROTECTED_PATHS = [
   '.env*',
   '**/.env*',
   'agentos/**',
+  'agentos',
 ] as const;
 
 const Identifier = z.string().min(1);
