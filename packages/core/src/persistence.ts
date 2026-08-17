@@ -323,8 +323,12 @@ export interface ArtifactRecord {
   readonly sizeBytes?: number;
   readonly digest: string;
   readonly uri?: string;
+  readonly retentionClass?:
+    'source-bundle' | 'cloud-session-upload' | 'working';
   readonly createdAt: IsoTimestamp;
   readonly cleanupAt?: IsoTimestamp;
+  readonly deletedAt?: IsoTimestamp;
+  readonly deletionReason?: string;
 }
 
 export interface UsageRecordEntry {
@@ -465,7 +469,27 @@ export interface DomainRepository {
   ): Promise<readonly DomainEvent[]>;
 
   createArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord>;
+  claimArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord>;
   getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined>;
+  getArtifactByRunKey(
+    runId: WorkflowRunId,
+    key: string,
+  ): Promise<ArtifactRecord | undefined>;
+  listArtifactsByRunKey(
+    runId: WorkflowRunId,
+    keyPrefix: string,
+    afterKey: string | undefined,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]>;
+  listArtifactsDueForCleanup(
+    before: IsoTimestamp,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]>;
+  markArtifactDeleted(
+    id: ArtifactId,
+    deletedAt: IsoTimestamp,
+    reason: string,
+  ): Promise<ArtifactRecord>;
   listArtifacts(
     runId: WorkflowRunId,
     page?: ListPage<TimestampListCursor<ArtifactId>>,

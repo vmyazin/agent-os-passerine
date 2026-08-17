@@ -48,7 +48,7 @@ import type {
   WorkflowRunId,
   WorkflowRunUpdate,
 } from '@agentos/core';
-import { and, asc, desc, eq, gt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNull, lte, or, sql } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
 
@@ -1070,6 +1070,23 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
+  async claimArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord> {
+    assertValidArtifact(artifact);
+    const [claimed] = await this.database
+      .insert(artifacts)
+      .values(artifact)
+      .onConflictDoNothing({ target: [artifacts.runId, artifacts.key] })
+      .returning(artifactSelection);
+    if (claimed !== undefined) return mapArtifactRow(claimed);
+    const existing = await this.getArtifactByRunKey(
+      artifact.runId,
+      artifact.key,
+    );
+    if (existing === undefined)
+      throw new Error('Artifact claim could not be reconciled');
+    return existing;
+  }
+
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
     const [row] = await this.database
       .select(artifactSelection)
@@ -1077,6 +1094,82 @@ export class NeonDomainRepository implements DomainRepository {
       .where(eq(artifacts.id, id))
       .limit(1);
     return row === undefined ? undefined : mapArtifactRow(row);
+  }
+
+  async getArtifactByRunKey(
+    runId: WorkflowRunId,
+    key: string,
+  ): Promise<ArtifactRecord | undefined> {
+    const [row] = await this.database
+      .select(artifactSelection)
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, runId), eq(artifacts.key, key)))
+      .limit(1);
+    return row === undefined ? undefined : mapArtifactRow(row);
+  }
+
+  async listArtifactsByRunKey(
+    runId: WorkflowRunId,
+    keyPrefix: string,
+    afterKey: string | undefined,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]> {
+    return mappedRows(
+      await this.database
+        .select(artifactSelection)
+        .from(artifacts)
+        .where(
+          and(
+            eq(artifacts.runId, runId),
+            isNull(artifacts.deletedAt),
+            sql`left(${artifacts.key}, ${keyPrefix.length}) = ${keyPrefix}`,
+            afterKey === undefined
+              ? undefined
+              : gt(bytewiseText(artifacts.key), afterKey),
+          ),
+        )
+        .orderBy(asc(bytewiseText(artifacts.key)))
+        .limit(limit),
+      mapArtifactRow,
+    );
+  }
+
+  async listArtifactsDueForCleanup(
+    before: import('@agentos/core').IsoTimestamp,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]> {
+    return mappedRows(
+      await this.database
+        .select(artifactSelection)
+        .from(artifacts)
+        .where(
+          and(
+            isNull(artifacts.deletedAt),
+            sql`${artifacts.cleanupAt} is not null`,
+            lte(artifacts.cleanupAt, before),
+          ),
+        )
+        .orderBy(asc(artifacts.cleanupAt), asc(bytewiseText(artifacts.id)))
+        .limit(limit),
+      mapArtifactRow,
+    );
+  }
+
+  async markArtifactDeleted(
+    id: ArtifactId,
+    deletedAt: import('@agentos/core').IsoTimestamp,
+    reason: string,
+  ): Promise<ArtifactRecord> {
+    const rows = await this.database
+      .update(artifacts)
+      .set({ deletedAt, deletionReason: reason })
+      .where(and(eq(artifacts.id, id), isNull(artifacts.deletedAt)))
+      .returning(artifactSelection);
+    const updated = rows[0];
+    if (updated !== undefined) return mapArtifactRow(updated);
+    const existing = await this.getArtifact(id);
+    if (existing === undefined) throw new Error(`Artifact ${id} not found`);
+    return existing;
   }
 
   async listArtifacts(

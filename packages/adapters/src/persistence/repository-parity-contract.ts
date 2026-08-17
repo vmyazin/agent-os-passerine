@@ -427,6 +427,69 @@ export function repositoryParityContract(
       );
     });
 
+    it('atomically claims one artifact manifest row and audits retention deletion', async () => {
+      const repository = await createRepository();
+      const { runId } = await seed(
+        repository,
+        `${implementation}-artifact-claim`,
+      );
+      const base = {
+        runId,
+        key: 'artifact-manifest/v1/step/spec/1',
+        mediaType: 'text/plain',
+        sizeBytes: 4,
+        uri: `artifacts/v1/project/run/step/spec/1/sha256/${'a'.repeat(64)}`,
+        retentionClass: 'working' as const,
+        createdAt: at,
+        cleanupAt: isoTimestamp('2026-08-18T08:00:00.000000Z'),
+      };
+      const claimed = await Promise.all([
+        repository.claimArtifact({
+          ...base,
+          id: persistenceId('artifact', `${implementation}-claim-left`),
+          digest: 'a'.repeat(64),
+        }),
+        repository.claimArtifact({
+          ...base,
+          id: persistenceId('artifact', `${implementation}-claim-right`),
+          digest: 'b'.repeat(64),
+        }),
+      ]);
+      expect(new Set(claimed.map((artifact) => artifact.id))).toHaveLength(1);
+      expect(new Set(claimed.map((artifact) => artifact.digest))).toHaveLength(
+        1,
+      );
+      expect(
+        await repository.getArtifactByRunKey(runId, base.key),
+      ).toMatchObject({ key: base.key });
+      expect(
+        await repository.listArtifactsByRunKey(
+          runId,
+          'artifact-manifest/v1/step/',
+          undefined,
+          10,
+        ),
+      ).toHaveLength(1);
+      const due = await repository.listArtifactsDueForCleanup(
+        isoTimestamp('2026-08-18T08:00:00.000001Z'),
+        10,
+      );
+      expect(due).toHaveLength(1);
+      await repository.markArtifactDeleted(
+        due[0]!.id,
+        isoTimestamp('2026-08-18T08:00:00.000001Z'),
+        'retention_expired',
+      );
+      expect(
+        await repository.listArtifactsByRunKey(
+          runId,
+          'artifact-manifest/v1/step/',
+          undefined,
+          10,
+        ),
+      ).toEqual([]);
+    });
+
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
       'rejects invalid artifact size %s',
       async (sizeBytes) => {

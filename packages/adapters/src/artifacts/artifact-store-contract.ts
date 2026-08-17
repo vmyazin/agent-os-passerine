@@ -61,6 +61,30 @@ export function artifactStoreContract(
       ).rejects.toMatchObject({ code: 'artifact_conflict' });
     });
 
+    it('atomically rejects different bytes for one logical artifact version', async () => {
+      const { store } = await factory();
+      await store.put(request('spec', 'first'));
+      await expect(store.put(request('spec', 'second'))).rejects.toMatchObject({
+        code: 'artifact_conflict',
+      });
+    });
+
+    it('permits only one digest when conflicting logical puts race', async () => {
+      const { store } = await factory();
+      const results = await Promise.allSettled([
+        store.put(request('spec', 'first')),
+        store.put(request('spec', 'second')),
+      ]);
+      expect(
+        results.filter((result) => result.status === 'fulfilled'),
+      ).toHaveLength(1);
+      expect(
+        results.filter((result) => result.status === 'rejected'),
+      ).toHaveLength(1);
+      const listed = await store.list({ scope });
+      expect(listed.items).toHaveLength(1);
+    });
+
     it('does not read or enumerate across project, run, or step boundaries', async () => {
       const { store } = await factory();
       const stored = await store.put(request('spec'));
@@ -87,7 +111,7 @@ export function artifactStoreContract(
         limit: 1,
       });
       expect(first.items).toHaveLength(1);
-      expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(first.nextCursor).toMatch(/^[A-Za-z0-9_.-]+$/);
       expect(first.nextCursor).not.toContain(first.items[0]?.key ?? '');
       const second = await store.list({
         scope,
@@ -109,6 +133,35 @@ export function artifactStoreContract(
         store.list({
           scope: { ...scope, runId: 'run-2' },
           cursor: first.nextCursor!,
+          limit: 1,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_artifact' });
+    });
+
+    it('rejects forged cursors and prefix swaps', async () => {
+      const { store } = await factory();
+      await store.put(request('log-a'));
+      await store.put(request('log-b'));
+      const first = await store.list({
+        scope,
+        artifactPrefix: 'log',
+        limit: 1,
+      });
+      const cursor = first.nextCursor!;
+      const replacement = cursor.endsWith('a') ? 'b' : 'a';
+      await expect(
+        store.list({
+          scope,
+          artifactPrefix: 'log',
+          cursor: `${cursor.slice(0, -1)}${replacement}`,
+          limit: 1,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_artifact' });
+      await expect(
+        store.list({
+          scope,
+          artifactPrefix: 'other',
+          cursor,
           limit: 1,
         }),
       ).rejects.toMatchObject({ code: 'invalid_artifact' });

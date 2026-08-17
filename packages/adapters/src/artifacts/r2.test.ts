@@ -8,6 +8,7 @@ import {
   type R2Command,
   type R2SdkClient,
 } from './test-support.js';
+import { createInMemoryArtifactManifestStore } from './manifest.js';
 
 class FakeR2Client implements R2SdkClient {
   readonly objects = new Map<
@@ -22,6 +23,7 @@ class FakeR2Client implements R2SdkClient {
   readonly commands: R2Command[] = [];
   failures = 0;
   raceOnPut = false;
+  bodyFactory: (() => unknown) | undefined;
 
   async send(command: R2Command): Promise<Record<string, unknown>> {
     this.commands.push(command);
@@ -34,16 +36,6 @@ class FakeR2Client implements R2SdkClient {
     const input = command.input;
     const key = String(input.Key ?? '');
     switch (command.kind) {
-      case 'HeadObject': {
-        const value = this.objects.get(key);
-        if (!value)
-          throw Object.assign(new Error('missing'), { name: 'NotFound' });
-        return {
-          ContentLength: value.reportedSize ?? value.bytes.byteLength,
-          ContentType: value.contentType,
-          Metadata: value.metadata,
-        };
-      }
       case 'PutObject': {
         const body = input.Body as Uint8Array;
         this.objects.set(key, {
@@ -65,30 +57,11 @@ class FakeR2Client implements R2SdkClient {
         if (!value)
           throw Object.assign(new Error('missing'), { name: 'NoSuchKey' });
         return {
-          Body: Readable.from([value.bytes]),
+          Body: this.bodyFactory?.() ?? Readable.from([value.bytes]),
           ContentLength: value.reportedSize ?? value.bytes.byteLength,
           ContentType: value.contentType,
           Metadata: value.metadata,
           ETag: 'untrusted',
-        };
-      }
-      case 'ListObjectsV2': {
-        const prefix = String(input.Prefix ?? '');
-        const after = String(input.StartAfter ?? '');
-        const max = Number(input.MaxKeys ?? 100);
-        const keys = [...this.objects.keys()]
-          .filter(
-            (candidate) => candidate.startsWith(prefix) && candidate > after,
-          )
-          .sort();
-        const page = keys.slice(0, max);
-        return {
-          Contents: page.map((Key) => ({ Key })),
-          IsTruncated: keys.length > page.length,
-          NextContinuationToken:
-            keys.length > page.length
-              ? Buffer.from(page.at(-1) ?? '').toString('base64url')
-              : undefined,
         };
       }
       case 'DeleteObject':
@@ -121,17 +94,19 @@ describe('R2 artifact storage', () => {
         bucket: 'bucket',
         accessKeyId: 'key',
         secretAccessKey: 'secret',
+        manifest: createInMemoryArtifactManifestStore(),
       }),
     ).toThrow(/account/i);
     expect(() =>
       createR2ArtifactStore({
-        accountId: 'account',
+        accountId: 'a'.repeat(32),
         bucket: 'bucket',
         accessKeyId: 'key',
         secretAccessKey: 'secret',
-        endpoint: 'http://example.com',
-      }),
-    ).toThrow(/HTTPS/i);
+        manifest: createInMemoryArtifactManifestStore(),
+        endpoint: 'https://evil.example',
+      } as never),
+    ).toThrow(/endpoint overrides/i);
   });
 
   it('retries a bounded transient outage and sanitizes terminal errors', async () => {
@@ -149,11 +124,39 @@ describe('R2 artifact storage', () => {
 
     result.client.failures = 3;
     await expect(
-      result.store.list({ scope: { projectId: 'p', runId: 'r', stepId: 's' } }),
+      result.store.get({
+        scope: { projectId: 'p', runId: 'r', stepId: 's' },
+        key: (
+          await result.store.list({
+            scope: { projectId: 'p', runId: 'r', stepId: 's' },
+          })
+        ).items[0]!.key,
+      }),
     ).rejects.toMatchObject({
       code: 'artifact_store_unavailable',
       message: 'artifact storage is unavailable',
     });
+  });
+
+  it('reconciles an authoritative manifest claim after a terminal R2 outage', async () => {
+    const result = fixture();
+    const request = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'recovery',
+      version: 1,
+      bytes: new TextEncoder().encode('recover'),
+      mediaType: 'text/plain',
+    } as const;
+    result.client.failures = 2;
+    await expect(result.store.put(request)).rejects.toMatchObject({
+      code: 'artifact_store_unavailable',
+    });
+    await expect(result.store.put(request)).resolves.toMatchObject({
+      artifactId: 'recovery',
+    });
+    expect(
+      (await result.store.list({ scope: request.scope })).items,
+    ).toHaveLength(1);
   });
 
   it('re-reads and validates an object after a conditional-create race', async () => {
@@ -168,9 +171,9 @@ describe('R2 artifact storage', () => {
     });
     expect(stored.digest).toMatch(/^[a-f0-9]{64}$/);
     expect(result.client.commands.map((command) => command.kind)).toEqual([
-      'HeadObject',
+      'GetObject',
       'PutObject',
-      'HeadObject',
+      'GetObject',
     ]);
     expect(
       result.client.commands.find((command) => command.kind === 'PutObject')
@@ -219,7 +222,7 @@ describe('R2 artifact storage', () => {
     ).rejects.toMatchObject({ code: 'artifact_too_large' });
   });
 
-  it('uses SHA-256 checksums and never treats an ETag as the digest', async () => {
+  it('uses application SHA-256 metadata without R2-incompatible full-object checksum headers', async () => {
     const result = fixture();
     await result.store.put({
       scope: { projectId: 'p', runId: 'r', stepId: 's' },
@@ -231,9 +234,112 @@ describe('R2 artifact storage', () => {
     const put = result.client.commands.find(
       (command) => command.kind === 'PutObject',
     );
-    expect(put?.input.ChecksumSHA256).toBeTypeOf('string');
+    expect(put?.input.ChecksumSHA256).toBeUndefined();
     expect(put?.input.Metadata).toMatchObject({
       digest: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+  });
+
+  it('bounded-reads and verifies bytes when reconciling an existing object', async () => {
+    const result = fixture();
+    const request = {
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'log',
+      version: 1,
+      bytes: new TextEncoder().encode('safe'),
+      mediaType: 'text/plain',
+    } as const;
+    const metadata = await result.store.put(request);
+    result.client.objects.get(metadata.key)!.bytes = new TextEncoder().encode(
+      'evil',
+    );
+    await expect(result.store.put(request)).rejects.toMatchObject({
+      code: 'artifact_integrity_error',
+    });
+    expect(result.client.commands.at(-1)?.kind).toBe('GetObject');
+  });
+
+  it('aborts a stalled GetObject stream when the body deadline expires', async () => {
+    const client = new FakeR2Client();
+    const result = {
+      client,
+      ...createR2ArtifactStorageForTest({
+        client,
+        bucket: 'agentos-artifacts',
+        now: () => new Date('2026-08-17T00:00:00.000Z'),
+        timeoutMs: 100,
+        retry: { attempts: 1, baseDelayMs: 0 },
+      }),
+    };
+    const metadata = await result.store.put({
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'log',
+      version: 1,
+      bytes: new TextEncoder().encode('safe'),
+      mediaType: 'text/plain',
+    });
+    let destroyed = false;
+    const stalled = {
+      [Symbol.asyncIterator]() {
+        return stalled;
+      },
+      next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+      destroy() {
+        destroyed = true;
+      },
+    };
+    client.bodyFactory = () => stalled;
+    await expect(
+      result.store.get({
+        scope: { projectId: 'p', runId: 'r', stepId: 's' },
+        key: metadata.key,
+      }),
+    ).rejects.toMatchObject({ code: 'artifact_store_unavailable' });
+    expect(destroyed).toBe(true);
+  });
+
+  it('preserves a scope-bound cursor for a filtered empty manifest page', async () => {
+    const client = new FakeR2Client();
+    const base = createInMemoryArtifactManifestStore();
+    let scannedKey: string | undefined;
+    const manifest: typeof base = {
+      ...base,
+      async claim(metadata) {
+        scannedKey = metadata.key;
+        return base.claim(metadata);
+      },
+      async list(request) {
+        if (request.after === undefined && scannedKey !== undefined)
+          return { items: [], nextAfter: scannedKey };
+        return base.list(request);
+      },
+    };
+    const storage = createR2ArtifactStorageForTest({
+      client,
+      manifest,
+      bucket: 'agentos-artifacts',
+      now: () => new Date('2026-08-17T00:00:00.000Z'),
+    });
+    await storage.store.put({
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      artifactId: 'log',
+      version: 1,
+      bytes: new TextEncoder().encode('safe'),
+      mediaType: 'text/plain',
+    });
+    const page = await storage.store.list({
+      scope: { projectId: 'p', runId: 'r', stepId: 's' },
+      limit: 1,
+    });
+    expect(page.items).toEqual([]);
+    expect(page.nextCursor).toBeTypeOf('string');
+    await expect(
+      storage.store.list({
+        scope: { projectId: 'p', runId: 'r', stepId: 's' },
+        artifactPrefix: 'other',
+        limit: 1,
+        cursor: page.nextCursor!,
+      }),
+    ).rejects.toThrow(/cursor/i);
   });
 });

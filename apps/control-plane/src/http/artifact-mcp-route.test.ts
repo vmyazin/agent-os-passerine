@@ -20,10 +20,16 @@ describe('Artifact MCP route', () => {
     expect(delegated).toHaveBeenCalledWith(request);
   });
 
-  it('does not expose GET or DELETE transports', async () => {
-    for (const response of [GET(), DELETE()]) {
-      expect(response.status).toBe(405);
-      expect(response.headers.get('allow')).toBe('POST');
-    }
+  it('keeps GET disabled and delegates DELETE for MCP session teardown', async () => {
+    expect(GET().status).toBe(405);
+    expect(GET().headers.get('allow')).toBe('POST, DELETE');
+    const delegated = vi.fn(async () => new Response(null, { status: 204 }));
+    setArtifactMcpHandlerForTests(delegated);
+    const request = new Request(
+      'https://control.agentos.test/api/mcp/artifacts',
+      { method: 'DELETE' },
+    );
+    expect((await DELETE(request)).status).toBe(204);
+    expect(delegated).toHaveBeenCalledWith(request);
   });
 });

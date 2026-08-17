@@ -1,5 +1,6 @@
 import {
   createArtifactMcpHandler,
+  createDomainArtifactManifestStore,
   createR2ArtifactStore,
   type ArtifactMcpHandler,
   type R2ArtifactStorageOptions,
@@ -8,6 +9,7 @@ import {
   createArtifactCapabilityVerifier,
   type ArtifactCapabilityKey,
 } from '@agentos/core';
+import { repositoryFromEnv } from '../persistence/repository-factory';
 
 let handler: ArtifactMcpHandler | undefined;
 
@@ -64,16 +66,21 @@ function r2Options(): R2ArtifactStorageOptions {
     bucket: required('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
     accessKeyId: required('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
     secretAccessKey: required('CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY'),
-    ...(process.env.CLOUDFLARE_R2_ENDPOINT === undefined
+    manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
+    cursorKeys: capabilityKeys(),
+    ...(process.env.CLOUDFLARE_R2_JURISDICTION === undefined
       ? {}
-      : { endpoint: process.env.CLOUDFLARE_R2_ENDPOINT }),
+      : {
+          jurisdiction: process.env.CLOUDFLARE_R2_JURISDICTION as
+            'default' | 'eu' | 'fedramp',
+        }),
   };
 }
 
 export function artifactMcpHandler(): ArtifactMcpHandler {
   handler ??= createArtifactMcpHandler({
-    // This credential must be bucket-scoped to GetObject, PutObject, and
-    // ListBucket. Deletion uses a distinct control-plane administrator key.
+    // This credential must be bucket-scoped to GetObject and PutObject only.
+    // Deletion uses a distinct control-plane administrator key.
     store: createR2ArtifactStore(r2Options()),
     capabilityVerifier: createArtifactCapabilityVerifier({
       keys: capabilityKeys(),

@@ -3,38 +3,38 @@ import { createHash } from 'node:crypto';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
-  HeadObjectCommand,
-  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type DeleteObjectCommandInput,
   type GetObjectCommandInput,
-  type HeadObjectCommandInput,
-  type ListObjectsV2CommandInput,
   type PutObjectCommandInput,
 } from '@aws-sdk/client-s3';
 import {
   DEFAULT_ARTIFACT_MAX_BYTES,
   ArtifactValidationError,
   artifactKeyMatchesScope,
-  artifactScopePrefix,
   normalizeArtifactListRequest,
   parseArtifactKey,
   prepareArtifactPut,
   validateArtifactMetadata,
   type ArtifactAdminStore,
+  type ArtifactDeletionAudit,
   type ArtifactGetRequest,
   type ArtifactListRequest,
+  type ArtifactManifestStore,
   type ArtifactMetadata,
   type ArtifactPutRequest,
   type ArtifactStore,
 } from '@agentos/core';
 
-import { decodeArtifactCursor, encodeArtifactCursor } from './cursor.js';
+import {
+  createArtifactCursorCodec,
+  type ArtifactCursorCodec,
+  type ArtifactCursorKey,
+} from './cursor.js';
 import { ArtifactStoreAdapterError } from './errors.js';
 
-export type R2CommandKind =
-  'HeadObject' | 'PutObject' | 'GetObject' | 'ListObjectsV2' | 'DeleteObject';
+export type R2CommandKind = 'PutObject' | 'GetObject' | 'DeleteObject';
 
 export interface R2Command {
   readonly kind: R2CommandKind;
@@ -53,11 +53,13 @@ export interface R2ArtifactStorageOptions {
   readonly bucket: string;
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
-  readonly endpoint?: string;
+  readonly jurisdiction?: 'default' | 'eu' | 'fedramp';
   readonly timeoutMs?: number;
   readonly retryAttempts?: number;
   readonly maxBytes?: number;
   readonly now?: () => Date;
+  readonly cursorKeys?: readonly ArtifactCursorKey[];
+  readonly manifest: ArtifactManifestStore;
 }
 
 export interface R2ArtifactStorageDependencies {
@@ -68,9 +70,11 @@ export interface R2ArtifactStorageDependencies {
   readonly now?: () => Date;
   readonly retry?: { readonly attempts: number; readonly baseDelayMs: number };
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly cursorCodec?: ArtifactCursorCodec;
+  readonly manifest: ArtifactManifestStore;
 }
 
-const SAFE_ACCOUNT = /^[A-Za-z0-9_-]{3,128}$/;
+const SAFE_ACCOUNT = /^[a-f0-9]{32}$/;
 const SAFE_BUCKET = /^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?$/;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -80,23 +84,16 @@ function nonEmpty(value: string, label: string): string {
 }
 
 function endpoint(options: R2ArtifactStorageOptions): string {
+  if ('endpoint' in options)
+    throw new Error('R2 endpoint overrides are not allowed');
   if (!SAFE_ACCOUNT.test(options.accountId))
     throw new Error('R2 accountId is invalid');
-  const value =
-    options.endpoint ?? `https://${options.accountId}.r2.cloudflarestorage.com`;
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error('R2 endpoint is invalid');
-  }
-  if (
-    parsed.protocol !== 'https:' ||
-    parsed.username !== '' ||
-    parsed.password !== ''
-  )
-    throw new Error('R2 endpoint must use HTTPS without embedded credentials');
-  return parsed.toString().replace(/\/$/, '');
+  const jurisdiction = options.jurisdiction ?? 'default';
+  if (!['default', 'eu', 'fedramp'].includes(jurisdiction))
+    throw new Error('R2 jurisdiction is invalid');
+  return `https://${options.accountId}${
+    jurisdiction === 'default' ? '' : `.${jurisdiction}`
+  }.r2.cloudflarestorage.com`;
 }
 
 class AwsR2Client implements R2SdkClient {
@@ -110,13 +107,6 @@ class AwsR2Client implements R2SdkClient {
       options?.abortSignal === undefined
         ? undefined
         : { abortSignal: options.abortSignal };
-    if (command.kind === 'HeadObject')
-      return (await this.client.send(
-        new HeadObjectCommand(
-          command.input as unknown as HeadObjectCommandInput,
-        ),
-        handlerOptions,
-      )) as unknown as Record<string, unknown>;
     if (command.kind === 'PutObject')
       return (await this.client.send(
         new PutObjectCommand(command.input as unknown as PutObjectCommandInput),
@@ -125,13 +115,6 @@ class AwsR2Client implements R2SdkClient {
     if (command.kind === 'GetObject')
       return (await this.client.send(
         new GetObjectCommand(command.input as unknown as GetObjectCommandInput),
-        handlerOptions,
-      )) as unknown as Record<string, unknown>;
-    if (command.kind === 'ListObjectsV2')
-      return (await this.client.send(
-        new ListObjectsV2Command(
-          command.input as unknown as ListObjectsV2CommandInput,
-        ),
         handlerOptions,
       )) as unknown as Record<string, unknown>;
     return (await this.client.send(
@@ -146,6 +129,13 @@ class AwsR2Client implements R2SdkClient {
 function dependenciesFromOptions(
   options: R2ArtifactStorageOptions,
 ): R2ArtifactStorageDependencies {
+  if (
+    options.manifest === undefined ||
+    typeof options.manifest.claim !== 'function' ||
+    typeof options.manifest.get !== 'function' ||
+    typeof options.manifest.list !== 'function'
+  )
+    throw new Error('R2 artifact manifest is required');
   const accountEndpoint = endpoint(options);
   if (!SAFE_BUCKET.test(options.bucket))
     throw new Error('R2 bucket is invalid');
@@ -168,6 +158,10 @@ function dependenciesFromOptions(
       : { timeoutMs: options.timeoutMs }),
     ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    cursorCodec: createArtifactCursorCodec({
+      ...(options.cursorKeys === undefined ? {} : { keys: options.cursorKeys }),
+    }),
+    manifest: options.manifest,
     retry: { attempts: options.retryAttempts ?? 2, baseDelayMs: 100 },
   };
 }
@@ -270,41 +264,89 @@ function metadataFromResponse(
   }
 }
 
-async function bodyBytes(body: unknown, maxBytes: number): Promise<Uint8Array> {
+function abortBody(body: unknown, reason: Error): void {
+  if (typeof body !== 'object' || body === null) return;
+  const destroy = (body as { destroy?: unknown }).destroy;
+  if (typeof destroy === 'function') {
+    try {
+      destroy.call(body, reason);
+    } catch {
+      // The bounded read is already failing closed.
+    }
+  }
+  const cancel = (body as { cancel?: unknown }).cancel;
+  if (typeof cancel === 'function') {
+    try {
+      void cancel.call(body, reason);
+    } catch {
+      // The bounded read is already failing closed.
+    }
+  }
+}
+
+async function bodyBytes(
+  body: unknown,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   const add = (value: Uint8Array) => {
     total += value.byteLength;
-    if (total > maxBytes)
-      throw new ArtifactStoreAdapterError(
+    if (total > maxBytes) {
+      const error = new ArtifactStoreAdapterError(
         'artifact_too_large',
         'artifact exceeds read limit',
         413,
       );
+      abortBody(body, error);
+      throw error;
+    }
     chunks.push(Uint8Array.from(value));
   };
-  if (body instanceof Uint8Array) add(body);
-  else if (
-    typeof body === 'object' &&
-    body !== null &&
-    Symbol.asyncIterator in body
-  ) {
-    for await (const chunk of body as AsyncIterable<unknown>) {
-      if (typeof chunk === 'string') add(new TextEncoder().encode(chunk));
-      else if (chunk instanceof Uint8Array) add(chunk);
-      else
-        throw new ArtifactStoreAdapterError(
-          'artifact_integrity_error',
-          'artifact body is invalid',
-          500,
-        );
+  const consume = async () => {
+    if (body instanceof Uint8Array) add(body);
+    else if (
+      typeof body === 'object' &&
+      body !== null &&
+      Symbol.asyncIterator in body
+    ) {
+      for await (const chunk of body as AsyncIterable<unknown>) {
+        if (typeof chunk === 'string') add(new TextEncoder().encode(chunk));
+        else if (chunk instanceof Uint8Array) add(chunk);
+        else
+          throw new ArtifactStoreAdapterError(
+            'artifact_integrity_error',
+            'artifact body is invalid',
+            500,
+          );
+      }
+    } else {
+      throw new ArtifactStoreAdapterError(
+        'artifact_integrity_error',
+        'artifact body is invalid',
+        500,
+      );
     }
-  } else {
-    throw new ArtifactStoreAdapterError(
-      'artifact_integrity_error',
-      'artifact body is invalid',
-      500,
-    );
+  };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      consume(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          const error = new ArtifactStoreAdapterError(
+            'artifact_store_unavailable',
+            'artifact storage read timed out',
+            504,
+          );
+          abortBody(body, error);
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
   const output = new Uint8Array(total);
   let offset = 0;
@@ -341,6 +383,7 @@ export function createR2ArtifactStorageWithDependencies(
     ((milliseconds: number) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now ?? (() => new Date());
+  const cursors = options.cursorCodec ?? createArtifactCursorCodec();
 
   const send = async (command: R2Command): Promise<Record<string, unknown>> => {
     let last: unknown;
@@ -362,15 +405,33 @@ export function createR2ArtifactStorageWithDependencies(
     throw last;
   };
 
-  const head = async (key: string): Promise<ArtifactMetadata | undefined> => {
+  const readVerified = async (
+    key: string,
+    maxBytes: number,
+  ): Promise<import('@agentos/core').ArtifactValue | undefined> => {
     try {
-      return metadataFromResponse(
-        key,
-        await send({
-          kind: 'HeadObject',
-          input: { Bucket: options.bucket, Key: key },
-        }),
-      );
+      const response = await send({
+        kind: 'GetObject',
+        input: { Bucket: options.bucket, Key: key },
+      });
+      const metadata = metadataFromResponse(key, response);
+      if (metadata.sizeBytes > maxBytes)
+        throw new ArtifactStoreAdapterError(
+          'artifact_too_large',
+          'artifact exceeds read limit',
+          413,
+        );
+      const bytes = await bodyBytes(response.Body, maxBytes, timeoutMs);
+      if (
+        bytes.byteLength !== metadata.sizeBytes ||
+        createHash('sha256').update(bytes).digest('hex') !== metadata.digest
+      )
+        throw new ArtifactStoreAdapterError(
+          'artifact_integrity_error',
+          'artifact failed integrity verification',
+          500,
+        );
+      return Object.freeze({ ...metadata, bytes });
     } catch (error) {
       if (missing(error)) return undefined;
       throw error;
@@ -405,7 +466,20 @@ export function createR2ArtifactStorageWithDependencies(
         'artifact key already exists with different metadata',
         409,
       );
-    return existing;
+    return Object.freeze({
+      key: existing.key,
+      projectId: existing.projectId,
+      runId: existing.runId,
+      stepId: existing.stepId,
+      artifactId: existing.artifactId,
+      version: existing.version,
+      digest: existing.digest,
+      mediaType: existing.mediaType,
+      sizeBytes: existing.sizeBytes,
+      retentionClass: existing.retentionClass,
+      createdAt: existing.createdAt,
+      expiresAt: existing.expiresAt,
+    });
   };
 
   const store: ArtifactStore = Object.freeze({
@@ -416,8 +490,15 @@ export function createR2ArtifactStorageWithDependencies(
             ? {}
             : { maxBytes: options.maxBytes }),
         });
-        const existing = await head(prepared.key);
-        if (existing !== undefined) return reconcile(existing, prepared);
+        const claimed = await options.manifest.claim(prepared);
+        if (claimed.key !== prepared.key)
+          throw new ArtifactStoreAdapterError(
+            'artifact_conflict',
+            'artifact version already exists with different content',
+            409,
+          );
+        const existing = await readVerified(prepared.key, prepared.sizeBytes);
+        if (existing !== undefined) return reconcile(existing, claimed);
         try {
           await send({
             kind: 'PutObject',
@@ -427,9 +508,6 @@ export function createR2ArtifactStorageWithDependencies(
               Body: prepared.bytes,
               ContentLength: prepared.sizeBytes,
               ContentType: prepared.mediaType,
-              ChecksumSHA256: Buffer.from(prepared.digest, 'hex').toString(
-                'base64',
-              ),
               IfNoneMatch: '*',
               Metadata: objectMetadata(prepared),
             },
@@ -441,7 +519,7 @@ export function createR2ArtifactStorageWithDependencies(
           });
         } catch (error) {
           if (!precondition(error)) throw error;
-          const raced = await head(prepared.key);
+          const raced = await readVerified(prepared.key, prepared.sizeBytes);
           if (raced === undefined) throw error;
           return reconcile(raced, prepared);
         }
@@ -457,36 +535,19 @@ export function createR2ArtifactStorageWithDependencies(
             'artifact is outside the requested scope',
             403,
           );
-        let response: Record<string, unknown>;
-        try {
-          response = await send({
-            kind: 'GetObject',
-            input: { Bucket: options.bucket, Key: request.key },
-          });
-        } catch (error) {
-          if (missing(error)) return undefined;
-          throw error;
-        }
-        const metadata = metadataFromResponse(request.key, response);
+        const claimed = await options.manifest.get(request.scope, request.key);
+        if (claimed === undefined) return undefined;
         const limit =
           request.maxBytes ?? options.maxBytes ?? DEFAULT_ARTIFACT_MAX_BYTES;
-        if (metadata.sizeBytes > limit)
-          throw new ArtifactStoreAdapterError(
-            'artifact_too_large',
-            'artifact exceeds read limit',
-            413,
-          );
-        const bytes = await bodyBytes(response.Body, limit);
-        if (
-          bytes.byteLength !== metadata.sizeBytes ||
-          createHash('sha256').update(bytes).digest('hex') !== metadata.digest
-        )
+        const value = await readVerified(request.key, limit);
+        if (value === undefined)
           throw new ArtifactStoreAdapterError(
             'artifact_integrity_error',
-            'artifact failed integrity verification',
+            'artifact manifest references a missing object',
             500,
           );
-        return Object.freeze({ ...metadata, bytes });
+        reconcile(value, claimed);
+        return value;
       } catch (error) {
         return unavailable(error);
       }
@@ -494,53 +555,28 @@ export function createR2ArtifactStorageWithDependencies(
     async list(input: ArtifactListRequest) {
       try {
         const request = normalizeArtifactListRequest(input);
-        const after = decodeArtifactCursor(request.scope, request.cursor);
-        const scopePrefix = artifactScopePrefix(request.scope);
-        const prefix = `${scopePrefix}${request.artifactPrefix ?? ''}`;
-        const limit = request.limit!;
-        const response = await send({
-          kind: 'ListObjectsV2',
-          input: {
-            Bucket: options.bucket,
-            Prefix: prefix,
-            ...(after === undefined ? {} : { StartAfter: after }),
-            MaxKeys: limit,
-          },
-        });
-        const contents = Array.isArray(response.Contents)
-          ? response.Contents
-          : [];
-        const keys = contents
-          .map((item) =>
-            typeof item === 'object' &&
-            item !== null &&
-            typeof (item as { Key?: unknown }).Key === 'string'
-              ? (item as { Key: string }).Key
-              : undefined,
-          )
-          .filter((key): key is string => key !== undefined)
-          .filter((key) => artifactKeyMatchesScope(key, request.scope))
-          .slice(0, limit);
-        const values: ArtifactMetadata[] = [];
-        for (const key of keys.slice(0, limit)) {
-          const value = await head(key);
-          if (value === undefined) continue;
-          if (
-            request.artifactPrefix === undefined ||
-            value.artifactId.startsWith(request.artifactPrefix)
-          )
-            values.push(value);
-        }
-        return Object.freeze({
-          items: Object.freeze(values),
-          ...(response.IsTruncated !== true || values.length === 0
+        const cursorQuery = {
+          scope: request.scope,
+          ...(request.artifactPrefix === undefined
             ? {}
-            : {
-                nextCursor: encodeArtifactCursor(
-                  request.scope,
-                  values.at(-1)!.key,
-                ),
-              }),
+            : { artifactPrefix: request.artifactPrefix }),
+          limit: request.limit!,
+        };
+        const after = cursors.decode(cursorQuery, request.cursor);
+        const limit = request.limit!;
+        const page = await options.manifest.list({
+          scope: request.scope,
+          ...(request.artifactPrefix === undefined
+            ? {}
+            : { artifactPrefix: request.artifactPrefix }),
+          ...(after === undefined ? {} : { after }),
+          limit,
+        });
+        return Object.freeze({
+          items: page.items,
+          ...(page.nextAfter === undefined
+            ? {}
+            : { nextCursor: cursors.encode(cursorQuery, page.nextAfter) }),
         });
       } catch (error) {
         return unavailable(error);
@@ -549,14 +585,17 @@ export function createR2ArtifactStorageWithDependencies(
   });
 
   const admin: ArtifactAdminStore = Object.freeze({
-    async delete(key: string) {
+    async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
       try {
         parseArtifactKey(key);
-        const existing = await head(key);
-        if (existing === undefined) return false;
         await send({
           kind: 'DeleteObject',
           input: { Bucket: options.bucket, Key: key },
+        });
+        await options.manifest.markDeleted({
+          key,
+          deletedAt: audit?.deletedAt ?? now().toISOString(),
+          reason: audit?.reason ?? 'control_plane_delete',
         });
         return true;
       } catch (error) {

@@ -10,6 +10,7 @@ const now = new Date('2026-08-17T00:00:00.000Z');
 const primary = { keyId: 'primary', secret: 'p'.repeat(32) };
 const old = { keyId: 'old', secret: 'o'.repeat(32) };
 const claims = {
+  purpose: 'agent-artifact-access',
   audience: 'artifact-mcp',
   methods: ['artifact.get', 'artifact.put', 'artifact.list'] as const,
   projectId: 'project-1',
@@ -29,6 +30,7 @@ describe('artifact capabilities', () => {
       keys: [primary, old],
     }).verify(token, {
       audience: 'artifact-mcp',
+      purpose: 'agent-artifact-access',
       method: 'artifact.get',
       now,
       projectId: 'project-1',
@@ -42,6 +44,7 @@ describe('artifact capabilities', () => {
   });
 
   it.each([
+    ['purpose', { purpose: 'other-purpose' }],
     ['audience', { audience: 'other' }],
     ['method', { method: 'artifact.delete' }],
     ['project', { projectId: 'project-2' }],
@@ -55,6 +58,7 @@ describe('artifact capabilities', () => {
     expect(() =>
       verifier.verify(token, {
         audience: 'artifact-mcp',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now,
         projectId: 'project-1',
@@ -68,6 +72,7 @@ describe('artifact capabilities', () => {
     try {
       verifier.verify(token, {
         audience: 'other',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now,
       });
@@ -85,6 +90,7 @@ describe('artifact capabilities', () => {
     expect(() =>
       verifier.verify(token, {
         audience: 'artifact-mcp',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now: new Date('2026-08-17T00:11:00.000Z'),
       }),
@@ -95,6 +101,7 @@ describe('artifact capabilities', () => {
     expect(() =>
       verifier.verify(`${token.slice(0, -1)}x`, {
         audience: 'artifact-mcp',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now,
       }),
@@ -106,6 +113,7 @@ describe('artifact capabilities', () => {
     expect(() =>
       verifier.verify(unknown, {
         audience: 'artifact-mcp',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now,
       }),
@@ -113,6 +121,7 @@ describe('artifact capabilities', () => {
     expect(() =>
       verifier.verify('not-a-token', {
         audience: 'artifact-mcp',
+        purpose: 'agent-artifact-access',
         method: 'artifact.get',
         now,
       }),

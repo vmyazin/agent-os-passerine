@@ -7,16 +7,19 @@ import {
   parseArtifactKey,
   prepareArtifactPut,
   type ArtifactAdminStore,
+  type ArtifactDeletionAudit,
   type ArtifactGetRequest,
   type ArtifactListRequest,
   type ArtifactMetadata,
+  type ArtifactManifestStore,
   type ArtifactPutRequest,
   type ArtifactStore,
   type ArtifactValue,
 } from '@agentos/core';
 
-import { decodeArtifactCursor, encodeArtifactCursor } from './cursor.js';
+import { createArtifactCursorCodec, type ArtifactCursorKey } from './cursor.js';
 import { ArtifactStoreAdapterError } from './errors.js';
+import { createInMemoryArtifactManifestStore } from './manifest.js';
 
 interface Stored {
   readonly metadata: ArtifactMetadata;
@@ -26,6 +29,8 @@ interface Stored {
 export interface InMemoryArtifactStorageOptions {
   readonly now?: () => Date;
   readonly maxBytes?: number;
+  readonly cursorKeys?: readonly ArtifactCursorKey[];
+  readonly manifest?: ArtifactManifestStore;
 }
 
 function metadata(value: ArtifactValue): ArtifactMetadata {
@@ -55,9 +60,17 @@ function scopeError(): ArtifactStoreAdapterError {
 
 export function createInMemoryArtifactStorage(
   options: InMemoryArtifactStorageOptions = {},
-): { readonly store: ArtifactStore; readonly admin: ArtifactAdminStore } {
+): {
+  readonly store: ArtifactStore;
+  readonly admin: ArtifactAdminStore;
+  readonly manifest: ArtifactManifestStore;
+} {
   const values = new Map<string, Stored>();
+  const manifest = options.manifest ?? createInMemoryArtifactManifestStore();
   const now = options.now ?? (() => new Date());
+  const cursors = createArtifactCursorCodec({
+    ...(options.cursorKeys === undefined ? {} : { keys: options.cursorKeys }),
+  });
   const store: ArtifactStore = Object.freeze({
     async put(request: ArtifactPutRequest) {
       const prepared = prepareArtifactPut(request, now(), {
@@ -65,6 +78,13 @@ export function createInMemoryArtifactStorage(
           ? {}
           : { maxBytes: options.maxBytes }),
       });
+      const claimed = await manifest.claim(metadata(prepared));
+      if (claimed.key !== prepared.key)
+        throw new ArtifactStoreAdapterError(
+          'artifact_conflict',
+          'artifact version already exists with different content',
+          409,
+        );
       const existing = values.get(prepared.key);
       if (existing !== undefined) {
         if (
@@ -95,8 +115,15 @@ export function createInMemoryArtifactStorage(
         throw scopeError();
       }
       if (!inScope) throw scopeError();
+      const claimed = await manifest.get(request.scope, request.key);
+      if (claimed === undefined) return undefined;
       const stored = values.get(request.key);
-      if (stored === undefined) return undefined;
+      if (stored === undefined)
+        throw new ArtifactStoreAdapterError(
+          'artifact_integrity_error',
+          'artifact manifest references a missing object',
+          500,
+        );
       if (
         request.maxBytes !== undefined &&
         stored.bytes.byteLength > request.maxBytes
@@ -120,36 +147,42 @@ export function createInMemoryArtifactStorage(
     },
     async list(input: ArtifactListRequest) {
       const request = normalizeArtifactListRequest(input);
-      const after = decodeArtifactCursor(request.scope, request.cursor);
-      const items = [...values.values()]
-        .map((value) => value.metadata)
-        .filter(
-          (value) =>
-            artifactKeyMatchesScope(value.key, request.scope) &&
-            (request.artifactPrefix === undefined ||
-              value.artifactId.startsWith(request.artifactPrefix)) &&
-            (after === undefined || value.key > after),
-        )
-        .sort((left, right) =>
-          left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
-        );
-      const limit = request.limit!;
-      const page = items.slice(0, limit);
-      return Object.freeze({
-        items: Object.freeze(page),
-        ...(items.length <= limit || page.length === 0
+      const cursorQuery = {
+        scope: request.scope,
+        ...(request.artifactPrefix === undefined
           ? {}
-          : {
-              nextCursor: encodeArtifactCursor(request.scope, page.at(-1)!.key),
-            }),
+          : { artifactPrefix: request.artifactPrefix }),
+        limit: request.limit!,
+      };
+      const after = cursors.decode(cursorQuery, request.cursor);
+      const limit = request.limit!;
+      const page = await manifest.list({
+        scope: request.scope,
+        ...(request.artifactPrefix === undefined
+          ? {}
+          : { artifactPrefix: request.artifactPrefix }),
+        ...(after === undefined ? {} : { after }),
+        limit,
+      });
+      return Object.freeze({
+        items: page.items,
+        ...(page.nextAfter === undefined
+          ? {}
+          : { nextCursor: cursors.encode(cursorQuery, page.nextAfter) }),
       });
     },
   });
   const admin: ArtifactAdminStore = Object.freeze({
-    async delete(key: string) {
+    async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
       parseArtifactKey(key);
-      return values.delete(key);
+      const removed = values.delete(key);
+      await manifest.markDeleted({
+        key,
+        deletedAt: audit?.deletedAt ?? now().toISOString(),
+        reason: audit?.reason ?? 'control_plane_delete',
+      });
+      return removed;
     },
   });
-  return Object.freeze({ store, admin });
+  return Object.freeze({ store, admin, manifest });
 }

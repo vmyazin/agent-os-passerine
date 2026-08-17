@@ -88,7 +88,44 @@ export interface ArtifactStore {
 }
 
 export interface ArtifactAdminStore {
-  delete(key: string): Promise<boolean>;
+  delete(
+    key: string,
+    audit?: Omit<ArtifactDeletionAudit, 'key'>,
+  ): Promise<boolean>;
+}
+
+export interface ArtifactManifestListRequest {
+  readonly scope: ArtifactScope;
+  readonly artifactPrefix?: string;
+  readonly after?: string;
+  readonly limit: number;
+}
+
+export interface ArtifactManifestListPage {
+  readonly items: readonly ArtifactMetadata[];
+  /** The last scanned key. It may be present when items is empty. */
+  readonly nextAfter?: string;
+}
+
+export interface ArtifactDeletionAudit {
+  readonly key: string;
+  readonly deletedAt: string;
+  readonly reason: 'retention_expired' | 'control_plane_delete';
+}
+
+/**
+ * Authoritative logical-version ledger. Implementations must atomically bind a
+ * (project, run, step, artifact, version) tuple to one immutable metadata row.
+ */
+export interface ArtifactManifestStore {
+  claim(metadata: ArtifactMetadata): Promise<ArtifactMetadata>;
+  get(scope: ArtifactScope, key: string): Promise<ArtifactMetadata | undefined>;
+  list(request: ArtifactManifestListRequest): Promise<ArtifactManifestListPage>;
+  listExpired(
+    before: string,
+    limit: number,
+  ): Promise<readonly ArtifactMetadata[]>;
+  markDeleted(audit: ArtifactDeletionAudit): Promise<void>;
 }
 
 export interface ArtifactPreparationOptions {
@@ -133,6 +170,15 @@ export function normalizeArtifactScope(scope: ArtifactScope): ArtifactScope {
 export function artifactScopePrefix(scope: ArtifactScope): string {
   const value = normalizeArtifactScope(scope);
   return `artifacts/v1/${value.projectId}/${value.runId}/${value.stepId}/`;
+}
+
+export function artifactLogicalKey(
+  parts: Pick<ArtifactKeyParts, 'stepId' | 'artifactId' | 'version'>,
+): string {
+  return `artifact-manifest/v1/${segment(parts.stepId, 'stepId')}/${segment(
+    parts.artifactId,
+    'artifactId',
+  )}/${positiveVersion(parts.version)}`;
 }
 
 export function buildArtifactKey(parts: ArtifactKeyParts): string {
@@ -313,7 +359,7 @@ export function normalizeArtifactListRequest(
     cursor !== undefined &&
     (cursor.length < 1 ||
       cursor.length > 2_048 ||
-      !/^[A-Za-z0-9_-]+$/.test(cursor))
+      !/^[A-Za-z0-9_.-]+$/.test(cursor))
   )
     throw new ArtifactValidationError('artifact list cursor is invalid');
   return Object.freeze({

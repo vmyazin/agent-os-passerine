@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from 'node:crypto';
+
 import {
   ArtifactCapabilityError,
   ArtifactValidationError,
@@ -12,13 +14,15 @@ import {
 import { ArtifactStoreAdapterError } from './errors.js';
 
 export const ARTIFACT_MCP_PROTOCOL_VERSION = '2025-06-18';
-export const DEFAULT_ARTIFACT_MCP_REQUEST_BYTES = 256 * 1024;
-export const DEFAULT_ARTIFACT_MCP_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const MAX_AGENT_ARTIFACT_BYTES = 1024 * 1024;
+export const DEFAULT_ARTIFACT_MCP_REQUEST_BYTES = 1_500_000;
+export const DEFAULT_ARTIFACT_MCP_RESPONSE_BYTES = 1_500_000;
 
 export interface ArtifactMcpHandlerOptions {
   readonly store: ArtifactStore;
   readonly capabilityVerifier: ArtifactCapabilityVerifier;
   readonly audience: string;
+  readonly purpose?: string;
   readonly allowedOrigins: readonly string[];
   readonly now?: () => Date;
   readonly maxRequestBytes?: number;
@@ -32,6 +36,12 @@ interface JsonRpcRequest {
   readonly id?: string | number;
   readonly method: string;
   readonly params?: Record<string, unknown>;
+}
+
+interface Session {
+  readonly tokenHash: string;
+  readonly expiresAt: number;
+  initialized: boolean;
 }
 
 class McpTransportError extends Error {
@@ -57,8 +67,16 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function exactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  if (Object.keys(value).some((key) => !allowed.includes(key)))
+    throw new JsonRpcCallError(-32602, 'invalid tool arguments');
+}
+
 function validId(value: unknown): value is string | number {
-  const hasControlCharacter = (text: string) =>
+  const hasControl = (text: string) =>
     [...text].some((character) => {
       const code = character.charCodeAt(0);
       return code <= 0x1f || code === 0x7f;
@@ -67,7 +85,7 @@ function validId(value: unknown): value is string | number {
     (typeof value === 'string' &&
       value.length > 0 &&
       value.length <= 128 &&
-      !hasControlCharacter(value)) ||
+      !hasControl(value)) ||
     (typeof value === 'number' && Number.isSafeInteger(value))
   );
 }
@@ -106,30 +124,31 @@ function parseRpc(value: unknown): JsonRpcRequest {
 }
 
 function contentType(request: Request): void {
-  const value = request.headers.get('content-type')?.toLowerCase() ?? '';
-  if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/.test(value))
+  const type = request.headers.get('content-type')?.toLowerCase() ?? '';
+  if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/.test(type))
     throw new McpTransportError(
       415,
       'unsupported_media_type',
       'content type must be application/json',
     );
-  const accept = request.headers.get('accept')?.toLowerCase() ?? '';
+  const accepts = (request.headers.get('accept') ?? '')
+    .toLowerCase()
+    .split(',')
+    .map((entry) => entry.split(';', 1)[0]?.trim());
   if (
-    !accept
-      .split(',')
-      .map((entry) => entry.split(';', 1)[0]?.trim())
-      .some((entry) => entry === 'application/json' || entry === '*/*')
+    !accepts.includes('application/json') ||
+    !accepts.includes('text/event-stream')
   )
     throw new McpTransportError(
       406,
       'not_acceptable',
-      'application/json response is required',
+      'both application/json and text/event-stream must be accepted',
     );
 }
 
 function enforceOrigin(request: Request, allowed: ReadonlySet<string>): void {
   const origin = request.headers.get('origin');
-  if (origin === null || origin === '' || !allowed.has(origin))
+  if (origin !== null && origin !== '' && !allowed.has(origin))
     throw new McpTransportError(
       403,
       'origin_denied',
@@ -219,35 +238,37 @@ async function readBody(request: Request, maxBytes: number): Promise<unknown> {
   }
 }
 
-function json(value: unknown, status: number, maxBytes: number): Response {
+function json(
+  value: unknown,
+  status: number,
+  maxBytes: number,
+  headers: Record<string, string> = {},
+): Response {
   const encoded = JSON.stringify(value);
-  if (Buffer.byteLength(encoded, 'utf8') > maxBytes) {
-    const fallback = JSON.stringify({
-      error: {
-        code: 'response_too_large',
-        message: 'response exceeds configured limit',
+  if (Buffer.byteLength(encoded, 'utf8') > maxBytes)
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: 'response_too_large',
+          message: 'response exceeds configured limit',
+        },
+      }),
+      {
+        status: 500,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        },
       },
-    });
-    return new Response(fallback, {
-      status: 500,
-      headers: { 'content-type': 'application/json; charset=utf-8' },
-    });
-  }
+    );
   return new Response(encoded, {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
+      ...headers,
     },
   });
-}
-
-function transportError(error: McpTransportError, maxBytes: number): Response {
-  return json(
-    { error: { code: error.code, message: error.message } },
-    error.status,
-    maxBytes,
-  );
 }
 
 function capability(
@@ -263,6 +284,7 @@ function capability(
   } = {},
 ): ArtifactCapabilityClaims {
   return options.capabilityVerifier.verify(token, {
+    purpose: options.purpose ?? 'agent-artifact-access',
     audience: options.audience,
     now: (options.now ?? (() => new Date()))(),
     ...expected,
@@ -293,7 +315,9 @@ function integerArgument(
   return entry as number;
 }
 
-function base64Bytes(value: string): Uint8Array {
+function base64Bytes(value: string, maxBytes: number): Uint8Array {
+  if (value.length > 4 * Math.ceil(maxBytes / 3))
+    throw new JsonRpcCallError(-32602, 'artifact exceeds MCP byte limit');
   if (
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
       value,
@@ -301,7 +325,7 @@ function base64Bytes(value: string): Uint8Array {
   )
     throw new JsonRpcCallError(-32602, 'invalid tool arguments');
   const bytes = Buffer.from(value, 'base64');
-  if (bytes.toString('base64') !== value)
+  if (bytes.byteLength > maxBytes || bytes.toString('base64') !== value)
     throw new JsonRpcCallError(-32602, 'invalid tool arguments');
   return bytes;
 }
@@ -327,7 +351,7 @@ const TOOLS = Object.freeze([
         artifactId: { type: 'string' },
         version: { type: 'integer', minimum: 1 },
         mediaType: { type: 'string' },
-        contentBase64: { type: 'string' },
+        contentBase64: { type: 'string', maxLength: 1_398_104 },
         digest: { type: 'string' },
         retentionClass: {
           enum: ['source-bundle', 'cloud-session-upload', 'working'],
@@ -345,7 +369,7 @@ const TOOLS = Object.freeze([
       properties: {
         artifactPrefix: { type: 'string' },
         cursor: { type: 'string' },
-        limit: { type: 'integer', minimum: 1, maximum: 1000 },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
       },
       additionalProperties: false,
     },
@@ -359,15 +383,20 @@ function toolArguments(rpc: JsonRpcRequest): {
   const params = rpc.params;
   if (params === undefined || typeof params.name !== 'string')
     throw new JsonRpcCallError(-32602, 'invalid tool arguments');
+  exactKeys(params, ['name', 'arguments', '_meta']);
   if (params.arguments !== undefined && !record(params.arguments))
     throw new JsonRpcCallError(-32602, 'invalid tool arguments');
   return { name: params.name, arguments: params.arguments ?? {} };
 }
 
-function toolResult(value: unknown): Record<string, unknown> {
+function toolResult(
+  value: Record<string, unknown>,
+  summary: string,
+): Record<string, unknown> {
   return {
-    content: [{ type: 'text', text: JSON.stringify(value) }],
+    content: [{ type: 'text', text: summary }],
     structuredContent: value,
+    isError: false,
   };
 }
 
@@ -375,11 +404,13 @@ async function callTool(
   options: ArtifactMcpHandlerOptions,
   token: string,
   rpc: JsonRpcRequest,
+  maxResponseBytes: number,
 ): Promise<Record<string, unknown>> {
   const call = toolArguments(rpc);
   if (!['artifact.get', 'artifact.put', 'artifact.list'].includes(call.name))
     throw new JsonRpcCallError(-32601, 'tool not found');
   if (call.name === 'artifact.get') {
+    exactKeys(call.arguments, ['key']);
     const key = stringArgument(call.arguments, 'key')!;
     const parts = parseArtifactKey(key);
     const claims = capability(options, token, {
@@ -389,25 +420,50 @@ async function callTool(
       stepId: parts.stepId,
       artifactId: parts.artifactId,
     });
+    const responseContentLimit = Math.max(
+      1,
+      Math.floor((maxResponseBytes - 2_048) * 0.75),
+    );
     const value = await options.store.get({
       scope: claims,
       key,
-      maxBytes: claims.maxBytes,
+      maxBytes: Math.min(
+        claims.maxBytes,
+        MAX_AGENT_ARTIFACT_BYTES,
+        responseContentLimit,
+      ),
     });
+    if (value === undefined)
+      return toolResult({ found: false }, 'Artifact not found.');
+    if (4 * Math.ceil(value.bytes.byteLength / 3) + 2_048 > maxResponseBytes)
+      throw new JsonRpcCallError(-32602, 'artifact exceeds MCP response limit');
     return toolResult(
-      value === undefined
-        ? null
-        : {
-            ...value,
-            bytes: undefined,
-            contentBase64: Buffer.from(value.bytes).toString('base64'),
-          },
+      {
+        found: true,
+        metadata: { ...value, bytes: undefined },
+        contentBase64: Buffer.from(value.bytes).toString('base64'),
+      },
+      `Artifact retrieved (${value.sizeBytes} bytes).`,
     );
   }
   if (call.name === 'artifact.put') {
+    exactKeys(call.arguments, [
+      'artifactId',
+      'version',
+      'mediaType',
+      'contentBase64',
+      'digest',
+      'retentionClass',
+    ]);
     const artifactId = stringArgument(call.arguments, 'artifactId')!;
-    const contentBase64 = stringArgument(call.arguments, 'contentBase64')!;
-    const bytes = base64Bytes(contentBase64);
+    const unverified = capability(options, token, {
+      method: 'artifact.put',
+      artifactId,
+    });
+    const bytes = base64Bytes(
+      stringArgument(call.arguments, 'contentBase64')!,
+      Math.min(unverified.maxBytes, MAX_AGENT_ARTIFACT_BYTES),
+    );
     const claims = capability(options, token, {
       method: 'artifact.put',
       artifactId,
@@ -419,73 +475,69 @@ async function callTool(
       !['source-bundle', 'cloud-session-upload', 'working'].includes(retention)
     )
       throw new JsonRpcCallError(-32602, 'invalid tool arguments');
+    const metadata = await options.store.put({
+      scope: claims,
+      artifactId,
+      version: integerArgument(call.arguments, 'version')!,
+      bytes,
+      mediaType: stringArgument(call.arguments, 'mediaType')!,
+      ...(stringArgument(call.arguments, 'digest', false) === undefined
+        ? {}
+        : { digest: stringArgument(call.arguments, 'digest', false)! }),
+      ...(retention === undefined
+        ? {}
+        : { retentionClass: retention as ArtifactRetentionClass }),
+    });
     return toolResult(
-      await options.store.put({
-        scope: claims,
-        artifactId,
-        version: integerArgument(call.arguments, 'version')!,
-        bytes,
-        mediaType: stringArgument(call.arguments, 'mediaType')!,
-        ...(stringArgument(call.arguments, 'digest', false) === undefined
-          ? {}
-          : { digest: stringArgument(call.arguments, 'digest', false)! }),
-        ...(retention === undefined
-          ? {}
-          : { retentionClass: retention as ArtifactRetentionClass }),
-      }),
+      { metadata },
+      `Artifact stored (${metadata.sizeBytes} bytes).`,
     );
   }
+  exactKeys(call.arguments, ['artifactPrefix', 'cursor', 'limit']);
   const requestedPrefix = stringArgument(
     call.arguments,
     'artifactPrefix',
     false,
   );
-  const initialClaims = capability(options, token, { method: 'artifact.list' });
-  const effectivePrefix = requestedPrefix ?? initialClaims.prefix;
+  const claims = capability(options, token, { method: 'artifact.list' });
+  const effectivePrefix = requestedPrefix ?? claims.prefix;
   capability(options, token, {
     method: 'artifact.list',
     ...(effectivePrefix === undefined ? {} : { artifactId: effectivePrefix }),
   });
-  return toolResult(
-    await options.store.list({
-      scope: initialClaims,
-      ...(effectivePrefix === undefined
-        ? {}
-        : { artifactPrefix: effectivePrefix }),
-      ...(stringArgument(call.arguments, 'cursor', false) === undefined
-        ? {}
-        : { cursor: stringArgument(call.arguments, 'cursor', false)! }),
-      ...(integerArgument(call.arguments, 'limit', false) === undefined
-        ? {}
-        : { limit: integerArgument(call.arguments, 'limit', false)! }),
-    }),
-  );
+  const requestedLimit = integerArgument(call.arguments, 'limit', false);
+  if (
+    requestedLimit !== undefined &&
+    (requestedLimit < 1 || requestedLimit > 100)
+  )
+    throw new JsonRpcCallError(-32602, 'invalid tool arguments');
+  const page = await options.store.list({
+    scope: claims,
+    ...(effectivePrefix === undefined
+      ? {}
+      : { artifactPrefix: effectivePrefix }),
+    ...(stringArgument(call.arguments, 'cursor', false) === undefined
+      ? {}
+      : { cursor: stringArgument(call.arguments, 'cursor', false)! }),
+    ...(requestedLimit === undefined
+      ? { limit: 100 }
+      : { limit: requestedLimit }),
+  });
+  return toolResult({ page }, `Listed ${page.items.length} artifacts.`);
 }
 
-async function dispatch(
-  options: ArtifactMcpHandlerOptions,
-  token: string,
-  rpc: JsonRpcRequest,
-): Promise<unknown> {
-  if (rpc.method === 'initialize') {
-    capability(options, token);
-    if (
-      rpc.params?.protocolVersion !== undefined &&
-      rpc.params.protocolVersion !== ARTIFACT_MCP_PROTOCOL_VERSION
-    )
-      throw new JsonRpcCallError(-32602, 'unsupported protocol version');
-    return {
-      protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION,
-      capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'agentos-artifacts', version: '1.0.0' },
-    };
-  }
-  if (rpc.method === 'tools/list') {
-    capability(options, token, { method: 'artifact.list' });
-    return { tools: TOOLS };
-  }
-  if (rpc.method === 'tools/call') return callTool(options, token, rpc);
-  throw new JsonRpcCallError(-32601, 'method not found');
+function validateInitialize(params: Record<string, unknown> | undefined): void {
+  if (
+    params === undefined ||
+    typeof params.protocolVersion !== 'string' ||
+    !record(params.capabilities) ||
+    !record(params.clientInfo) ||
+    typeof params.clientInfo.name !== 'string' ||
+    params.clientInfo.name.length < 1 ||
+    typeof params.clientInfo.version !== 'string' ||
+    params.clientInfo.version.length < 1
+  )
+    throw new JsonRpcCallError(-32602, 'invalid initialize request');
 }
 
 export function createArtifactMcpHandler(
@@ -520,19 +572,34 @@ export function createArtifactMcpHandler(
     throw new Error('Artifact MCP request limit is invalid');
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 128)
     throw new Error('Artifact MCP response limit is invalid');
+  const sessions = new Map<string, Session>();
+  const now = options.now ?? (() => new Date());
+  const tokenHash = (token: string) =>
+    createHash('sha256').update(token).digest('hex');
+  const sessionFor = (request: Request, token: string): Session => {
+    const id = request.headers.get('mcp-session-id');
+    const version = request.headers.get('mcp-protocol-version');
+    const session = id === null ? undefined : sessions.get(id);
+    if (
+      version !== ARTIFACT_MCP_PROTOCOL_VERSION ||
+      session === undefined ||
+      session.tokenHash !== tokenHash(token) ||
+      session.expiresAt <= now().getTime()
+    )
+      throw new McpTransportError(
+        400,
+        'invalid_session',
+        'valid MCP session and protocol headers are required',
+      );
+    return session;
+  };
   return async (request: Request): Promise<Response> => {
     try {
-      if (request.method !== 'POST')
-        throw new McpTransportError(
-          405,
-          'method_not_allowed',
-          'only POST is supported',
-        );
-      contentType(request);
       enforceOrigin(request, allowedOrigins);
       const token = bearer(request);
+      let claims: ArtifactCapabilityClaims;
       try {
-        capability(options, token);
+        claims = capability(options, token);
       } catch {
         throw new McpTransportError(
           401,
@@ -540,6 +607,22 @@ export function createArtifactMcpHandler(
           'artifact capability is invalid',
         );
       }
+      if (request.method === 'DELETE') {
+        const target = sessionFor(request, token);
+        for (const [id, session] of sessions)
+          if (session === target) sessions.delete(id);
+        return new Response(null, {
+          status: 204,
+          headers: { 'cache-control': 'no-store' },
+        });
+      }
+      if (request.method !== 'POST')
+        throw new McpTransportError(
+          405,
+          'method_not_allowed',
+          'only POST and DELETE are supported',
+        );
+      contentType(request);
       const value = await readBody(request, maxRequestBytes);
       if (Array.isArray(value))
         throw new McpTransportError(
@@ -548,6 +631,49 @@ export function createArtifactMcpHandler(
           'JSON-RPC batches are not supported',
         );
       const rpc = parseRpc(value);
+      if (rpc.method === 'initialize') {
+        if (rpc.id === undefined)
+          throw new McpTransportError(
+            400,
+            'invalid_notification',
+            'initialize requires an id',
+          );
+        try {
+          validateInitialize(rpc.params);
+        } catch (error) {
+          const normalized = error as JsonRpcCallError;
+          return json(
+            {
+              jsonrpc: '2.0',
+              id: rpc.id,
+              error: { code: normalized.code, message: normalized.message },
+            },
+            200,
+            maxResponseBytes,
+          );
+        }
+        const id = randomUUID();
+        sessions.set(id, {
+          tokenHash: tokenHash(token),
+          expiresAt: Date.parse(claims.expiresAt),
+          initialized: false,
+        });
+        return json(
+          {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION,
+              capabilities: { tools: { listChanged: false } },
+              serverInfo: { name: 'agentos-artifacts', version: '1.0.0' },
+            },
+          },
+          200,
+          maxResponseBytes,
+          { 'mcp-session-id': id },
+        );
+      }
+      const session = sessionFor(request, token);
       if (rpc.id === undefined) {
         if (rpc.method !== 'notifications/initialized')
           throw new McpTransportError(
@@ -555,11 +681,28 @@ export function createArtifactMcpHandler(
             'invalid_notification',
             'notification is not supported',
           );
-        capability(options, token);
-        return new Response(null, { status: 202 });
+        session.initialized = true;
+        return new Response(null, {
+          status: 202,
+          headers: { 'cache-control': 'no-store' },
+        });
       }
+      if (!session.initialized)
+        throw new McpTransportError(
+          400,
+          'session_not_initialized',
+          'MCP session is not initialized',
+        );
       try {
-        const result = await dispatch(options, token, rpc);
+        let result: unknown;
+        if (rpc.method === 'tools/list') {
+          if (rpc.params !== undefined)
+            exactKeys(rpc.params, ['cursor', '_meta']);
+          capability(options, token, { method: 'artifact.list' });
+          result = { tools: TOOLS };
+        } else if (rpc.method === 'tools/call')
+          result = await callTool(options, token, rpc, maxResponseBytes);
+        else throw new JsonRpcCallError(-32601, 'method not found');
         return json(
           { jsonrpc: '2.0', id: rpc.id, result },
           200,
@@ -588,14 +731,17 @@ export function createArtifactMcpHandler(
         );
       }
     } catch (error) {
-      return transportError(
+      const normalized =
         error instanceof McpTransportError
           ? error
           : new McpTransportError(
               500,
               'internal_error',
               'artifact MCP request failed',
-            ),
+            );
+      return json(
+        { error: { code: normalized.code, message: normalized.message } },
+        normalized.status,
         maxResponseBytes,
       );
     }

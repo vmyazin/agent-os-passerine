@@ -390,8 +390,11 @@ export const artifacts = pgTable(
     sizeBytes: bigint('size_bytes', { mode: 'number' }),
     digest: text('digest').notNull(),
     uri: text('uri'),
+    retentionClass: text('retention_class'),
     createdAt: instant('created_at').notNull(),
     cleanupAt: instant('cleanup_at'),
+    deletedAt: instant('deleted_at'),
+    deletionReason: text('deletion_reason'),
   },
   (table) => [
     unique('artifacts_run_key_unique').on(table.runId, table.key),
@@ -405,7 +408,10 @@ export const artifacts = pgTable(
     ),
     index('artifacts_cleanup_idx')
       .on(table.cleanupAt)
-      .where(sql`${table.cleanupAt} is not null`),
+      .where(
+        sql`${table.cleanupAt} is not null and ${table.deletedAt} is null`,
+      ),
+    index('artifacts_run_key_scan_idx').on(table.runId, bytewise(table.key)),
     index('artifacts_run_created_idx').on(
       table.runId,
       table.createdAt,

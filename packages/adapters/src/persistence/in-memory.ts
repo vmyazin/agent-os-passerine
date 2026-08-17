@@ -929,9 +929,92 @@ export class InMemoryDomainRepository implements DomainRepository {
     return created;
   }
 
+  async claimArtifact(artifact: ArtifactRecord): Promise<ArtifactRecord> {
+    requireEntry(this.#runs, artifact.runId, 'Run');
+    assertValidArtifact(artifact);
+    const key = `${artifact.runId}\u0000${artifact.key}`;
+    const existingId = this.#artifactKeys.get(key);
+    if (existingId !== undefined) return copy(this.#artifacts.get(existingId)!);
+    const created = insertUnique(
+      this.#artifacts,
+      artifact.id,
+      artifact,
+      'Artifact',
+    );
+    this.#artifactKeys.set(key, artifact.id);
+    return created;
+  }
+
   async getArtifact(id: ArtifactId): Promise<ArtifactRecord | undefined> {
     const value = this.#artifacts.get(id);
     return value === undefined ? undefined : copy(value);
+  }
+
+  async getArtifactByRunKey(
+    runId: WorkflowRunId,
+    key: string,
+  ): Promise<ArtifactRecord | undefined> {
+    const id = this.#artifactKeys.get(`${runId}\u0000${key}`);
+    const value = id === undefined ? undefined : this.#artifacts.get(id);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async listArtifactsByRunKey(
+    runId: WorkflowRunId,
+    keyPrefix: string,
+    afterKey: string | undefined,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]> {
+    return copy(
+      [...this.#artifacts.values()]
+        .filter(
+          (artifact) =>
+            artifact.runId === runId &&
+            artifact.deletedAt === undefined &&
+            artifact.key.startsWith(keyPrefix) &&
+            (afterKey === undefined ||
+              compareOpaqueText(artifact.key, afterKey) > 0),
+        )
+        .sort((left, right) => compareOpaqueText(left.key, right.key))
+        .slice(0, limit),
+    );
+  }
+
+  async listArtifactsDueForCleanup(
+    before: import('@agentos/core').IsoTimestamp,
+    limit: number,
+  ): Promise<readonly ArtifactRecord[]> {
+    const cutoff = isoTimestampEpochMicroseconds(before);
+    return copy(
+      [...this.#artifacts.values()]
+        .filter(
+          (artifact) =>
+            artifact.deletedAt === undefined &&
+            artifact.cleanupAt !== undefined &&
+            isoTimestampEpochMicroseconds(artifact.cleanupAt) <= cutoff,
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.cleanupAt!,
+            left.id,
+            right.cleanupAt!,
+            right.id,
+          ),
+        )
+        .slice(0, limit),
+    );
+  }
+
+  async markArtifactDeleted(
+    id: ArtifactId,
+    deletedAt: import('@agentos/core').IsoTimestamp,
+    reason: string,
+  ): Promise<ArtifactRecord> {
+    const existing = requireEntry(this.#artifacts, id, 'Artifact');
+    if (existing.deletedAt !== undefined) return copy(existing);
+    const updated = { ...existing, deletedAt, deletionReason: reason };
+    this.#artifacts.set(id, copy(updated));
+    return copy(updated);
   }
 
   async listArtifacts(

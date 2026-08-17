@@ -9,6 +9,7 @@ export type ArtifactCapabilityMethod =
   'artifact.get' | 'artifact.put' | 'artifact.list';
 
 export interface ArtifactCapabilityClaims {
+  readonly purpose: string;
   readonly audience: string;
   readonly methods: readonly ArtifactCapabilityMethod[];
   readonly projectId: string;
@@ -27,6 +28,7 @@ export interface ArtifactCapabilityKey {
 }
 
 export interface ArtifactCapabilityVerification {
+  readonly purpose: string;
   readonly audience: string;
   readonly method?: string;
   readonly now?: Date;
@@ -147,6 +149,7 @@ function normalizeClaims(
   now: Date,
 ): ArtifactCapabilityClaims {
   safeClaim(claims.audience, 'audience');
+  safeClaim(claims.purpose, 'purpose');
   safeClaim(claims.projectId, 'projectId');
   safeClaim(claims.runId, 'runId');
   safeClaim(claims.stepId, 'stepId');
@@ -176,6 +179,7 @@ function normalizeClaims(
   )
     throw new Error('Artifact capability lifetime is invalid');
   return Object.freeze({
+    purpose: claims.purpose,
     audience: claims.audience,
     methods: Object.freeze(methods),
     projectId: claims.projectId,
@@ -304,6 +308,7 @@ export function createArtifactCapabilityVerifier(options: {
       if (nowMs >= Date.parse(claims.expiresAt))
         throw new ArtifactCapabilityError('artifact capability is expired');
       if (
+        claims.purpose !== expected.purpose ||
         claims.audience !== expected.audience ||
         (expected.method !== undefined &&
           !claims.methods.includes(
