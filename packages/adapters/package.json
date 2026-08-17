@@ -12,12 +12,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
+    "smoke:managed-agents": "pnpm build && node scripts/managed-agents-smoke.mjs",
     "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run src/persistence/postgres.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentos/core": "workspace:*",
+    "@anthropic-ai/sdk": "0.117.1",
     "@neondatabase/serverless": "1.1.0",
     "drizzle-orm": "0.45.2"
   },

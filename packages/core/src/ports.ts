@@ -46,6 +46,8 @@ export interface RuntimeOutput {
 export interface RuntimeUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
+  readonly cacheCreationInputTokens?: number;
+  readonly cacheReadInputTokens?: number;
   readonly runtimeMs: number;
 }
 
