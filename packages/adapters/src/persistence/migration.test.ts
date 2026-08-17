@@ -23,6 +23,8 @@ describe('domain persistence migration', () => {
     'inbox_messages',
     'domain_events',
     'artifacts',
+    'artifact_capability_quotas',
+    'artifact_cleanup_leases',
     'usage_records',
     'webhook_receipts',
     'goal_criteria',
@@ -60,10 +62,20 @@ describe('domain persistence migration', () => {
       'workflow_runs_cleanup_idx',
       'step_runs_cleanup_idx',
       'artifacts_cleanup_idx',
+      'artifact_capability_quotas_expiry_idx',
       'webhook_receipts_expiry_idx',
     ]) {
       expect(migration).toContain(`index "${index}"`);
     }
+  });
+
+  it('persists manifest discrimination, capability budgets, and cleanup leases', () => {
+    expect(migration).toContain('"manifest_version" text');
+    expect(migration).toContain('primary key("purpose","audience","nonce")');
+    expect(migration).toContain('"operation_ids" text[] not null');
+    expect(migration).toContain(
+      '"expires_at" timestamp with time zone not null',
+    );
   });
 
   it('constrains status and money values', () => {

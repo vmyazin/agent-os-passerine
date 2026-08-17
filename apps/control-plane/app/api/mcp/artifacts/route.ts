@@ -7,15 +7,11 @@ export function POST(request: Request): Promise<Response> {
   return artifactMcpHandler()(request);
 }
 
-export function DELETE(request: Request): Promise<Response> {
-  return artifactMcpHandler()(request);
-}
-
 export function GET(): Response {
   return Response.json(
     {
       error: { code: 'method_not_allowed', message: 'only POST is supported' },
     },
-    { status: 405, headers: { allow: 'POST, DELETE' } },
+    { status: 405, headers: { allow: 'POST' } },
   );
 }

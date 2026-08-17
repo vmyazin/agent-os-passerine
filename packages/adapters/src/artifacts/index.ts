@@ -21,6 +21,11 @@ export {
   type ArtifactMcpHandlerOptions,
 } from './mcp.js';
 export {
+  createDomainArtifactCapabilityQuotaStore,
+  type ArtifactCapabilityQuotaConsumption,
+  type ArtifactCapabilityQuotaStore,
+} from './quota.js';
+export {
   createR2ArtifactAdminStore,
   createR2ArtifactStore,
   type R2ArtifactStorageOptions,

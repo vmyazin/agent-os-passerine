@@ -177,5 +177,34 @@ export function artifactStoreContract(
       expect(await admin.delete(artifact.key)).toBe(true);
       expect(await store.get({ scope, key: artifact.key })).toBeUndefined();
     });
+
+    it('keeps a deleted logical version tombstoned forever', async () => {
+      const { store, admin } = await factory();
+      const input = request('tombstone', 'immutable');
+      const artifact = await store.put(input);
+      await admin.delete(artifact.key);
+
+      await expect(store.put(input)).rejects.toMatchObject({
+        code: 'artifact_deleted',
+      });
+      await expect(
+        store.get({ scope, key: artifact.key }),
+      ).resolves.toBeUndefined();
+      expect((await store.list({ scope })).items).toEqual([]);
+    });
+
+    it('does not delete a real artifact through a forged same-tuple key', async () => {
+      const { store, admin } = await factory();
+      const artifact = await store.put(request('protected', 'real'));
+      const forged = artifact.key.replace(artifact.digest, 'f'.repeat(64));
+
+      await expect(admin.delete(forged)).resolves.toBe(false);
+      await expect(
+        store.get({ scope, key: artifact.key }),
+      ).resolves.toMatchObject({
+        digest: artifact.digest,
+      });
+      expect((await store.list({ scope })).items).toHaveLength(1);
+    });
   });
 }

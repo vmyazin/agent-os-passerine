@@ -4,6 +4,8 @@ import { DEFAULT_ARTIFACT_MAX_BYTES } from './artifacts.js';
 
 export const ARTIFACT_CAPABILITY_MAX_LIFETIME_MS = 60 * 60 * 1_000;
 export const ARTIFACT_CAPABILITY_MAX_FUTURE_MS = 5 * 60 * 1_000;
+export const ARTIFACT_CAPABILITY_MAX_CALLS = 10_000;
+export const ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES = 64 * 1024 * 1024;
 
 export type ArtifactCapabilityMethod =
   'artifact.get' | 'artifact.put' | 'artifact.list';
@@ -17,6 +19,8 @@ export interface ArtifactCapabilityClaims {
   readonly stepId: string;
   readonly prefix?: string;
   readonly maxBytes: number;
+  readonly maxCalls: number;
+  readonly maxCumulativeBytes: number;
   readonly expiresAt: string;
   readonly notBefore: string;
   readonly nonce: string;
@@ -161,6 +165,18 @@ function normalizeClaims(
     claims.maxBytes > DEFAULT_ARTIFACT_MAX_BYTES
   )
     throw new Error('maxBytes is invalid');
+  if (
+    !Number.isSafeInteger(claims.maxCalls) ||
+    claims.maxCalls < 1 ||
+    claims.maxCalls > ARTIFACT_CAPABILITY_MAX_CALLS
+  )
+    throw new Error('maxCalls is invalid');
+  if (
+    !Number.isSafeInteger(claims.maxCumulativeBytes) ||
+    claims.maxCumulativeBytes < 1 ||
+    claims.maxCumulativeBytes > ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES
+  )
+    throw new Error('maxCumulativeBytes is invalid');
   if (claims.methods.length < 1) throw new Error('methods must not be empty');
   const methods = [...new Set(claims.methods)];
   if (
@@ -187,6 +203,8 @@ function normalizeClaims(
     stepId: claims.stepId,
     ...(claims.prefix === undefined ? {} : { prefix: claims.prefix }),
     maxBytes: claims.maxBytes,
+    maxCalls: claims.maxCalls,
+    maxCumulativeBytes: claims.maxCumulativeBytes,
     expiresAt: claims.expiresAt,
     notBefore: claims.notBefore,
     nonce: claims.nonce,

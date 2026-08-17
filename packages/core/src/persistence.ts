@@ -329,6 +329,35 @@ export interface ArtifactRecord {
   readonly cleanupAt?: IsoTimestamp;
   readonly deletedAt?: IsoTimestamp;
   readonly deletionReason?: string;
+  readonly manifestVersion?: 'artifact-manifest-v1';
+}
+
+/** Atomic, durable admission request for one capability-scoped MCP operation. */
+export interface ArtifactCapabilityQuotaRequest {
+  readonly purpose: string;
+  readonly audience: string;
+  readonly nonce: string;
+  readonly fingerprint: string;
+  readonly operationId: string;
+  readonly bytes: number;
+  readonly maxCalls: number;
+  readonly maxCumulativeBytes: number;
+  readonly notBefore: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
+  readonly now: IsoTimestamp;
+}
+
+export interface ArtifactCapabilityQuotaResult {
+  readonly allowed: boolean;
+  readonly replayed: boolean;
+  readonly calls: number;
+  readonly cumulativeBytes: number;
+}
+
+export interface ArtifactCleanupLeaseRequest {
+  readonly owner: string;
+  readonly now: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
 }
 
 export interface UsageRecordEntry {
@@ -490,6 +519,12 @@ export interface DomainRepository {
     deletedAt: IsoTimestamp,
     reason: string,
   ): Promise<ArtifactRecord>;
+  consumeArtifactCapabilityQuota(
+    request: ArtifactCapabilityQuotaRequest,
+  ): Promise<ArtifactCapabilityQuotaResult>;
+  claimArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean>;
   listArtifacts(
     runId: WorkflowRunId,
     page?: ListPage<TimestampListCursor<ArtifactId>>,

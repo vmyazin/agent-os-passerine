@@ -19,6 +19,9 @@ independent from delivery surfaces and third-party integrations.
   artifacts. Its formats are not established by this foundation scaffold.
 - `docs/architecture` records decisions that apply across packages and apps.
 
+The scoped artifact manifest, R2, MCP capability, quota, and retention design is
+documented in [artifact-storage.md](./artifact-storage.md).
+
 Dependencies point inward: delivery apps and adapters can depend on core, while
 core stays portable. Apps do not import one another, and provider-specific types
 must not leak through public core APIs.
@@ -36,6 +39,6 @@ must not leak through public core APIs.
 5. **Operations:** add persistence migrations, observability, deployment,
    recovery, and security controls with end-to-end verification.
 
-This repository currently implements only stage one. The empty core and adapter
-exports are intentional; they prevent the scaffold from guessing at later domain
-behavior.
+The repository now includes the foundation contracts plus the first durable
+control-plane, provider, artifact, and delivery adapters. Later staged pipeline
+and goal-loop behavior still composes through the inward-facing core contracts.

@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   createArtifactCapabilityIssuer,
@@ -8,11 +8,13 @@ import {
 } from '@agentos/core';
 
 import { createInMemoryArtifactStorage } from './in-memory.js';
+import { createDomainArtifactCapabilityQuotaStore } from './quota.js';
 import {
   ARTIFACT_MCP_PROTOCOL_VERSION,
   createArtifactMcpHandler,
   type ArtifactMcpHandler,
 } from './mcp.js';
+import { InMemoryDomainRepository } from '../persistence/in-memory.js';
 
 const now = new Date('2026-08-17T00:00:00.000Z');
 const key = { keyId: 'primary', secret: 'p'.repeat(32) };
@@ -27,6 +29,8 @@ const token = issuer.issue(
     stepId: 'step-1',
     prefix: 'spec',
     maxBytes: 1024,
+    maxCalls: 100,
+    maxCumulativeBytes: 16 * 1024,
     notBefore: now.toISOString(),
     expiresAt: '2026-08-17T00:10:00.000Z',
     nonce: 'nonce-1234567890',
@@ -38,10 +42,13 @@ function fixture(
   options: { maxRequestBytes?: number; maxResponseBytes?: number } = {},
 ) {
   const storage = createInMemoryArtifactStorage({ now: () => now });
+  const repository = new InMemoryDomainRepository();
   return {
     storage,
+    repository,
     handler: createArtifactMcpHandler({
       store: storage.store,
+      quotaStore: createDomainArtifactCapabilityQuotaStore(repository),
       capabilityVerifier: createArtifactCapabilityVerifier({ keys: [key] }),
       audience: 'artifact-mcp',
       allowedOrigins: ['https://control.agentos.test'],
@@ -100,8 +107,7 @@ async function initialized(
       { origin },
     ),
   );
-  const sessionId = response.headers.get('mcp-session-id')!;
-  expect(sessionId).toBeTruthy();
+  expect(response.headers.get('mcp-session-id')).toBeNull();
   expect((await response.json()) as object).toMatchObject({
     result: { protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION },
   });
@@ -112,7 +118,7 @@ async function initialized(
         method: 'notifications/initialized',
         params: {},
       },
-      { origin, sessionId, protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION },
+      { origin, protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION },
     ),
   );
   expect(notification.status).toBe(202);
@@ -120,7 +126,6 @@ async function initialized(
     handler(
       request(body, {
         origin,
-        sessionId,
         protocolVersion:
           overrides.protocolVersion === undefined
             ? ARTIFACT_MCP_PROTOCOL_VERSION
@@ -130,14 +135,133 @@ async function initialized(
 }
 
 describe('Artifact MCP handler', () => {
+  it('is stateless across cold handlers and implements ping plus ignored notifications', async () => {
+    const storage = createInMemoryArtifactStorage({ now: () => now });
+    const repository = new InMemoryDomainRepository();
+    const freshHandler = () =>
+      createArtifactMcpHandler({
+        store: storage.store,
+        quotaStore: createDomainArtifactCapabilityQuotaStore(repository),
+        capabilityVerifier: createArtifactCapabilityVerifier({ keys: [key] }),
+        audience: 'artifact-mcp',
+        allowedOrigins: ['https://control.agentos.test'],
+        now: () => now,
+      });
+    const initialize = await freshHandler()(
+      request({
+        jsonrpc: '2.0',
+        id: 'cold-init',
+        method: 'initialize',
+        params: {
+          protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'cold', version: '1' },
+        },
+      }),
+    );
+    expect(initialize.headers.get('mcp-session-id')).toBeNull();
+    const headers = { protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION };
+    for (const method of [
+      'notifications/initialized',
+      'notifications/cancelled',
+      'notifications/unknown',
+    ]) {
+      const notification = await freshHandler()(
+        request({ jsonrpc: '2.0', method, params: {} }, headers),
+      );
+      expect(notification.status).toBe(202);
+      expect(await notification.text()).toBe('');
+    }
+    const ping = await freshHandler()(
+      request(
+        { jsonrpc: '2.0', id: 'cold-ping', method: 'ping', params: {} },
+        headers,
+      ),
+    );
+    expect(await ping.json()).toMatchObject({ result: {} });
+  });
+
+  it('atomically enforces one durable call across concurrent cold handlers', async () => {
+    const storage = createInMemoryArtifactStorage({ now: () => now });
+    const repository = new InMemoryDomainRepository();
+    const list = vi.fn(storage.store.list.bind(storage.store));
+    const meteredStore = { ...storage.store, list };
+    const limitedToken = issuer.issue(
+      {
+        purpose: 'agent-artifact-access',
+        audience: 'artifact-mcp',
+        methods: ['artifact.list'],
+        projectId: 'project-1',
+        runId: 'run-1',
+        stepId: 'step-1',
+        maxBytes: 1024,
+        maxCalls: 1,
+        maxCumulativeBytes: 1024,
+        notBefore: now.toISOString(),
+        expiresAt: '2026-08-17T00:10:00.000Z',
+        nonce: 'quota-cold-123456',
+      },
+      now,
+    );
+    const handler = () =>
+      createArtifactMcpHandler({
+        store: meteredStore,
+        quotaStore: createDomainArtifactCapabilityQuotaStore(repository),
+        capabilityVerifier: createArtifactCapabilityVerifier({ keys: [key] }),
+        audience: 'artifact-mcp',
+        allowedOrigins: ['https://control.agentos.test'],
+        now: () => now,
+      });
+    const invoke = (id: string) =>
+      handler()(
+        request(
+          {
+            jsonrpc: '2.0',
+            id,
+            method: 'tools/call',
+            params: { name: 'artifact.list', arguments: {} },
+          },
+          {
+            token: limitedToken,
+            protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION,
+          },
+        ),
+      );
+    const responses = await Promise.all([invoke('one'), invoke('two')]);
+    const bodies = await Promise.all(
+      responses.map((response) => response.json()),
+    );
+    expect(bodies.filter((body) => 'result' in (body as object))).toHaveLength(
+      1,
+    );
+    expect(bodies.filter((body) => 'error' in (body as object))).toHaveLength(
+      1,
+    );
+    expect(list).toHaveBeenCalledTimes(1);
+    const replay = await invoke('one');
+    expect(await replay.json()).toMatchObject({
+      result: { structuredContent: { page: { items: [] } } },
+    });
+  });
+
   it('conforms through the exact-pinned official MCP client', async () => {
-    const { handler } = fixture();
+    const storage = createInMemoryArtifactStorage({ now: () => now });
+    const repository = new InMemoryDomainRepository();
+    const freshHandler = () =>
+      createArtifactMcpHandler({
+        store: storage.store,
+        quotaStore: createDomainArtifactCapabilityQuotaStore(repository),
+        capabilityVerifier: createArtifactCapabilityVerifier({ keys: [key] }),
+        audience: 'artifact-mcp',
+        allowedOrigins: ['https://control.agentos.test'],
+        now: () => now,
+      });
     const transport = new StreamableHTTPClientTransport(
       new URL('https://control.agentos.test/api/mcp/artifacts'),
       {
         requestInit: { headers: { authorization: `Bearer ${token}` } },
         fetch: async (_url, init) =>
-          handler(
+          freshHandler()(
             new Request('https://control.agentos.test/api/mcp/artifacts', init),
           ),
       },
@@ -148,6 +272,7 @@ describe('Artifact MCP handler', () => {
     await client.connect(
       transport as unknown as Parameters<Client['connect']>[0],
     );
+    await expect(client.ping()).resolves.toEqual({});
     const listed = await client.listTools();
     expect(listed.tools.map((tool) => tool.name)).toEqual([
       'artifact.get',
@@ -334,7 +459,7 @@ describe('Artifact MCP handler', () => {
     ).toBe(413);
   });
 
-  it('terminates sessions through DELETE without exposing an artifact delete tool', async () => {
+  it('has no session lifecycle endpoint or artifact delete tool', async () => {
     const { handler } = fixture();
     const init = await handler(
       request({
@@ -348,15 +473,14 @@ describe('Artifact MCP handler', () => {
         },
       }),
     );
-    const sessionId = init.headers.get('mcp-session-id')!;
+    expect(init.headers.get('mcp-session-id')).toBeNull();
     const response = await handler(
       request(undefined, {
         method: 'DELETE',
-        sessionId,
         protocolVersion: ARTIFACT_MCP_PROTOCOL_VERSION,
       }),
     );
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(405);
   });
 
   it('accepts the capability byte boundary and rejects one byte over before storage', async () => {

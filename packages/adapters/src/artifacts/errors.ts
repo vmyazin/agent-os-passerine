@@ -2,6 +2,8 @@ export class ArtifactStoreAdapterError extends Error {
   constructor(
     readonly code:
       | 'artifact_conflict'
+      | 'artifact_deleted'
+      | 'artifact_quota_exhausted'
       | 'artifact_scope_denied'
       | 'artifact_integrity_error'
       | 'artifact_store_unavailable'

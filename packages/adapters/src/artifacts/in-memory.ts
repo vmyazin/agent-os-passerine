@@ -174,9 +174,12 @@ export function createInMemoryArtifactStorage(
   });
   const admin: ArtifactAdminStore = Object.freeze({
     async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
-      parseArtifactKey(key);
+      const parts = parseArtifactKey(key);
+      const expected = await manifest.get(parts, key);
+      if (expected === undefined) return false;
       const removed = values.delete(key);
-      await manifest.markDeleted({
+      if (!removed) return false;
+      await manifest.markDeleted(expected, {
         key,
         deletedAt: audit?.deletedAt ?? now().toISOString(),
         reason: audit?.reason ?? 'control_plane_delete',

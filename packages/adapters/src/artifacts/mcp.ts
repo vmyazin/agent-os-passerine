@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import {
   ArtifactCapabilityError,
@@ -12,6 +12,7 @@ import {
 } from '@agentos/core';
 
 import { ArtifactStoreAdapterError } from './errors.js';
+import type { ArtifactCapabilityQuotaStore } from './quota.js';
 
 export const ARTIFACT_MCP_PROTOCOL_VERSION = '2025-06-18';
 export const MAX_AGENT_ARTIFACT_BYTES = 1024 * 1024;
@@ -20,6 +21,7 @@ export const DEFAULT_ARTIFACT_MCP_RESPONSE_BYTES = 1_500_000;
 
 export interface ArtifactMcpHandlerOptions {
   readonly store: ArtifactStore;
+  readonly quotaStore: ArtifactCapabilityQuotaStore;
   readonly capabilityVerifier: ArtifactCapabilityVerifier;
   readonly audience: string;
   readonly purpose?: string;
@@ -36,12 +38,6 @@ interface JsonRpcRequest {
   readonly id?: string | number;
   readonly method: string;
   readonly params?: Record<string, unknown>;
-}
-
-interface Session {
-  readonly tokenHash: string;
-  readonly expiresAt: number;
-  initialized: boolean;
 }
 
 class McpTransportError extends Error {
@@ -400,6 +396,36 @@ function toolResult(
   };
 }
 
+function canonical(value: unknown): string {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value))
+    return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (!record(value)) return 'null';
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
+    .join(',')}}`;
+}
+
+function operationId(rpc: JsonRpcRequest): string {
+  return createHash('sha256').update(canonical(rpc), 'utf8').digest('hex');
+}
+
+async function consumeQuota(
+  options: ArtifactMcpHandlerOptions,
+  claims: ArtifactCapabilityClaims,
+  rpc: JsonRpcRequest,
+  bytes: number,
+): Promise<void> {
+  await options.quotaStore.consume(claims, {
+    operationId: operationId(rpc),
+    bytes,
+    now: (options.now ?? (() => new Date()))(),
+  });
+}
+
 async function callTool(
   options: ArtifactMcpHandlerOptions,
   token: string,
@@ -424,14 +450,16 @@ async function callTool(
       1,
       Math.floor((maxResponseBytes - 2_048) * 0.75),
     );
+    const readLimit = Math.min(
+      claims.maxBytes,
+      MAX_AGENT_ARTIFACT_BYTES,
+      responseContentLimit,
+    );
+    await consumeQuota(options, claims, rpc, readLimit);
     const value = await options.store.get({
       scope: claims,
       key,
-      maxBytes: Math.min(
-        claims.maxBytes,
-        MAX_AGENT_ARTIFACT_BYTES,
-        responseContentLimit,
-      ),
+      maxBytes: readLimit,
     });
     if (value === undefined)
       return toolResult({ found: false }, 'Artifact not found.');
@@ -469,6 +497,7 @@ async function callTool(
       artifactId,
       bytes: bytes.byteLength,
     });
+    await consumeQuota(options, claims, rpc, bytes.byteLength);
     const retention = stringArgument(call.arguments, 'retentionClass', false);
     if (
       retention !== undefined &&
@@ -505,6 +534,7 @@ async function callTool(
     method: 'artifact.list',
     ...(effectivePrefix === undefined ? {} : { artifactId: effectivePrefix }),
   });
+  await consumeQuota(options, claims, rpc, 0);
   const requestedLimit = integerArgument(call.arguments, 'limit', false);
   if (
     requestedLimit !== undefined &&
@@ -538,6 +568,8 @@ function validateInitialize(params: Record<string, unknown> | undefined): void {
     params.clientInfo.version.length < 1
   )
     throw new JsonRpcCallError(-32602, 'invalid initialize request');
+  exactKeys(params, ['protocolVersion', 'capabilities', 'clientInfo', '_meta']);
+  exactKeys(params.clientInfo, ['name', 'version', 'title']);
 }
 
 export function createArtifactMcpHandler(
@@ -572,34 +604,12 @@ export function createArtifactMcpHandler(
     throw new Error('Artifact MCP request limit is invalid');
   if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 128)
     throw new Error('Artifact MCP response limit is invalid');
-  const sessions = new Map<string, Session>();
-  const now = options.now ?? (() => new Date());
-  const tokenHash = (token: string) =>
-    createHash('sha256').update(token).digest('hex');
-  const sessionFor = (request: Request, token: string): Session => {
-    const id = request.headers.get('mcp-session-id');
-    const version = request.headers.get('mcp-protocol-version');
-    const session = id === null ? undefined : sessions.get(id);
-    if (
-      version !== ARTIFACT_MCP_PROTOCOL_VERSION ||
-      session === undefined ||
-      session.tokenHash !== tokenHash(token) ||
-      session.expiresAt <= now().getTime()
-    )
-      throw new McpTransportError(
-        400,
-        'invalid_session',
-        'valid MCP session and protocol headers are required',
-      );
-    return session;
-  };
   return async (request: Request): Promise<Response> => {
     try {
       enforceOrigin(request, allowedOrigins);
       const token = bearer(request);
-      let claims: ArtifactCapabilityClaims;
       try {
-        claims = capability(options, token);
+        capability(options, token);
       } catch {
         throw new McpTransportError(
           401,
@@ -607,20 +617,11 @@ export function createArtifactMcpHandler(
           'artifact capability is invalid',
         );
       }
-      if (request.method === 'DELETE') {
-        const target = sessionFor(request, token);
-        for (const [id, session] of sessions)
-          if (session === target) sessions.delete(id);
-        return new Response(null, {
-          status: 204,
-          headers: { 'cache-control': 'no-store' },
-        });
-      }
       if (request.method !== 'POST')
         throw new McpTransportError(
           405,
           'method_not_allowed',
-          'only POST and DELETE are supported',
+          'only POST is supported',
         );
       contentType(request);
       const value = await readBody(request, maxRequestBytes);
@@ -652,12 +653,6 @@ export function createArtifactMcpHandler(
             maxResponseBytes,
           );
         }
-        const id = randomUUID();
-        sessions.set(id, {
-          tokenHash: tokenHash(token),
-          expiresAt: Date.parse(claims.expiresAt),
-          initialized: false,
-        });
         return json(
           {
             jsonrpc: '2.0',
@@ -670,35 +665,36 @@ export function createArtifactMcpHandler(
           },
           200,
           maxResponseBytes,
-          { 'mcp-session-id': id },
         );
       }
-      const session = sessionFor(request, token);
+      if (
+        request.headers.get('mcp-protocol-version') !==
+        ARTIFACT_MCP_PROTOCOL_VERSION
+      )
+        throw new McpTransportError(
+          400,
+          'invalid_protocol_version',
+          'a supported MCP protocol header is required',
+        );
       if (rpc.id === undefined) {
-        if (rpc.method !== 'notifications/initialized')
-          throw new McpTransportError(
-            400,
-            'invalid_notification',
-            'notification is not supported',
-          );
-        session.initialized = true;
         return new Response(null, {
           status: 202,
           headers: { 'cache-control': 'no-store' },
         });
       }
-      if (!session.initialized)
-        throw new McpTransportError(
-          400,
-          'session_not_initialized',
-          'MCP session is not initialized',
-        );
       try {
         let result: unknown;
-        if (rpc.method === 'tools/list') {
+        if (rpc.method === 'ping') {
+          const claims = capability(options, token);
+          await consumeQuota(options, claims, rpc, 0);
+          result = {};
+        } else if (rpc.method === 'tools/list') {
           if (rpc.params !== undefined)
             exactKeys(rpc.params, ['cursor', '_meta']);
-          capability(options, token, { method: 'artifact.list' });
+          const claims = capability(options, token, {
+            method: 'artifact.list',
+          });
+          await consumeQuota(options, claims, rpc, 0);
           result = { tools: TOOLS };
         } else if (rpc.method === 'tools/call')
           result = await callTool(options, token, rpc, maxResponseBytes);
@@ -716,10 +712,16 @@ export function createArtifactMcpHandler(
                 (error instanceof ArtifactStoreAdapterError &&
                   error.code === 'artifact_scope_denied')
               ? new JsonRpcCallError(-32001, 'artifact capability denied')
-              : error instanceof ArtifactValidationError ||
-                  error instanceof ArtifactStoreAdapterError
-                ? new JsonRpcCallError(-32602, 'artifact request is invalid')
-                : new JsonRpcCallError(-32603, 'artifact operation failed');
+              : error instanceof ArtifactStoreAdapterError &&
+                  error.code === 'artifact_quota_exhausted'
+                ? new JsonRpcCallError(
+                    -32002,
+                    'artifact capability quota exhausted',
+                  )
+                : error instanceof ArtifactValidationError ||
+                    error instanceof ArtifactStoreAdapterError
+                  ? new JsonRpcCallError(-32602, 'artifact request is invalid')
+                  : new JsonRpcCallError(-32603, 'artifact operation failed');
         return json(
           {
             jsonrpc: '2.0',

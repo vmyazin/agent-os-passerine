@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { neon, types } from '@neondatabase/serverless';
 import {
+  ARTIFACT_CAPABILITY_MAX_CALLS,
+  ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES,
   canonicalJsonValue,
+  isoTimestamp,
   isoTimestampEpochMicroseconds,
 } from '@agentos/core';
 import type {
@@ -10,6 +13,9 @@ import type {
   ApprovalId,
   ApprovalListFilter,
   ArtifactId,
+  ArtifactCapabilityQuotaRequest,
+  ArtifactCapabilityQuotaResult,
+  ArtifactCleanupLeaseRequest,
   ArtifactRecord,
   ConfigRevision,
   ConfigRevisionDraft,
@@ -152,6 +158,36 @@ function mappedRows<T>(
   mapper: (row: Readonly<Record<string, unknown>>) => T,
 ): readonly T[] {
   return rows.map(mapper);
+}
+
+function validateArtifactQuotaRequest(
+  request: ArtifactCapabilityQuotaRequest,
+): void {
+  for (const [name, value] of [
+    ['purpose', request.purpose],
+    ['audience', request.audience],
+    ['nonce', request.nonce],
+    ['fingerprint', request.fingerprint],
+    ['operationId', request.operationId],
+  ] as const) {
+    if (value.trim() === '' || value.length > 256)
+      throw new TypeError(`${name} is invalid`);
+  }
+  for (const [name, value, positive] of [
+    ['bytes', request.bytes, false],
+    ['maxCalls', request.maxCalls, true],
+    ['maxCumulativeBytes', request.maxCumulativeBytes, true],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < (positive ? 1 : 0))
+      throw new TypeError(`${name} is invalid`);
+  }
+  if (request.maxCalls > ARTIFACT_CAPABILITY_MAX_CALLS)
+    throw new TypeError('maxCalls is invalid');
+  if (request.maxCumulativeBytes > ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES)
+    throw new TypeError('maxCumulativeBytes is invalid');
+  isoTimestamp(request.notBefore);
+  isoTimestamp(request.expiresAt);
+  isoTimestamp(request.now);
 }
 
 function usageMatches(row: UsageRecordEntry, usage: UsageRecordEntry): boolean {
@@ -1122,6 +1158,7 @@ export class NeonDomainRepository implements DomainRepository {
           and(
             eq(artifacts.runId, runId),
             isNull(artifacts.deletedAt),
+            eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
             sql`left(${artifacts.key}, ${keyPrefix.length}) = ${keyPrefix}`,
             afterKey === undefined
               ? undefined
@@ -1145,6 +1182,7 @@ export class NeonDomainRepository implements DomainRepository {
         .where(
           and(
             isNull(artifacts.deletedAt),
+            eq(artifacts.manifestVersion, 'artifact-manifest-v1'),
             sql`${artifacts.cleanupAt} is not null`,
             lte(artifacts.cleanupAt, before),
           ),
@@ -1170,6 +1208,91 @@ export class NeonDomainRepository implements DomainRepository {
     const existing = await this.getArtifact(id);
     if (existing === undefined) throw new Error(`Artifact ${id} not found`);
     return existing;
+  }
+
+  async consumeArtifactCapabilityQuota(
+    request: ArtifactCapabilityQuotaRequest,
+  ): Promise<ArtifactCapabilityQuotaResult> {
+    validateArtifactQuotaRequest(request);
+    if (
+      isoTimestampEpochMicroseconds(request.now) <
+        isoTimestampEpochMicroseconds(request.notBefore) ||
+      isoTimestampEpochMicroseconds(request.now) >=
+        isoTimestampEpochMicroseconds(request.expiresAt)
+    )
+      return { allowed: false, replayed: false, calls: 0, cumulativeBytes: 0 };
+    const result = await this.database.execute<Record<string, unknown>>(sql`
+      insert into "artifact_capability_quotas"
+        ("purpose", "audience", "nonce", "fingerprint", "not_before", "expires_at", "calls", "cumulative_bytes", "operation_ids", "last_operation_replayed", "updated_at")
+      values
+        (${request.purpose}, ${request.audience}, ${request.nonce}, ${request.fingerprint}, ${request.notBefore}, ${request.expiresAt}, 1, ${request.bytes}, array[${request.operationId}]::text[], false, ${request.now})
+      on conflict ("purpose", "audience", "nonce") do update set
+        "calls" = "artifact_capability_quotas"."calls" + case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then 0 else 1 end,
+        "cumulative_bytes" = "artifact_capability_quotas"."cumulative_bytes" + case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then 0 else ${request.bytes} end,
+        "operation_ids" = case when ${request.operationId} = any("artifact_capability_quotas"."operation_ids") then "artifact_capability_quotas"."operation_ids" else array_append("artifact_capability_quotas"."operation_ids", ${request.operationId}) end,
+        "last_operation_replayed" = ${request.operationId} = any("artifact_capability_quotas"."operation_ids"),
+        "updated_at" = ${request.now}
+      where
+        "artifact_capability_quotas"."fingerprint" = ${request.fingerprint}
+        and "artifact_capability_quotas"."not_before" = ${request.notBefore}
+        and "artifact_capability_quotas"."expires_at" = ${request.expiresAt}
+        and (${request.operationId} = any("artifact_capability_quotas"."operation_ids") or (
+          "artifact_capability_quotas"."calls" + 1 <= ${request.maxCalls}
+          and "artifact_capability_quotas"."cumulative_bytes" + ${request.bytes} <= ${request.maxCumulativeBytes}
+        ))
+      returning
+        "calls", "cumulative_bytes", "last_operation_replayed" as "replayed"
+    `);
+    const row = executionRows(result)[0];
+    if (row !== undefined)
+      return {
+        allowed: true,
+        replayed: row.replayed === true,
+        calls: Number(row.calls),
+        cumulativeBytes: Number(row.cumulative_bytes),
+      };
+    const current = executionRows(
+      await this.database.execute<Record<string, unknown>>(sql`
+        select "calls", "cumulative_bytes"
+        from "artifact_capability_quotas"
+        where "purpose" = ${request.purpose}
+          and "audience" = ${request.audience}
+          and "nonce" = ${request.nonce}
+        limit 1
+      `),
+    )[0];
+    return {
+      allowed: false,
+      replayed: false,
+      calls: Number(current?.calls ?? 0),
+      cumulativeBytes: Number(current?.cumulative_bytes ?? 0),
+    };
+  }
+
+  async claimArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean> {
+    if (request.owner.trim() === '' || request.owner.length > 256)
+      throw new TypeError('cleanup lease owner is invalid');
+    if (
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+      isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('cleanup lease expiry must be after now');
+    const rows = executionRows(
+      await this.database.execute<Record<string, unknown>>(sql`
+        insert into "artifact_cleanup_leases"
+          ("name", "owner", "expires_at", "updated_at")
+        values ('artifact-retention', ${request.owner}, ${request.expiresAt}, ${request.now})
+        on conflict ("name") do update set
+          "owner" = excluded."owner",
+          "expires_at" = excluded."expires_at",
+          "updated_at" = excluded."updated_at"
+        where "artifact_cleanup_leases"."expires_at" <= ${request.now}
+        returning "name"
+      `),
+    );
+    return rows.length === 1;
   }
 
   async listArtifacts(

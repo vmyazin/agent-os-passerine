@@ -29,6 +29,14 @@ function conflict(): ArtifactStoreAdapterError {
   );
 }
 
+function deleted(): ArtifactStoreAdapterError {
+  return new ArtifactStoreAdapterError(
+    'artifact_deleted',
+    'artifact logical version has been deleted and cannot be recreated',
+    410,
+  );
+}
+
 function equivalent(left: ArtifactMetadata, right: ArtifactMetadata): boolean {
   return (
     left.key === right.key &&
@@ -39,8 +47,41 @@ function equivalent(left: ArtifactMetadata, right: ArtifactMetadata): boolean {
   );
 }
 
+function exactlyEquivalent(
+  left: ArtifactMetadata,
+  right: ArtifactMetadata,
+): boolean {
+  return (
+    equivalent(left, right) &&
+    left.projectId === right.projectId &&
+    left.runId === right.runId &&
+    left.stepId === right.stepId &&
+    left.artifactId === right.artifactId &&
+    left.version === right.version &&
+    left.createdAt === right.createdAt &&
+    left.expiresAt === right.expiresAt
+  );
+}
+
 function logicalKey(metadata: ArtifactMetadata): string {
   return artifactLogicalKey(metadata);
+}
+
+function metadataOnly(value: ArtifactMetadata): ArtifactMetadata {
+  return Object.freeze({
+    key: value.key,
+    projectId: value.projectId,
+    runId: value.runId,
+    stepId: value.stepId,
+    artifactId: value.artifactId,
+    version: value.version,
+    digest: value.digest,
+    mediaType: value.mediaType,
+    sizeBytes: value.sizeBytes,
+    retentionClass: value.retentionClass,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+  });
 }
 
 function recordId(metadata: ArtifactMetadata): string {
@@ -51,6 +92,7 @@ function recordId(metadata: ArtifactMetadata): string {
 
 function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
   if (
+    record.manifestVersion !== 'artifact-manifest-v1' ||
     record.uri === undefined ||
     record.mediaType === undefined ||
     record.sizeBytes === undefined ||
@@ -63,7 +105,7 @@ function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
       500,
     );
   const parts = parseArtifactKey(record.uri);
-  return validateArtifactMetadata({
+  const metadata = validateArtifactMetadata({
     ...parts,
     key: record.uri,
     mediaType: record.mediaType,
@@ -72,6 +114,18 @@ function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
     createdAt: record.createdAt,
     expiresAt: record.cleanupAt,
   });
+  if (
+    record.runId !== metadata.runId ||
+    record.key !== logicalKey(metadata) ||
+    record.digest !== metadata.digest ||
+    record.id !== persistenceId('artifact', recordId(metadata))
+  )
+    throw new ArtifactStoreAdapterError(
+      'artifact_integrity_error',
+      'artifact manifest identity failed integrity verification',
+      500,
+    );
+  return metadata;
 }
 
 function recordFromMetadata(metadata: ArtifactMetadata): ArtifactRecord {
@@ -87,6 +141,7 @@ function recordFromMetadata(metadata: ArtifactMetadata): ArtifactRecord {
     retentionClass: metadata.retentionClass,
     createdAt: isoTimestamp(metadata.createdAt),
     cleanupAt: isoTimestamp(metadata.expiresAt),
+    manifestVersion: 'artifact-manifest-v1',
   };
 }
 
@@ -120,9 +175,11 @@ export function createDomainArtifactManifestStore(
           'artifact run is outside the requested project',
           403,
         );
-      const claimed = metadataFromRecord(
-        await repository.claimArtifact(recordFromMetadata(metadata)),
+      const record = await repository.claimArtifact(
+        recordFromMetadata(metadata),
       );
+      if (record.deletedAt !== undefined) throw deleted();
+      const claimed = metadataFromRecord(record);
       if (!equivalent(claimed, metadata)) throw conflict();
       return claimed;
     },
@@ -143,6 +200,7 @@ export function createDomainArtifactManifestStore(
         return undefined;
       const metadata = metadataFromRecord(record);
       if (
+        metadata.key !== key ||
         metadata.projectId !== normalized.projectId ||
         metadata.stepId !== normalized.stepId
       )
@@ -189,15 +247,35 @@ export function createDomainArtifactManifestStore(
         isoTimestamp(before),
         limit,
       );
-      return Object.freeze(records.map(metadataFromRecord));
+      const items: ArtifactMetadata[] = [];
+      let invalidCount = 0;
+      for (const record of records) {
+        try {
+          items.push(metadataFromRecord(record));
+        } catch {
+          invalidCount += 1;
+        }
+      }
+      return Object.freeze({ items: Object.freeze(items), invalidCount });
     },
-    async markDeleted(audit: ArtifactDeletionAudit) {
-      const parts = parseArtifactKey(audit.key);
+    async markDeleted(
+      expected: ArtifactMetadata,
+      audit: ArtifactDeletionAudit,
+    ) {
+      if (audit.key !== expected.key)
+        throw new ArtifactStoreAdapterError(
+          'artifact_integrity_error',
+          'artifact deletion target failed integrity verification',
+          409,
+        );
+      const parts = parseArtifactKey(expected.key);
       const record = await repository.getArtifactByRunKey(
         persistenceId('run', parts.runId),
         artifactLogicalKey(parts),
       );
       if (record === undefined) return;
+      const actual = metadataFromRecord(record);
+      if (!exactlyEquivalent(actual, expected)) throw conflict();
       await repository.markArtifactDeleted(
         record.id,
         isoTimestamp(audit.deletedAt),
@@ -209,20 +287,22 @@ export function createDomainArtifactManifestStore(
 
 export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
   const values = new Map<string, ArtifactMetadata>();
-  const deleted = new Set<string>();
+  const tombstones = new Set<string>();
   const identity = (metadata: ArtifactMetadata) =>
     `${metadata.projectId}\0${metadata.runId}\0${logicalKey(metadata)}`;
   return Object.freeze({
     async claim(input: ArtifactMetadata) {
       const metadata = validateArtifactMetadata(input);
       const id = identity(metadata);
+      if (tombstones.has(id)) throw deleted();
       const existing = values.get(id);
       if (existing !== undefined) {
         if (!equivalent(existing, metadata)) throw conflict();
         return existing;
       }
-      values.set(id, Object.freeze({ ...metadata }));
-      return metadata;
+      const stored = metadataOnly(metadata);
+      values.set(id, stored);
+      return stored;
     },
     async get(scope: ArtifactScope, key: string) {
       if (!artifactKeyMatchesScope(key, scope))
@@ -235,7 +315,9 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       const value = values.get(
         `${parts.projectId}\0${parts.runId}\0${artifactLogicalKey(parts)}`,
       );
-      return value === undefined || deleted.has(value.key) ? undefined : value;
+      if (value === undefined || tombstones.has(identity(value)))
+        return undefined;
+      return value.key === key ? value : undefined;
     },
     async list(request: ArtifactManifestListRequest) {
       const normalized = normalizeArtifactScope(request.scope);
@@ -243,7 +325,7 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       const matching = [...values.values()]
         .filter(
           (metadata) =>
-            !deleted.has(metadata.key) &&
+            !tombstones.has(identity(metadata)) &&
             metadata.projectId === normalized.projectId &&
             metadata.runId === normalized.runId &&
             metadata.stepId === normalized.stepId &&
@@ -263,17 +345,30 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
       });
     },
     async listExpired(before: string, limit: number) {
-      return Object.freeze(
-        [...values.values()]
-          .filter(
-            (value) => !deleted.has(value.key) && value.expiresAt <= before,
-          )
-          .sort((left, right) => left.expiresAt.localeCompare(right.expiresAt))
-          .slice(0, limit),
-      );
+      return Object.freeze({
+        items: Object.freeze(
+          [...values.values()]
+            .filter(
+              (value) =>
+                !tombstones.has(identity(value)) && value.expiresAt <= before,
+            )
+            .sort((left, right) =>
+              left.expiresAt.localeCompare(right.expiresAt),
+            )
+            .slice(0, limit),
+        ),
+        invalidCount: 0,
+      });
     },
-    async markDeleted(audit: ArtifactDeletionAudit) {
-      deleted.add(audit.key);
+    async markDeleted(
+      expected: ArtifactMetadata,
+      audit: ArtifactDeletionAudit,
+    ) {
+      if (audit.key !== expected.key) throw conflict();
+      const existing = values.get(identity(expected));
+      if (existing === undefined || !exactlyEquivalent(existing, expected))
+        throw conflict();
+      tombstones.add(identity(expected));
     },
   });
 }
@@ -281,6 +376,7 @@ export function createInMemoryArtifactManifestStore(): ArtifactManifestStore {
 export interface ArtifactRetentionCleanupResult {
   readonly inspected: number;
   readonly deleted: number;
+  readonly failed: number;
 }
 
 export async function cleanupExpiredArtifacts(options: {
@@ -295,19 +391,24 @@ export async function cleanupExpiredArtifacts(options: {
   const deletedAt = options.now.toISOString();
   const expired = await options.manifest.listExpired(deletedAt, limit);
   let deleted = 0;
-  for (const metadata of expired) {
-    if (
-      await options.admin.delete(metadata.key, {
-        deletedAt,
-        reason: 'retention_expired',
-      })
-    )
-      deleted += 1;
-    await options.manifest.markDeleted({
-      key: metadata.key,
-      deletedAt,
-      reason: 'retention_expired',
-    });
+  let failed = expired.invalidCount;
+  for (const metadata of expired.items) {
+    try {
+      if (
+        await options.admin.delete(metadata.key, {
+          deletedAt,
+          reason: 'retention_expired',
+        })
+      )
+        deleted += 1;
+      else failed += 1;
+    } catch {
+      failed += 1;
+    }
   }
-  return Object.freeze({ inspected: expired.length, deleted });
+  return Object.freeze({
+    inspected: expired.items.length + expired.invalidCount,
+    deleted,
+    failed,
+  });
 }

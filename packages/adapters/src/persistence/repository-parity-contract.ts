@@ -440,6 +440,7 @@ export function repositoryParityContract(
         sizeBytes: 4,
         uri: `artifacts/v1/project/run/step/spec/1/sha256/${'a'.repeat(64)}`,
         retentionClass: 'working' as const,
+        manifestVersion: 'artifact-manifest-v1' as const,
         createdAt: at,
         cleanupAt: isoTimestamp('2026-08-18T08:00:00.000000Z'),
       };
@@ -488,6 +489,107 @@ export function repositoryParityContract(
           10,
         ),
       ).toEqual([]);
+    });
+
+    it('atomically enforces durable artifact capability quotas with replay safety', async () => {
+      const repository = await createRepository();
+      const quota = repository as DomainRepository & {
+        consumeArtifactCapabilityQuota(request: {
+          purpose: string;
+          audience: string;
+          nonce: string;
+          fingerprint: string;
+          operationId: string;
+          bytes: number;
+          maxCalls: number;
+          maxCumulativeBytes: number;
+          notBefore: ReturnType<typeof isoTimestamp>;
+          expiresAt: ReturnType<typeof isoTimestamp>;
+          now: ReturnType<typeof isoTimestamp>;
+        }): Promise<{
+          allowed: boolean;
+          replayed: boolean;
+          calls: number;
+          cumulativeBytes: number;
+        }>;
+      };
+      const base = {
+        purpose: 'agent-artifact-access',
+        audience: 'artifact-mcp',
+        nonce: `${implementation}-quota-nonce`,
+        fingerprint: 'quota-fingerprint',
+        bytes: 6,
+        maxCalls: 1,
+        maxCumulativeBytes: 10,
+        notBefore: isoTimestamp('2026-08-17T08:00:00.000000Z'),
+        expiresAt: isoTimestamp('2026-08-17T08:10:00.000000Z'),
+        now: isoTimestamp('2026-08-17T08:01:00.000000Z'),
+      };
+      const raced = await Promise.all([
+        quota.consumeArtifactCapabilityQuota({ ...base, operationId: 'one' }),
+        quota.consumeArtifactCapabilityQuota({ ...base, operationId: 'two' }),
+      ]);
+      expect(raced.filter((result) => result.allowed)).toHaveLength(1);
+      const winner = raced[0]!.allowed ? 'one' : 'two';
+      await expect(
+        quota.consumeArtifactCapabilityQuota({
+          ...base,
+          operationId: winner,
+        }),
+      ).resolves.toMatchObject({
+        allowed: true,
+        replayed: true,
+        calls: 1,
+        cumulativeBytes: 6,
+      });
+
+      const byteBase = {
+        ...base,
+        nonce: `${implementation}-quota-bytes`,
+        maxCalls: 2,
+      };
+      const byteRace = await Promise.all([
+        quota.consumeArtifactCapabilityQuota({
+          ...byteBase,
+          operationId: 'byte-one',
+        }),
+        quota.consumeArtifactCapabilityQuota({
+          ...byteBase,
+          operationId: 'byte-two',
+        }),
+      ]);
+      expect(byteRace.filter((result) => result.allowed)).toHaveLength(1);
+    });
+
+    it('grants only one durable artifact cleanup lease at a time', async () => {
+      const repository = await createRepository();
+      const leased = repository as DomainRepository & {
+        claimArtifactCleanupLease(request: {
+          owner: string;
+          now: ReturnType<typeof isoTimestamp>;
+          expiresAt: ReturnType<typeof isoTimestamp>;
+        }): Promise<boolean>;
+      };
+      const raced = await Promise.all([
+        leased.claimArtifactCleanupLease({
+          owner: `${implementation}-worker-one`,
+          now: isoTimestamp('2026-08-17T08:00:00.000000Z'),
+          expiresAt: isoTimestamp('2026-08-17T08:05:00.000000Z'),
+        }),
+        leased.claimArtifactCleanupLease({
+          owner: `${implementation}-worker-two`,
+          now: isoTimestamp('2026-08-17T08:00:00.000000Z'),
+          expiresAt: isoTimestamp('2026-08-17T08:05:00.000000Z'),
+        }),
+      ]);
+      expect(raced.filter(Boolean)).toHaveLength(1);
+      await expect(
+        leased.claimArtifactCleanupLease({
+          owner: `${implementation}-worker-three`,
+          now: isoTimestamp('2026-08-17T08:05:00.000001Z'),
+          expiresAt: isoTimestamp('2026-08-17T08:10:00.000000Z'),
+        }),
+      ).resolves.toBe(true);
     });
 
     it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

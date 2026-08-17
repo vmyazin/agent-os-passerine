@@ -18,6 +18,8 @@ const claims = {
   stepId: 'step-1',
   prefix: 'spec',
   maxBytes: 1024,
+  maxCalls: 10,
+  maxCumulativeBytes: 4096,
   expiresAt: '2026-08-17T00:10:00.000Z',
   notBefore: '2026-08-17T00:00:00.000Z',
   nonce: 'nonce-1234567890',
@@ -147,5 +149,17 @@ describe('artifact capabilities', () => {
     expect(() =>
       createArtifactCapabilityVerifier({ keys: [primary, primary] }),
     ).toThrow(/duplicate/i);
+    expect(() =>
+      createArtifactCapabilityIssuer(primary).issue(
+        { ...claims, maxCalls: 0 },
+        now,
+      ),
+    ).toThrow(/maxCalls/i);
+    expect(() =>
+      createArtifactCapabilityIssuer(primary).issue(
+        { ...claims, maxCumulativeBytes: 0 },
+        now,
+      ),
+    ).toThrow(/maxCumulativeBytes/i);
   });
 });

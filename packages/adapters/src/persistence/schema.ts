@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
   bigint,
+  boolean,
   check,
   customType,
   index,
@@ -395,6 +396,7 @@ export const artifacts = pgTable(
     cleanupAt: instant('cleanup_at'),
     deletedAt: instant('deleted_at'),
     deletionReason: text('deletion_reason'),
+    manifestVersion: text('manifest_version'),
   },
   (table) => [
     unique('artifacts_run_key_unique').on(table.runId, table.key),
@@ -409,7 +411,7 @@ export const artifacts = pgTable(
     index('artifacts_cleanup_idx')
       .on(table.cleanupAt)
       .where(
-        sql`${table.cleanupAt} is not null and ${table.deletedAt} is null`,
+        sql`${table.cleanupAt} is not null and ${table.deletedAt} is null and ${table.manifestVersion} = 'artifact-manifest-v1'`,
       ),
     index('artifacts_run_key_scan_idx').on(table.runId, bytewise(table.key)),
     index('artifacts_run_created_idx').on(
@@ -419,6 +421,51 @@ export const artifacts = pgTable(
     ),
   ],
 );
+
+export const artifactCapabilityQuotas = pgTable(
+  'artifact_capability_quotas',
+  {
+    purpose: text('purpose').notNull(),
+    audience: text('audience').notNull(),
+    nonce: text('nonce').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    notBefore: instant('not_before').notNull(),
+    expiresAt: instant('expires_at').notNull(),
+    calls: bigint('calls', { mode: 'number' }).notNull(),
+    cumulativeBytes: bigint('cumulative_bytes', { mode: 'number' }).notNull(),
+    operationIds: text('operation_ids').array().notNull(),
+    lastOperationReplayed: boolean('last_operation_replayed').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.purpose, table.audience, table.nonce] }),
+    check('artifact_capability_quota_calls_positive', sql`${table.calls} > 0`),
+    check(
+      'artifact_capability_quota_calls_safe_integer',
+      sql`${table.calls} <= 9007199254740991`,
+    ),
+    check(
+      'artifact_capability_quota_bytes_nonnegative',
+      sql`${table.cumulativeBytes} >= 0`,
+    ),
+    check(
+      'artifact_capability_quota_bytes_safe_integer',
+      sql`${table.cumulativeBytes} <= 9007199254740991`,
+    ),
+    check(
+      'artifact_capability_quota_window',
+      sql`${table.expiresAt} > ${table.notBefore}`,
+    ),
+    index('artifact_capability_quotas_expiry_idx').on(table.expiresAt),
+  ],
+);
+
+export const artifactCleanupLeases = pgTable('artifact_cleanup_leases', {
+  name: text('name').primaryKey(),
+  owner: text('owner').notNull(),
+  expiresAt: instant('expires_at').notNull(),
+  updatedAt: instant('updated_at').notNull(),
+});
 
 export const usageRecords = pgTable(
   'usage_records',

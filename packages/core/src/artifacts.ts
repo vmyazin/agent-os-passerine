@@ -107,6 +107,11 @@ export interface ArtifactManifestListPage {
   readonly nextAfter?: string;
 }
 
+export interface ArtifactExpiredManifestPage {
+  readonly items: readonly ArtifactMetadata[];
+  readonly invalidCount: number;
+}
+
 export interface ArtifactDeletionAudit {
   readonly key: string;
   readonly deletedAt: string;
@@ -124,8 +129,11 @@ export interface ArtifactManifestStore {
   listExpired(
     before: string,
     limit: number,
-  ): Promise<readonly ArtifactMetadata[]>;
-  markDeleted(audit: ArtifactDeletionAudit): Promise<void>;
+  ): Promise<ArtifactExpiredManifestPage>;
+  markDeleted(
+    expected: ArtifactMetadata,
+    audit: ArtifactDeletionAudit,
+  ): Promise<void>;
 }
 
 export interface ArtifactPreparationOptions {

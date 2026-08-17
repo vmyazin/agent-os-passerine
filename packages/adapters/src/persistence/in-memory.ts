@@ -1,4 +1,6 @@
 import {
+  ARTIFACT_CAPABILITY_MAX_CALLS,
+  ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES,
   canonicalJsonValue,
   isoTimestamp,
   isoTimestampEpochMicroseconds,
@@ -7,6 +9,9 @@ import type {
   Approval,
   ApprovalId,
   ApprovalListFilter,
+  ArtifactCapabilityQuotaRequest,
+  ArtifactCapabilityQuotaResult,
+  ArtifactCleanupLeaseRequest,
   ArtifactId,
   ArtifactRecord,
   ConfigRevision,
@@ -176,6 +181,36 @@ function isAfterTimestamp(
   );
 }
 
+function validateArtifactQuotaRequest(
+  request: ArtifactCapabilityQuotaRequest,
+): void {
+  for (const [name, value] of [
+    ['purpose', request.purpose],
+    ['audience', request.audience],
+    ['nonce', request.nonce],
+    ['fingerprint', request.fingerprint],
+    ['operationId', request.operationId],
+  ] as const) {
+    if (value.trim() === '' || value.length > 256)
+      throw new TypeError(`${name} is invalid`);
+  }
+  for (const [name, value, positive] of [
+    ['bytes', request.bytes, false],
+    ['maxCalls', request.maxCalls, true],
+    ['maxCumulativeBytes', request.maxCumulativeBytes, true],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < (positive ? 1 : 0))
+      throw new TypeError(`${name} is invalid`);
+  }
+  if (request.maxCalls > ARTIFACT_CAPABILITY_MAX_CALLS)
+    throw new TypeError('maxCalls is invalid');
+  if (request.maxCumulativeBytes > ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES)
+    throw new TypeError('maxCumulativeBytes is invalid');
+  isoTimestamp(request.notBefore);
+  isoTimestamp(request.expiresAt);
+  isoTimestamp(request.now);
+}
+
 export class InMemoryDomainRepository implements DomainRepository {
   readonly #projects = new Map<string, Project>();
   readonly #configRevisions = new Map<string, ConfigRevision>();
@@ -193,6 +228,20 @@ export class InMemoryDomainRepository implements DomainRepository {
   #nextEventSequence = new Map<string, number>();
   readonly #artifacts = new Map<string, ArtifactRecord>();
   readonly #artifactKeys = new Map<string, string>();
+  readonly #artifactCapabilityQuotas = new Map<
+    string,
+    {
+      fingerprint: string;
+      notBefore: string;
+      expiresAt: string;
+      calls: number;
+      cumulativeBytes: number;
+      operationIds: Set<string>;
+    }
+  >();
+  #artifactCleanupLease:
+    | { owner: string; expiresAt: import('@agentos/core').IsoTimestamp }
+    | undefined;
   readonly #usage = new Map<string, UsageRecordEntry>();
   readonly #webhooks = new Map<string, WebhookReceipt>();
   readonly #goalCriteria = new Map<string, GoalCriterion>();
@@ -989,6 +1038,7 @@ export class InMemoryDomainRepository implements DomainRepository {
       [...this.#artifacts.values()]
         .filter(
           (artifact) =>
+            artifact.manifestVersion === 'artifact-manifest-v1' &&
             artifact.deletedAt === undefined &&
             artifact.cleanupAt !== undefined &&
             isoTimestampEpochMicroseconds(artifact.cleanupAt) <= cutoff,
@@ -1015,6 +1065,104 @@ export class InMemoryDomainRepository implements DomainRepository {
     const updated = { ...existing, deletedAt, deletionReason: reason };
     this.#artifacts.set(id, copy(updated));
     return copy(updated);
+  }
+
+  async consumeArtifactCapabilityQuota(
+    request: ArtifactCapabilityQuotaRequest,
+  ): Promise<ArtifactCapabilityQuotaResult> {
+    validateArtifactQuotaRequest(request);
+    const key = `${request.purpose}\u0000${request.audience}\u0000${request.nonce}`;
+    const existing = this.#artifactCapabilityQuotas.get(key);
+    const active =
+      isoTimestampEpochMicroseconds(request.now) >=
+        isoTimestampEpochMicroseconds(request.notBefore) &&
+      isoTimestampEpochMicroseconds(request.now) <
+        isoTimestampEpochMicroseconds(request.expiresAt);
+    if (!active)
+      return { allowed: false, replayed: false, calls: 0, cumulativeBytes: 0 };
+    if (existing === undefined) {
+      if (request.maxCalls < 1 || request.bytes > request.maxCumulativeBytes)
+        return {
+          allowed: false,
+          replayed: false,
+          calls: 0,
+          cumulativeBytes: 0,
+        };
+      this.#artifactCapabilityQuotas.set(key, {
+        fingerprint: request.fingerprint,
+        notBefore: request.notBefore,
+        expiresAt: request.expiresAt,
+        calls: 1,
+        cumulativeBytes: request.bytes,
+        operationIds: new Set([request.operationId]),
+      });
+      return {
+        allowed: true,
+        replayed: false,
+        calls: 1,
+        cumulativeBytes: request.bytes,
+      };
+    }
+    if (
+      existing.fingerprint !== request.fingerprint ||
+      existing.notBefore !== request.notBefore ||
+      existing.expiresAt !== request.expiresAt
+    )
+      return {
+        allowed: false,
+        replayed: false,
+        calls: existing.calls,
+        cumulativeBytes: existing.cumulativeBytes,
+      };
+    if (existing.operationIds.has(request.operationId))
+      return {
+        allowed: true,
+        replayed: true,
+        calls: existing.calls,
+        cumulativeBytes: existing.cumulativeBytes,
+      };
+    if (
+      existing.calls >= request.maxCalls ||
+      existing.cumulativeBytes + request.bytes > request.maxCumulativeBytes
+    )
+      return {
+        allowed: false,
+        replayed: false,
+        calls: existing.calls,
+        cumulativeBytes: existing.cumulativeBytes,
+      };
+    existing.calls += 1;
+    existing.cumulativeBytes += request.bytes;
+    existing.operationIds.add(request.operationId);
+    return {
+      allowed: true,
+      replayed: false,
+      calls: existing.calls,
+      cumulativeBytes: existing.cumulativeBytes,
+    };
+  }
+
+  async claimArtifactCleanupLease(
+    request: ArtifactCleanupLeaseRequest,
+  ): Promise<boolean> {
+    if (request.owner.trim() === '' || request.owner.length > 256)
+      throw new TypeError('cleanup lease owner is invalid');
+    if (
+      isoTimestampEpochMicroseconds(request.expiresAt) <=
+      isoTimestampEpochMicroseconds(request.now)
+    )
+      throw new TypeError('cleanup lease expiry must be after now');
+    if (
+      this.#artifactCleanupLease !== undefined &&
+      isoTimestampEpochMicroseconds(this.#artifactCleanupLease.expiresAt) >
+        isoTimestampEpochMicroseconds(request.now)
+    )
+      return false;
+    this.#artifactCleanupLease = {
+      owner: request.owner,
+      expiresAt: request.expiresAt,
+    };
+    return true;
   }
 
   async listArtifacts(

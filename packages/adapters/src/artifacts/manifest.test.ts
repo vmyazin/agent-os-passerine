@@ -91,7 +91,7 @@ describe('authoritative artifact manifest', () => {
       admin: storage.admin,
       now: new Date('2026-08-18T00:00:00.001Z'),
     });
-    expect(result).toEqual({ inspected: 1, deleted: 1 });
+    expect(result).toEqual({ inspected: 1, deleted: 1, failed: 0 });
     expect(
       await storage.store.get({ scope, key: metadata.key }),
     ).toBeUndefined();
@@ -100,5 +100,84 @@ describe('authoritative artifact manifest', () => {
       'artifact-manifest/v1/step-1/source/1',
     );
     expect(record).toMatchObject({ deletionReason: 'retention_expired' });
+  });
+
+  it('ignores expired legacy rows that are not artifact manifests', async () => {
+    const { repository, manifest } = await fixture();
+    await repository.createArtifact({
+      id: persistenceId('artifact', 'legacy-report'),
+      runId: persistenceId('run', scope.runId),
+      key: 'legacy-report',
+      digest: 'legacy',
+      createdAt: isoTimestamp(created.toISOString()),
+      cleanupAt: isoTimestamp('2026-08-17T00:01:00.000Z'),
+    });
+    const storage = createInMemoryArtifactStorage({
+      manifest,
+      now: () => created,
+    });
+    const valid = await storage.store.put({
+      scope,
+      artifactId: 'valid',
+      version: 1,
+      bytes: new TextEncoder().encode('valid'),
+      mediaType: 'text/plain',
+      expiresAt: '2026-08-17T00:01:00.000Z',
+    });
+
+    await expect(
+      cleanupExpiredArtifacts({
+        manifest,
+        admin: storage.admin,
+        now: new Date('2026-08-17T00:02:00.000Z'),
+      }),
+    ).resolves.toEqual({ inspected: 1, deleted: 1, failed: 0 });
+    await expect(
+      storage.store.get({ scope, key: valid.key }),
+    ).resolves.toBeUndefined();
+    expect(
+      await repository.getArtifact(persistenceId('artifact', 'legacy-report')),
+    ).not.toHaveProperty('deletedAt');
+  });
+
+  it('continues a cleanup batch after an item-specific admin failure', async () => {
+    const { manifest } = await fixture();
+    const storage = createInMemoryArtifactStorage({
+      manifest,
+      now: () => created,
+    });
+    const first = await storage.store.put({
+      scope,
+      artifactId: 'first',
+      version: 1,
+      bytes: new TextEncoder().encode('first'),
+      mediaType: 'text/plain',
+      expiresAt: '2026-08-17T00:01:00.000Z',
+    });
+    const second = await storage.store.put({
+      scope,
+      artifactId: 'second',
+      version: 1,
+      bytes: new TextEncoder().encode('second'),
+      mediaType: 'text/plain',
+      expiresAt: '2026-08-17T00:01:00.000Z',
+    });
+    const result = await cleanupExpiredArtifacts({
+      manifest,
+      admin: {
+        async delete(key, audit) {
+          if (key === first.key) throw new Error('one object is unavailable');
+          return storage.admin.delete(key, audit);
+        },
+      },
+      now: new Date('2026-08-17T00:02:00.000Z'),
+    });
+    expect(result).toEqual({ inspected: 2, deleted: 1, failed: 1 });
+    await expect(
+      storage.store.get({ scope, key: first.key }),
+    ).resolves.toMatchObject({ key: first.key });
+    await expect(
+      storage.store.get({ scope, key: second.key }),
+    ).resolves.toBeUndefined();
   });
 });

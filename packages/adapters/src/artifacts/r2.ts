@@ -457,9 +457,17 @@ export function createR2ArtifactStorageWithDependencies(
   ): ArtifactMetadata => {
     if (
       existing.digest !== wanted.digest ||
+      existing.key !== wanted.key ||
+      existing.projectId !== wanted.projectId ||
+      existing.runId !== wanted.runId ||
+      existing.stepId !== wanted.stepId ||
+      existing.artifactId !== wanted.artifactId ||
+      existing.version !== wanted.version ||
       existing.mediaType !== wanted.mediaType ||
       existing.retentionClass !== wanted.retentionClass ||
-      existing.sizeBytes !== wanted.sizeBytes
+      existing.sizeBytes !== wanted.sizeBytes ||
+      existing.createdAt !== wanted.createdAt ||
+      existing.expiresAt !== wanted.expiresAt
     )
       throw new ArtifactStoreAdapterError(
         'artifact_conflict',
@@ -509,19 +517,15 @@ export function createR2ArtifactStorageWithDependencies(
               ContentLength: prepared.sizeBytes,
               ContentType: prepared.mediaType,
               IfNoneMatch: '*',
-              Metadata: objectMetadata(prepared),
+              Metadata: objectMetadata(claimed),
             },
           });
-          return metadataFromResponse(prepared.key, {
-            ContentLength: prepared.sizeBytes,
-            ContentType: prepared.mediaType,
-            Metadata: objectMetadata(prepared),
-          });
+          return claimed;
         } catch (error) {
           if (!precondition(error)) throw error;
           const raced = await readVerified(prepared.key, prepared.sizeBytes);
           if (raced === undefined) throw error;
-          return reconcile(raced, prepared);
+          return reconcile(raced, claimed);
         }
       } catch (error) {
         return unavailable(error);
@@ -587,12 +591,14 @@ export function createR2ArtifactStorageWithDependencies(
   const admin: ArtifactAdminStore = Object.freeze({
     async delete(key: string, audit?: Omit<ArtifactDeletionAudit, 'key'>) {
       try {
-        parseArtifactKey(key);
+        const parts = parseArtifactKey(key);
+        const expected = await options.manifest.get(parts, key);
+        if (expected === undefined) return false;
         await send({
           kind: 'DeleteObject',
           input: { Bucket: options.bucket, Key: key },
         });
-        await options.manifest.markDeleted({
+        await options.manifest.markDeleted(expected, {
           key,
           deletedAt: audit?.deletedAt ?? now().toISOString(),
           reason: audit?.reason ?? 'control_plane_delete',
