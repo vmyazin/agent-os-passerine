@@ -57,7 +57,7 @@ describePostgres('PostgreSQL persistence integration', () => {
 
     client = postgres(databaseUrl, {
       max: 10,
-      connection: { search_path: schemaName },
+      connection: { options: `-c search_path=${schemaName}` },
     });
     repository = new NeonDomainRepository(drizzle(client, { schema }) as never);
   }, 30_000);
@@ -381,7 +381,7 @@ describePostgres('PostgreSQL persistence integration', () => {
         details: { treeSha: 'd'.repeat(40) },
       },
     );
-    expect(saved).toMatchObject({ phase: 'tree_created', revision: 2 });
+    expect(saved).toMatchObject({ phase: 'tree_created', revision: 3 });
     expect(
       (await store.listEvents()).filter(
         (event) => event.publicationKey === claim.key,
@@ -766,7 +766,7 @@ describePostgres('PostgreSQL persistence integration', () => {
       throw new Error('invalid upgrade integration schema');
     const upgradeAdmin = postgres(databaseUrl, {
       max: 1,
-      connection: { search_path: upgradeSchema },
+      connection: { options: `-c search_path=${upgradeSchema}` },
     });
     await admin.unsafe(`create schema "${upgradeSchema}"`);
     try {
@@ -839,7 +839,7 @@ describePostgres('PostgreSQL persistence integration', () => {
       throw new Error('invalid upgrade integration schema');
     const upgradeAdmin = postgres(databaseUrl, {
       max: 1,
-      connection: { search_path: upgradeSchema },
+      connection: { options: `-c search_path=${upgradeSchema}` },
     });
     await admin.unsafe(`create schema "${upgradeSchema}"`);
     try {

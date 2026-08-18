@@ -75,6 +75,15 @@ boundary: goal criteria evaluate only signed provider-observed command
 evidence, and no goal Trigger deployment or live goal attempt has been
 exercised in this build.
 
+The PostgreSQL integration suite now passes against a live Neon database,
+including the goal record migration and parity contract. First execution
+against real Postgres surfaced and fixed four latent defects: two untyped
+SQL parameter comparisons (configuration-apply CAS and capability quota
+arithmetic), microsecond-precision repository timestamps rejected by the
+millisecond-canonical artifact metadata contract, and a miscounted
+publication revision expectation. The suite also now passes search_path
+through the startup options parameter so Neon's proxy honors it.
+
 ## Remaining product stages
 
 - Broader reliability/security operations: webhook signatures and replay

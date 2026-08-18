@@ -33,6 +33,54 @@ async function fixture() {
 }
 
 describe('authoritative artifact manifest', () => {
+  it('normalizes microsecond repository timestamps to canonical metadata', async () => {
+    const { repository, manifest } = await fixture();
+    const put = prepareArtifactPut(
+      {
+        scope,
+        artifactId: 'micro',
+        version: 1,
+        bytes: new TextEncoder().encode('body'),
+        mediaType: 'text/plain',
+      },
+      created,
+    );
+    await manifest.claim(put);
+    const stored = await repository.getArtifactByRunKey(
+      persistenceId('run', scope.runId),
+      `artifact-manifest/v1/${scope.stepId}/micro/1`,
+    );
+    if (stored === undefined) throw new Error('artifact record missing');
+    // A PostgreSQL-backed repository renders timestamps with microsecond
+    // precision; the manifest must still produce canonical metadata.
+    const microRendering = {
+      getArtifactByRunKey: async () => ({
+        ...stored,
+        createdAt: isoTimestamp(
+          stored.createdAt.replace(/\.(\d{3})Z$/, '.$1000Z'),
+        ),
+        cleanupAt:
+          stored.cleanupAt === undefined
+            ? undefined
+            : isoTimestamp(stored.cleanupAt.replace(/\.(\d{3})Z$/, '.$1000Z')),
+      }),
+    };
+    const microManifest = createDomainArtifactManifestStore(
+      new Proxy(repository, {
+        get: (target, property, receiver) =>
+          property in microRendering
+            ? microRendering[property as keyof typeof microRendering]
+            : Reflect.get(target, property, receiver),
+      }),
+    );
+
+    await expect(microManifest.get(scope, put.key)).resolves.toMatchObject({
+      key: put.key,
+      createdAt: put.createdAt,
+      expiresAt: put.expiresAt,
+    });
+  });
+
   it('atomically binds one logical version and reconstructs it by run', async () => {
     const { manifest } = await fixture();
     const left = prepareArtifactPut(

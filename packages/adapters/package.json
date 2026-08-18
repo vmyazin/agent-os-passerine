@@ -15,7 +15,7 @@
     "smoke:managed-agents": "pnpm build && node scripts/managed-agents-smoke.mjs",
     "smoke:r2": "pnpm build && node scripts/r2-artifact-smoke.mjs",
     "test": "vitest run --passWithNoTests",
-    "test:integration": "vitest run src/persistence/postgres.integration.test.ts",
+    "test:integration": "vitest run --testTimeout=60000 --hookTimeout=60000 src/persistence/postgres.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

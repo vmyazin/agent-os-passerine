@@ -8,6 +8,7 @@ import {
   parseArtifactKey,
   persistenceId,
   isoTimestamp,
+  isoTimestampEpochMicroseconds,
   validateArtifactMetadata,
   type ArtifactAdminStore,
   type ArtifactDeletionAudit,
@@ -91,6 +92,17 @@ function recordId(metadata: ArtifactMetadata): string {
     .digest('hex')}`;
 }
 
+/**
+ * Repository rows render timestamps with microsecond precision, while
+ * artifact metadata is canonical at millisecond precision. Convert only
+ * when lossless so sub-millisecond rows still fail closed in validation.
+ */
+function metadataTimestamp(value: string): string {
+  const microseconds = isoTimestampEpochMicroseconds(isoTimestamp(value));
+  if (microseconds % 1000n !== 0n) return value;
+  return new Date(Number(microseconds / 1000n)).toISOString();
+}
+
 function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
   if (
     record.manifestVersion !== 'artifact-manifest-v1' ||
@@ -113,8 +125,8 @@ function metadataFromRecord(record: ArtifactRecord): ArtifactMetadata {
     mediaType: record.mediaType,
     sizeBytes: record.sizeBytes,
     retentionClass: record.retentionClass,
-    createdAt: record.createdAt,
-    expiresAt: record.cleanupAt,
+    createdAt: metadataTimestamp(record.createdAt),
+    expiresAt: metadataTimestamp(record.cleanupAt),
   });
   if (
     record.runId !== metadata.runId ||

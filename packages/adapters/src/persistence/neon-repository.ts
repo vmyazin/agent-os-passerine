@@ -434,7 +434,7 @@ export class NeonDomainRepository implements DomainRepository {
         "precondition" as materialized (
           select case
             when ${precondition === undefined} then true
-            when ${precondition?.revision ?? null} is null then
+            when ${precondition?.revision ?? null}::integer is null then
               not exists (select 1 from "active_revision")
             else exists (
               select 1 from "active_revision"
@@ -1453,8 +1453,8 @@ export class NeonDomainRepository implements DomainRepository {
         ("purpose", "audience", "nonce", "fingerprint", "not_before", "expires_at", "calls", "cumulative_bytes", "updated_at")
       select
         ${request.purpose}, ${request.audience}, ${request.nonce}, ${request.fingerprint}, ${request.notBefore}, ${request.expiresAt}, 1, ${request.bytes}, ${request.now}
-      where ${request.maxCalls} >= 1
-        and ${request.bytes} <= ${request.maxCumulativeBytes}
+      where ${request.maxCalls}::integer >= 1
+        and ${request.bytes}::bigint <= ${request.maxCumulativeBytes}::bigint
       on conflict ("purpose", "audience", "nonce") do update set
         "calls" = "artifact_capability_quotas"."calls" + 1,
         "cumulative_bytes" = "artifact_capability_quotas"."cumulative_bytes" + ${request.bytes},
