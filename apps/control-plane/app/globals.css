@@ -298,7 +298,8 @@ button {
   cursor: pointer;
 }
 
-button.secondary {
+button.secondary,
+.button.secondary {
   background: transparent;
   color: var(--signal-violet-dark);
 }

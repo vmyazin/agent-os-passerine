@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   authConfigFromEnv,
   createAuthorizationRequest,
+  isLocalhost,
+  isLocalhostBypassAllowed,
   issueSession,
   readSession,
   sanitizeReturnTo,
@@ -123,6 +125,66 @@ describe('GitHub OAuth authentication', () => {
     );
   });
 
+  it('detects localhost origins accurately', () => {
+    expect(isLocalhost('http://localhost:3000')).toBe(true);
+    expect(isLocalhost('http://127.0.0.1:3107')).toBe(true);
+    expect(isLocalhost('http://[::1]:3000')).toBe(true);
+    expect(isLocalhost('http://0.0.0.0:8000')).toBe(true);
+    expect(isLocalhost('localhost:3000')).toBe(true);
+    expect(isLocalhost(new URL('http://localhost:3000'))).toBe(true);
+    expect(isLocalhost('https://control.example')).toBe(false);
+    expect(isLocalhost('http://example.com')).toBe(false);
+    expect(isLocalhost('not-a-valid-url')).toBe(false);
+  });
+
+  it('governs localhost bypass permission strictly', () => {
+    expect(
+      isLocalhostBypassAllowed({
+        NODE_ENV: 'production',
+        AGENTOS_PUBLIC_URL: 'http://localhost:3000',
+      }),
+    ).toBe(false);
+
+    expect(
+      isLocalhostBypassAllowed({
+        NODE_ENV: 'development',
+        AGENTOS_PUBLIC_URL: 'http://localhost:3000',
+      }),
+    ).toBe(true);
+
+    expect(
+      isLocalhostBypassAllowed({
+        NODE_ENV: 'development',
+      }),
+    ).toBe(true);
+
+    expect(
+      isLocalhostBypassAllowed({
+        NODE_ENV: 'development',
+        AGENTOS_PUBLIC_URL: 'https://control.example',
+      }),
+    ).toBe(false);
+  });
+
+  it('provides safe zero-config defaults on localhost during development', () => {
+    const localConfig = authConfigFromEnv({ NODE_ENV: 'development' });
+    expect(localConfig.publicUrl).toBe('http://localhost:3000');
+    expect(localConfig.allowedLogin).toBe('operator');
+    expect(localConfig.clientId).toBe('local-client');
+    expect(localConfig.clientSecret).toBe('local-secret');
+    expect(Buffer.byteLength(localConfig.sessionSecret)).toBeGreaterThanOrEqual(
+      32,
+    );
+
+    const customLocal = authConfigFromEnv({
+      NODE_ENV: 'development',
+      AGENTOS_PUBLIC_URL: 'http://127.0.0.1:3107',
+      GITHUB_ALLOWED_LOGIN: 'custom-operator',
+    });
+    expect(customLocal.publicUrl).toBe('http://127.0.0.1:3107');
+    expect(customLocal.allowedLogin).toBe('custom-operator');
+  });
+
   it('fails closed when production auth configuration is absent or insecure', () => {
     expect(() => authConfigFromEnv({ NODE_ENV: 'production' })).toThrow(
       'AGENTOS_PUBLIC_URL is required',
@@ -139,5 +201,20 @@ describe('GitHub OAuth authentication', () => {
         AGENTOS_PUBLIC_URL: 'not a URL',
       }),
     ).toThrow('AGENTOS_PUBLIC_URL must be an absolute URL');
+    expect(() =>
+      authConfigFromEnv({
+        NODE_ENV: 'production',
+        AGENTOS_PUBLIC_URL: 'https://control.example',
+      }),
+    ).toThrow('AGENTOS_SESSION_SECRET is required');
+  });
+
+  it('enforces required credentials on non-localhost origins in development', () => {
+    expect(() =>
+      authConfigFromEnv({
+        NODE_ENV: 'development',
+        AGENTOS_PUBLIC_URL: 'https://remote.example',
+      }),
+    ).toThrow('AGENTOS_SESSION_SECRET is required');
   });
 });

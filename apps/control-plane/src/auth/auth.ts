@@ -33,6 +33,43 @@ export class AuthError extends Error {
   }
 }
 
+export const DEFAULT_LOCAL_DEV_SESSION_SECRET =
+  'agentos-local-development-session-secret-32b';
+
+export function isLocalhost(urlOrHost: string | URL): boolean {
+  try {
+    let hostname: string;
+    if (typeof urlOrHost === 'string') {
+      const candidate = urlOrHost.trim();
+      if (!candidate) return false;
+      const url = candidate.includes('://')
+        ? new URL(candidate)
+        : new URL(`http://${candidate}`);
+      hostname = url.hostname;
+    } else {
+      hostname = urlOrHost.hostname;
+    }
+    const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return (
+      normalized === 'localhost' ||
+      normalized === '127.0.0.1' ||
+      normalized === '::1' ||
+      normalized === '0.0.0.0'
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isLocalhostBypassAllowed(
+  environment: AuthEnvironment = process.env,
+): boolean {
+  if (environment.NODE_ENV === 'production') return false;
+  const publicUrl =
+    environment.AGENTOS_PUBLIC_URL?.trim() || 'http://localhost:3000';
+  return isLocalhost(publicUrl);
+}
+
 function required(environment: AuthEnvironment, key: string): string {
   const value = environment[key]?.trim();
   if (!value)
@@ -41,7 +78,18 @@ function required(environment: AuthEnvironment, key: string): string {
 }
 
 export function authConfigFromEnv(environment: AuthEnvironment): AuthConfig {
-  const publicUrl = required(environment, 'AGENTOS_PUBLIC_URL');
+  const isProd = environment.NODE_ENV === 'production';
+  const rawPublicUrl = environment.AGENTOS_PUBLIC_URL?.trim();
+
+  if (isProd && !rawPublicUrl) {
+    throw new AuthError(
+      'auth_not_configured',
+      'AGENTOS_PUBLIC_URL is required',
+      503,
+    );
+  }
+
+  const publicUrl = rawPublicUrl || (isProd ? '' : 'http://localhost:3000');
   let parsed: URL;
   try {
     parsed = new URL(publicUrl);
@@ -59,26 +107,49 @@ export function authConfigFromEnv(environment: AuthEnvironment): AuthConfig {
       503,
     );
   }
-  if (environment.NODE_ENV === 'production' && parsed.protocol !== 'https:') {
+  if (isProd && parsed.protocol !== 'https:') {
     throw new AuthError(
       'auth_not_configured',
       'AGENTOS_PUBLIC_URL must use HTTPS in production',
       503,
     );
   }
-  const sessionSecret = required(environment, 'AGENTOS_SESSION_SECRET');
-  if (Buffer.byteLength(sessionSecret) < 32) {
-    throw new AuthError(
-      'auth_not_configured',
-      'AGENTOS_SESSION_SECRET must be at least 32 bytes',
-      503,
-    );
+
+  const localBypass = !isProd && isLocalhost(parsed);
+
+  let sessionSecret: string;
+  const providedSessionSecret = environment.AGENTOS_SESSION_SECRET?.trim();
+  if (localBypass && !providedSessionSecret) {
+    sessionSecret = DEFAULT_LOCAL_DEV_SESSION_SECRET;
+  } else {
+    sessionSecret = required(environment, 'AGENTOS_SESSION_SECRET');
+    if (Buffer.byteLength(sessionSecret) < 32) {
+      throw new AuthError(
+        'auth_not_configured',
+        'AGENTOS_SESSION_SECRET must be at least 32 bytes',
+        503,
+      );
+    }
   }
+
   const cliToken = environment.AGENTOS_CLI_TOKEN?.trim();
+
+  const clientId = localBypass
+    ? environment.GITHUB_CLIENT_ID?.trim() || 'local-client'
+    : required(environment, 'GITHUB_CLIENT_ID');
+
+  const clientSecret = localBypass
+    ? environment.GITHUB_CLIENT_SECRET?.trim() || 'local-secret'
+    : required(environment, 'GITHUB_CLIENT_SECRET');
+
+  const allowedLogin = localBypass
+    ? environment.GITHUB_ALLOWED_LOGIN?.trim() || 'operator'
+    : required(environment, 'GITHUB_ALLOWED_LOGIN');
+
   return {
-    clientId: required(environment, 'GITHUB_CLIENT_ID'),
-    clientSecret: required(environment, 'GITHUB_CLIENT_SECRET'),
-    allowedLogin: required(environment, 'GITHUB_ALLOWED_LOGIN'),
+    clientId,
+    clientSecret,
+    allowedLogin,
     publicUrl: parsed.origin,
     sessionSecret,
     ...(cliToken ? { cliToken } : {}),

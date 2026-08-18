@@ -95,3 +95,24 @@ test('inbox remains usable on a narrow touch viewport', async ({ page }) => {
     ),
   ).toBeTruthy();
 });
+
+test('operator can sign in via the localhost "Get In" bypass CTA', async ({
+  context,
+  page,
+}) => {
+  await context.clearCookies();
+  await page.goto('/login');
+
+  const getInButton = page.getByRole('link', { name: 'Get In' });
+  await expect(getInButton).toBeVisible();
+  await getInButton.click();
+
+  await expect(page).toHaveURL('http://127.0.0.1:3107/');
+  await expect(
+    page.getByRole('heading', {
+      level: 1,
+      name: 'Good morning, test-operator.',
+    }),
+  ).toBeVisible();
+});
+
