@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
+    "smoke:kimi": "pnpm build && node scripts/kimi-smoke.mjs",
     "smoke:managed-agents": "pnpm build && node scripts/managed-agents-smoke.mjs",
     "smoke:r2": "pnpm build && node scripts/r2-artifact-smoke.mjs",
     "test": "vitest run --passWithNoTests",

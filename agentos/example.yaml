@@ -9,6 +9,14 @@ models:
     inputMicrodollarsPerMillionTokens: 0
     outputMicrodollarsPerMillionTokens: 0
     runtimeMicrodollarsPerMinute: 0
+  # Moonshot Kimi model profile. Uncomment and route an agent's `model` here
+  # to run that role on the Kimi runtime (requires KIMI_API_KEY).
+  # kimi:
+  #   provider: kimi
+  #   model: kimi-k2-0905-preview
+  #   inputMicrodollarsPerMillionTokens: 0
+  #   outputMicrodollarsPerMillionTokens: 0
+  #   runtimeMicrodollarsPerMinute: 0
 agents:
   implementer:
     model: standard
@@ -56,5 +64,8 @@ goals:
   maxRetries: 2
   timeoutMs: 3600000
 runtime:
-  provider: local
+  provider: managed
   routing: {}
+  # Route the `kimi` model-profile provider (see the commented `kimi` model
+  # above) onto the `kimi` runtime; every other provider stays on `managed`.
+  # routing: { kimi: kimi }

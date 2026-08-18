@@ -124,6 +124,19 @@ describe('resolveRuntimeKey', () => {
       /no agent definition/i,
     );
   });
+
+  it('resolves the legacy starter value `local` to a runtime key outside the built provider set (fail-closed)', () => {
+    // agentos/example.yaml used to ship `runtime: { provider: local }`.
+    // `local` was never one of the runtimes the production composition
+    // actually builds, so resolving it here documents that the starter's
+    // old value hits the same fail-closed `unknown runtime '<key>' routed
+    // for agent '<agent>'` guard as any other unbuilt/typo'd provider.
+    const config = configWithRouting('runtime: { provider: local }');
+    const runtimeKey = resolveRuntimeKey(config, { id: 'planning' });
+    const builtRuntimeKeys = new Set(['managed']); // kimi not built (no KIMI_API_KEY)
+    expect(runtimeKey).toBe('local');
+    expect(builtRuntimeKeys.has(runtimeKey)).toBe(false);
+  });
 });
 
 function configWithUnknownRouting(): AgentOsConfig {
