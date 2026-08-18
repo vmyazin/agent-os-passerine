@@ -126,6 +126,29 @@ describe('resolveRuntimeKey', () => {
   });
 });
 
+function configWithUnknownRouting(): AgentOsConfig {
+  return loadAgentOsConfig(`
+version: 1
+project: { name: test }
+models:
+  standard: { provider: anthropic, model: sonnet }
+  custom: { provider: openai, model: gpt }
+agents:
+  specification: { model: standard }
+  planning: { model: custom }
+environments: {}
+pipelines:
+  feature:
+    steps:
+      - { id: specification, agent: specification }
+      - { id: planning, agent: planning }
+policies: {}
+budgets: { workflowMicrodollars: 2000000, dailyMicrodollars: 5000000, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 3600000 }
+runtime: { provider: managed, routing: { openai: not-a-real-provider } }
+`);
+}
+
 describe('kimi fail-closed composition (Step 5 preservation rule)', () => {
   it('kimiFromEnv is undefined when KIMI_API_KEY is absent, blank, or whitespace-only', () => {
     expect(kimiFromEnv({})).toBeUndefined();
@@ -178,5 +201,34 @@ describe('kimi fail-closed composition (Step 5 preservation rule)', () => {
     for (const agentId of ['specification', 'planning']) {
       expect(resolveRuntimeKey(config, { id: agentId })).toBe('managed');
     }
+  });
+});
+
+describe('kimi fail-closed composition: unknown routing targets', () => {
+  // production-handler.ts's workflowForSnapshot validates every role's
+  // resolveRuntimeKey(config, role.agent) result against the set of
+  // runtimes it actually built ({'managed'} plus {'kimi'} only when
+  // KIMI_API_KEY is present), throwing
+  // `unknown runtime '<key>' routed for agent '<agent>'` for anything
+  // else -- not just a literal 'kimi' -- so a routing table naming an
+  // unbuilt/typo'd provider fails closed instead of silently running that
+  // role on the managed provider by default. This asserts the exact
+  // predicate that check evaluates (same rationale as the KIMI_API_KEY
+  // fail-closed tests above: no cheap fake-injection seam exists to drive
+  // the full composition end-to-end).
+  it('a config routing a model provider to an unbuilt runtime resolves a key outside the built provider set', () => {
+    const config = configWithUnknownRouting();
+    const runtimeKey = resolveRuntimeKey(config, { id: 'planning' });
+    const builtRuntimeKeys = new Set(['managed']); // kimi not built (no KIMI_API_KEY)
+    expect(runtimeKey).toBe('not-a-real-provider');
+    expect(builtRuntimeKeys.has(runtimeKey)).toBe(false);
+  });
+
+  it('the same config resolves a runtime key inside the built provider set once that provider actually exists', () => {
+    const config = configWithUnknownRouting();
+    const runtimeKey = resolveRuntimeKey(config, { id: 'specification' });
+    const builtRuntimeKeys = new Set(['managed']);
+    expect(runtimeKey).toBe('managed');
+    expect(builtRuntimeKeys.has(runtimeKey)).toBe(true);
   });
 });

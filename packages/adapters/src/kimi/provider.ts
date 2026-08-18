@@ -7,6 +7,7 @@ import {
   type RuntimeEnvironment,
   type RuntimeEvent,
   type RuntimeEventType,
+  type RuntimeFileResource,
   type RuntimeHandle,
   type RuntimeObservedCommand,
   type RuntimeOutput,
@@ -49,6 +50,14 @@ export interface KimiRuntimeProviderOptions {
     readonly resolveCredential: (ref: string) => Promise<string>; // credentialRef -> bearer capability
     readonly fetchImpl?: typeof fetch; // test seam
   };
+  // Invoked by cleanupAccess() so whatever staged `resources`/`credentialRefs`
+  // (e.g. a local KimiLocalAccessStore's entries) can be released once a
+  // session's access is no longer needed. Optional: a caller with nothing to
+  // release (e.g. resources were never staged locally) simply omits it.
+  readonly accessCleanup?: (input: {
+    readonly resources: readonly RuntimeFileResource[];
+    readonly credentialRefs: readonly string[];
+  }) => void;
   readonly clock?: () => string;
 }
 
@@ -227,6 +236,12 @@ interface ValidatedOptions {
   readonly ownershipSecret: string;
   readonly resolveFile: ((fileId: string) => Promise<Uint8Array>) | undefined;
   readonly artifactMcp: ResolvedArtifactMcp | undefined;
+  readonly accessCleanup:
+    | ((input: {
+        readonly resources: readonly RuntimeFileResource[];
+        readonly credentialRefs: readonly string[];
+      }) => void)
+    | undefined;
   readonly clock: () => string;
 }
 
@@ -247,6 +262,12 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
   readonly #ownershipSecret: string;
   readonly #resolveFile: ((fileId: string) => Promise<Uint8Array>) | undefined;
   readonly #artifactMcp: ResolvedArtifactMcp | undefined;
+  readonly #accessCleanup:
+    | ((input: {
+        readonly resources: readonly RuntimeFileResource[];
+        readonly credentialRefs: readonly string[];
+      }) => void)
+    | undefined;
   readonly #clock: () => string;
   readonly #agents = new Map<string, RuntimeAgent>();
   readonly #environments = new Map<string, RuntimeEnvironment>();
@@ -258,6 +279,7 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     this.#ownershipSecret = options.ownershipSecret;
     this.#resolveFile = options.resolveFile;
     this.#artifactMcp = options.artifactMcp;
+    this.#accessCleanup = options.accessCleanup;
     this.#clock = options.clock;
   }
 
@@ -552,6 +574,13 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     // it can't race an in-flight bash/file operation still using workdir.
     await withMutex(session, () => session.sandbox.destroy());
     this.#sessions.delete(handle.id);
+  }
+
+  async cleanupAccess(input: {
+    readonly resources: readonly RuntimeFileResource[];
+    readonly credentialRefs: readonly string[];
+  }): Promise<void> {
+    this.#accessCleanup?.(input);
   }
 
   async observeCommand(
@@ -943,6 +972,7 @@ function validateOptions(
     ownershipSecret: options.ownershipSecret,
     resolveFile: options.resolveFile,
     artifactMcp,
+    accessCleanup: options.accessCleanup,
     clock: options.clock ?? (() => new Date().toISOString()),
   };
 }

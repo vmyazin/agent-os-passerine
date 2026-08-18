@@ -1,6 +1,4 @@
 import { createHash } from 'node:crypto';
-import * as os from 'node:os';
-import * as path from 'node:path';
 
 import {
   calculateUsageCost,
@@ -31,7 +29,10 @@ import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createR2ArtifactStore } from '../artifacts/r2.js';
 import { createTrustedGitHubPublisherService } from '../github/service.js';
 import { createKimiLocalAccessStore } from '../kimi/access.js';
-import { createKimiRuntimeProvider } from '../kimi/provider.js';
+import {
+  createKimiRuntimeProviderFromEnv,
+  kimiFromEnv,
+} from '../kimi/from-env.js';
 import { createManagedAgentsRuntimeProvider } from '../managed-agents/provider.js';
 import { createNeonDomainRepositoryFromEnv } from '../persistence/neon-repository.js';
 import { createRoutingRuntimeProvider } from '../runtime/routing.js';
@@ -219,15 +220,11 @@ function priceUsage(
   return calculateUsageCost(usage, model);
 }
 
-/** Blank/absent `KIMI_API_KEY` is treated as "kimi is not configured". */
-export function kimiFromEnv(
-  environment: Environment,
-): { apiKey: string; baseUrl?: string } | undefined {
-  const apiKey = environment.KIMI_API_KEY?.trim();
-  if (!apiKey) return undefined;
-  const baseUrl = environment.KIMI_BASE_URL?.trim();
-  return { apiKey, ...(baseUrl ? { baseUrl } : {}) };
-}
+// Re-exported so existing importers of `kimiFromEnv` from this module keep
+// working; the implementation lives in ../kimi/from-env.js, shared with the
+// control plane's cancellation runtime (see createKimiRuntimeProviderFromEnv
+// below).
+export { kimiFromEnv };
 
 /**
  * Pure routing lookup: which runtime key (a key into the composed provider
@@ -279,26 +276,14 @@ export async function createProductionFeatureWorkflowFromEnv(
   // Kimi sessions are local, so a blank/absent KIMI_API_KEY simply means the
   // kimi runtime is never built -- config that routes to it then fails
   // closed (below) instead of silently falling back to the managed runtime.
-  const kimiEnv = kimiFromEnv(environment);
-  const kimiAccessStore = kimiEnv ? createKimiLocalAccessStore() : undefined;
-  const kimiProvider =
-    kimiEnv === undefined
-      ? undefined
-      : createKimiRuntimeProvider({
-          apiKey: kimiEnv.apiKey,
-          ...(kimiEnv.baseUrl === undefined
-            ? {}
-            : { baseUrl: kimiEnv.baseUrl }),
-          ownershipSecret,
-          sandboxRoot:
-            environment.AGENTOS_KIMI_SANDBOX_ROOT?.trim() ||
-            path.join(os.tmpdir(), 'agentos-kimi'),
-          resolveFile: kimiAccessStore!.resolveFile,
-          artifactMcp: {
-            url: artifactMcpUrl,
-            resolveCredential: kimiAccessStore!.resolveCredential,
-          },
-        });
+  // This process (a Trigger worker) is where staged local access actually
+  // gets discarded, so accessCleanup stays wired to the store (the default).
+  const kimiAccessStore = createKimiLocalAccessStore();
+  const kimiProvider = createKimiRuntimeProviderFromEnv(environment, {
+    ownershipSecret,
+    artifactMcpUrl,
+    store: kimiAccessStore,
+  });
   const verificationRegistryHosts = z
     .array(
       z
@@ -553,19 +538,30 @@ export async function createProductionFeatureWorkflowFromEnv(
       // Fail-closed routing check, before any session work: a config that
       // routes a role's agent to the kimi runtime with no KIMI_API_KEY
       // configured must reject with a named, actionable error rather than
-      // silently falling back to the managed runtime.
+      // silently falling back to the managed runtime. Every resolved
+      // runtime key is also checked against the actually-built provider
+      // set (not just 'kimi' specifically), so a routing table naming an
+      // unbuilt/unknown runtime (e.g. a typo, or a provider this
+      // composition never built) fails closed here too instead of quietly
+      // running that role on the managed provider by default.
+      const builtRuntimeKeys = new Set<string>(['managed']);
+      if (kimiProvider !== undefined) builtRuntimeKeys.add('kimi');
       const roleRuntimeKeys = new Map<string, string>();
       let requiresKimi = false;
       for (const role of Object.values(roleDefinitions)) {
         const runtimeKey = resolveRuntimeKey(config, role.agent);
         roleRuntimeKeys.set(role.agent.id, runtimeKey);
-        if (runtimeKey === 'kimi') {
-          if (kimiProvider === undefined)
-            throw new Error(
-              `KIMI_API_KEY is required: config routes '${role.agent.id}' to the kimi runtime`,
-            );
-          requiresKimi = true;
+        if (runtimeKey === 'kimi' && kimiProvider === undefined) {
+          throw new Error(
+            `KIMI_API_KEY is required: config routes '${role.agent.id}' to the kimi runtime`,
+          );
         }
+        if (!builtRuntimeKeys.has(runtimeKey)) {
+          throw new Error(
+            `unknown runtime '${runtimeKey}' routed for agent '${role.agent.id}'`,
+          );
+        }
+        if (runtimeKey === 'kimi') requiresKimi = true;
       }
       // Only wrap the managed provider in the routing facade when this run's
       // config actually routes at least one role to kimi -- the facade
@@ -669,7 +665,7 @@ export async function createProductionFeatureWorkflowFromEnv(
             readonly files: typeof files;
           }) =>
             runtimeKey === 'kimi'
-              ? kimiAccessStore!.stage({
+              ? kimiAccessStore.stage({
                   files: input.files.map((file) => ({
                     bytes: file.bytes,
                     mountPath: file.mountPath,

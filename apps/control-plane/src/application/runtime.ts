@@ -1,13 +1,11 @@
 import { createHash } from 'node:crypto';
-import * as os from 'node:os';
-import * as path from 'node:path';
 
 import {
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
   createKimiLocalAccessStore,
-  createKimiRuntimeProvider,
+  createKimiRuntimeProviderFromEnv,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createRepositoryRuntimeHandleVault,
@@ -132,28 +130,49 @@ function verificationRegistryHosts(): readonly string[] {
   return hosts;
 }
 
+// The routing facade's handle-id prefix for kimi-owned handles
+// (createRoutingRuntimeProvider's HANDLE_DELIMITER is a single space).
+const KIMI_HANDLE_PREFIX = 'kimi ';
+
+/**
+ * Guards every handle-consuming method against a stored `kimi <id>` handle
+ * arriving while kimi is *not* currently built (e.g. KIMI_API_KEY was
+ * removed from the environment after the handle was persisted). Without
+ * this, the bare (unwrapped) managed provider would receive the raw
+ * prefixed string as if it were one of its own session ids and forward it
+ * straight to the Anthropic SDK. Never wrap bare managed handles in the
+ * routing facade to "fix" this instead -- unprefixed managed handle ids
+ * must keep working exactly as they always have.
+ */
+export function assertKimiHandleSupported(
+  handle: RuntimeHandle,
+  kimiConfigured: boolean,
+): void {
+  if (!kimiConfigured && handle.id.startsWith(KIMI_HANDLE_PREFIX)) {
+    throw new Error(
+      `kimi runtime is not configured; cannot operate on handle '${handle.id}'`,
+    );
+  }
+}
+
 async function buildCancellationRuntime(): Promise<RuntimeProvider> {
   const ownershipSecret = requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET');
   const managed = await createManagedAgentsRuntimeProvider({
     apiKey: requiredRuntime('ANTHROPIC_API_KEY'),
     ownershipSecret,
   });
-  const kimi = kimiFromEnv(process.env);
-  if (kimi === undefined) return managed;
-  const accessStore = createKimiLocalAccessStore();
-  const kimiProvider = createKimiRuntimeProvider({
-    apiKey: kimi.apiKey,
-    ...(kimi.baseUrl === undefined ? {} : { baseUrl: kimi.baseUrl }),
+  // The control plane's KimiLocalAccessStore is a fresh, separate
+  // in-process instance from whichever Trigger worker actually staged a
+  // given resource, so wireAccessCleanup: false keeps this side's
+  // cleanupAccess a no-op -- real discard only ever happens worker-side,
+  // where the resource was staged (see createKimiRuntimeProviderFromEnv).
+  const kimiProvider = createKimiRuntimeProviderFromEnv(process.env, {
     ownershipSecret,
-    sandboxRoot:
-      process.env.AGENTOS_KIMI_SANDBOX_ROOT?.trim() ||
-      path.join(os.tmpdir(), 'agentos-kimi'),
-    resolveFile: accessStore.resolveFile,
-    artifactMcp: {
-      url: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
-      resolveCredential: accessStore.resolveCredential,
-    },
+    artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
+    store: createKimiLocalAccessStore(),
+    wireAccessCleanup: false,
   });
+  if (kimiProvider === undefined) return managed;
   // Cancel/cleanup/events dispatch entirely off the handle-id prefix
   // (`unwrapHandle`), so wrapping here is safe and self-consistent: this
   // function builds one singleton for the whole control-plane process, and
@@ -173,20 +192,42 @@ async function buildCancellationRuntime(): Promise<RuntimeProvider> {
 function cancellationRuntime(): RuntimeProvider {
   let provider: Promise<RuntimeProvider> | undefined;
   const get = () => (provider ??= buildCancellationRuntime());
+  // Re-checked per call (cheap, pure) rather than cached at construction
+  // time, so this always reflects the environment as it is right now.
+  const kimiConfigured = () => kimiFromEnv(process.env) !== undefined;
   return {
     syncAgent: async (value) => (await get()).syncAgent(value),
     syncEnvironment: async (value) => (await get()).syncEnvironment(value),
     start: async (value) => (await get()).start(value),
     reconcileStart: async (value) => (await get()).reconcileStart?.(value),
     async *events(handle) {
+      assertKimiHandleSupported(handle, kimiConfigured());
       yield* (await get()).events(handle);
     },
-    send: async (handle, value) => (await get()).send(handle, value),
-    resume: async (handle, value) => (await get()).resume(handle, value),
-    cancel: async (handle, reason) => (await get()).cancel(handle, reason),
-    collectOutput: async (handle) => (await get()).collectOutput(handle),
-    usage: async (handle) => (await get()).usage(handle),
-    cleanup: async (handle) => (await get()).cleanup(handle),
+    send: async (handle, value) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      await (await get()).send(handle, value);
+    },
+    resume: async (handle, value) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      await (await get()).resume(handle, value);
+    },
+    cancel: async (handle, reason) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      await (await get()).cancel(handle, reason);
+    },
+    collectOutput: async (handle) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      return (await get()).collectOutput(handle);
+    },
+    usage: async (handle) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      return (await get()).usage(handle);
+    },
+    cleanup: async (handle) => {
+      assertKimiHandleSupported(handle, kimiConfigured());
+      await (await get()).cleanup(handle);
+    },
     cleanupAccess: async (input) => {
       const runtime = await get();
       if (runtime.cleanupAccess === undefined)

@@ -847,4 +847,26 @@ describe('createKimiRuntimeProvider', () => {
     const reconciled = await provider.reconcileStart!(baseRequest());
     expect(reconciled).toBeUndefined();
   });
+
+  it('cleanupAccess forwards resources/credentialRefs to the accessCleanup hook and is a no-op without one', async () => {
+    const accessCleanup = vi.fn();
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+      accessCleanup,
+    });
+    const input = {
+      resources: [
+        { type: 'file' as const, fileId: 'kimi-file-abc', mountPath: '/x' },
+      ],
+      credentialRefs: ['kimi-cred-abc'],
+    };
+    await provider.cleanupAccess!(input);
+    expect(accessCleanup).toHaveBeenCalledTimes(1);
+    expect(accessCleanup).toHaveBeenCalledWith(input);
+
+    const { provider: withoutHook } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    await expect(withoutHook.cleanupAccess!(input)).resolves.toBeUndefined();
+  });
 });
