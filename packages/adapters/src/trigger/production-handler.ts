@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import {
   calculateUsageCost,
@@ -20,14 +22,19 @@ import {
   type ConfigSnapshot,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
+  type RuntimeAgent,
+  type RuntimeProvider,
 } from '@agentos/core';
 import { z } from 'zod';
 
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createR2ArtifactStore } from '../artifacts/r2.js';
 import { createTrustedGitHubPublisherService } from '../github/service.js';
+import { createKimiLocalAccessStore } from '../kimi/access.js';
+import { createKimiRuntimeProvider } from '../kimi/provider.js';
 import { createManagedAgentsRuntimeProvider } from '../managed-agents/provider.js';
 import { createNeonDomainRepositoryFromEnv } from '../persistence/neon-repository.js';
+import { createRoutingRuntimeProvider } from '../runtime/routing.js';
 import { createAesWorkflowHandleSealer } from './handle-sealer.js';
 import { createFeatureGoalStepRunner } from './goal-feature-runner.js';
 import { createGoalWorkflowTaskHandler } from './goal-task-handler.js';
@@ -212,6 +219,35 @@ function priceUsage(
   return calculateUsageCost(usage, model);
 }
 
+/** Blank/absent `KIMI_API_KEY` is treated as "kimi is not configured". */
+export function kimiFromEnv(
+  environment: Environment,
+): { apiKey: string; baseUrl?: string } | undefined {
+  const apiKey = environment.KIMI_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  const baseUrl = environment.KIMI_BASE_URL?.trim();
+  return { apiKey, ...(baseUrl ? { baseUrl } : {}) };
+}
+
+/**
+ * Pure routing lookup: which runtime key (a key into the composed provider
+ * registry, e.g. `'managed'` or `'kimi'`) a given agent should run on,
+ * according to the model provider its config-defined agent definition
+ * points at and the run's config-declared routing table.
+ */
+export function resolveRuntimeKey(
+  config: AgentOsConfig,
+  agent: Pick<RuntimeAgent, 'id'>,
+): string {
+  const definition = config.agents[agent.id];
+  if (definition === undefined)
+    throw new Error(`config has no agent definition for '${agent.id}'`);
+  const model = config.models[definition.model];
+  if (model === undefined)
+    throw new Error(`config has no model profile for '${definition.model}'`);
+  return config.runtime.routing[model.provider] ?? config.runtime.provider;
+}
+
 export async function createProductionFeatureWorkflowFromEnv(
   environment: Environment,
 ): Promise<FeatureWorkflowTaskHandler> {
@@ -227,15 +263,42 @@ export async function createProductionFeatureWorkflowFromEnv(
     ),
     manifest: createDomainArtifactManifestStore(repository),
   });
-  const runtime = await createManagedAgentsRuntimeProvider({
+  const ownershipSecret = required(
+    environment,
+    'AGENTOS_RUNTIME_OWNERSHIP_SECRET',
+  );
+  const managedProvider = await createManagedAgentsRuntimeProvider({
     apiKey: required(environment, 'ANTHROPIC_API_KEY'),
-    ownershipSecret: required(environment, 'AGENTOS_RUNTIME_OWNERSHIP_SECRET'),
+    ownershipSecret,
   });
   const artifactMcpUrl = new URL(
     required(environment, 'AGENTOS_ARTIFACT_MCP_URL'),
   ).toString();
   if (!artifactMcpUrl.startsWith('https://'))
     throw new Error('AGENTOS_ARTIFACT_MCP_URL must use HTTPS');
+  // Kimi sessions are local, so a blank/absent KIMI_API_KEY simply means the
+  // kimi runtime is never built -- config that routes to it then fails
+  // closed (below) instead of silently falling back to the managed runtime.
+  const kimiEnv = kimiFromEnv(environment);
+  const kimiAccessStore = kimiEnv ? createKimiLocalAccessStore() : undefined;
+  const kimiProvider =
+    kimiEnv === undefined
+      ? undefined
+      : createKimiRuntimeProvider({
+          apiKey: kimiEnv.apiKey,
+          ...(kimiEnv.baseUrl === undefined
+            ? {}
+            : { baseUrl: kimiEnv.baseUrl }),
+          ownershipSecret,
+          sandboxRoot:
+            environment.AGENTOS_KIMI_SANDBOX_ROOT?.trim() ||
+            path.join(os.tmpdir(), 'agentos-kimi'),
+          resolveFile: kimiAccessStore!.resolveFile,
+          artifactMcp: {
+            url: artifactMcpUrl,
+            resolveCredential: kimiAccessStore!.resolveCredential,
+          },
+        });
   const verificationRegistryHosts = z
     .array(
       z
@@ -487,6 +550,41 @@ export async function createProductionFeatureWorkflowFromEnv(
         artifactMcpUrl,
         verificationRegistryHosts,
       });
+      // Fail-closed routing check, before any session work: a config that
+      // routes a role's agent to the kimi runtime with no KIMI_API_KEY
+      // configured must reject with a named, actionable error rather than
+      // silently falling back to the managed runtime.
+      const roleRuntimeKeys = new Map<string, string>();
+      let requiresKimi = false;
+      for (const role of Object.values(roleDefinitions)) {
+        const runtimeKey = resolveRuntimeKey(config, role.agent);
+        roleRuntimeKeys.set(role.agent.id, runtimeKey);
+        if (runtimeKey === 'kimi') {
+          if (kimiProvider === undefined)
+            throw new Error(
+              `KIMI_API_KEY is required: config routes '${role.agent.id}' to the kimi runtime`,
+            );
+          requiresKimi = true;
+        }
+      }
+      // Only wrap the managed provider in the routing facade when this run's
+      // config actually routes at least one role to kimi -- the facade
+      // prefixes every handle id (`managed <id>` / `kimi <id>`), and that
+      // change is only safe to take for runs that need it. A managed-only
+      // run (the common case, and every run before kimi routing existed)
+      // keeps producing the exact same bare managed handle ids it always
+      // has, so existing persisted/sealed handles and their shape stay
+      // byte-identical.
+      const workflowRuntime: RuntimeProvider = requiresKimi
+        ? createRoutingRuntimeProvider({
+            providers: {
+              managed: managedProvider,
+              kimi: kimiProvider!,
+            },
+            defaultProvider: config.runtime.provider,
+            route: (agent: RuntimeAgent) => resolveRuntimeKey(config, agent),
+          })
+        : managedProvider;
       const runtimeAccess = {
         prepare: async (request: {
           workflow: {
@@ -555,6 +653,36 @@ export async function createProductionFeatureWorkflowFromEnv(
                   : `/workspace/inputs/${metadata.stepId}-${metadata.artifactId}.json`,
             });
           }
+          // Kimi-routed roles never leave the process: stage the same
+          // bytes/token the managed preparer would upload into the local
+          // access store instead, so the kimi provider's resolveFile /
+          // artifactMcp.resolveCredential hooks can materialize them.
+          // Managed-routed roles keep calling the managed preparer exactly
+          // as before -- byte-identical.
+          const runtimeKey = resolveRuntimeKey(
+            config,
+            roleDefinitions[request.role].agent,
+          );
+          const stageOrUpload = (input: {
+            readonly mcpUrl?: string;
+            readonly bearerToken?: string;
+            readonly files: typeof files;
+          }) =>
+            runtimeKey === 'kimi'
+              ? kimiAccessStore!.stage({
+                  files: input.files.map((file) => ({
+                    bytes: file.bytes,
+                    mountPath: file.mountPath,
+                  })),
+                  credentials:
+                    input.bearerToken === undefined
+                      ? []
+                      : [{ token: input.bearerToken }],
+                })
+              : managedProvider.provisionSessionAccess({
+                  idempotencyKey: request.idempotencyKey,
+                  ...input,
+                });
           if (request.role === 'verification') {
             files.push({
               filename: 'materialize.mjs',
@@ -562,10 +690,7 @@ export async function createProductionFeatureWorkflowFromEnv(
               bytes: new TextEncoder().encode(MATERIALIZE_SCRIPT),
               mountPath: '/workspace/inputs/materialize.mjs',
             });
-            return runtime.provisionSessionAccess({
-              idempotencyKey: request.idempotencyKey,
-              files,
-            });
+            return stageOrUpload({ files });
           }
           const issuedAt = new Date();
           const bearerToken = artifactCapabilityIssuer.issue(
@@ -589,8 +714,7 @@ export async function createProductionFeatureWorkflowFromEnv(
             },
             issuedAt,
           );
-          return runtime.provisionSessionAccess({
-            idempotencyKey: request.idempotencyKey,
+          return stageOrUpload({
             mcpUrl: artifactMcpUrl,
             bearerToken,
             files,
@@ -601,7 +725,7 @@ export async function createProductionFeatureWorkflowFromEnv(
         repository,
         checkpoints,
         artifacts,
-        runtime,
+        runtime: workflowRuntime,
         approval: createTriggerApprovalWaiter(),
         roles: roleDefinitions,
         runtimeAccess,

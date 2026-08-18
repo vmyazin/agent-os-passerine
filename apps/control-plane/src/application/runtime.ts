@@ -1,18 +1,24 @@
 import { createHash } from 'node:crypto';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import {
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
+  createKimiLocalAccessStore,
+  createKimiRuntimeProvider,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createRepositoryRuntimeHandleVault,
+  createRoutingRuntimeProvider,
   createRuntimeStartRecoveryResolver,
   createR2ArtifactStore,
   createTrustedSourceSnapshotIngestor,
   createTrustedRepositoryHeadResolver,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
+  kimiFromEnv,
 } from '@agentos/adapters';
 import {
   isoTimestamp,
@@ -126,13 +132,47 @@ function verificationRegistryHosts(): readonly string[] {
   return hosts;
 }
 
+async function buildCancellationRuntime(): Promise<RuntimeProvider> {
+  const ownershipSecret = requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET');
+  const managed = await createManagedAgentsRuntimeProvider({
+    apiKey: requiredRuntime('ANTHROPIC_API_KEY'),
+    ownershipSecret,
+  });
+  const kimi = kimiFromEnv(process.env);
+  if (kimi === undefined) return managed;
+  const accessStore = createKimiLocalAccessStore();
+  const kimiProvider = createKimiRuntimeProvider({
+    apiKey: kimi.apiKey,
+    ...(kimi.baseUrl === undefined ? {} : { baseUrl: kimi.baseUrl }),
+    ownershipSecret,
+    sandboxRoot:
+      process.env.AGENTOS_KIMI_SANDBOX_ROOT?.trim() ||
+      path.join(os.tmpdir(), 'agentos-kimi'),
+    resolveFile: accessStore.resolveFile,
+    artifactMcp: {
+      url: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
+      resolveCredential: accessStore.resolveCredential,
+    },
+  });
+  // Cancel/cleanup/events dispatch entirely off the handle-id prefix
+  // (`unwrapHandle`), so wrapping here is safe and self-consistent: this
+  // function builds one singleton for the whole control-plane process, and
+  // every handle it ever stores (via runtimeHandles.store, right after this
+  // same instance's own reconcileStart/start) was produced by this same
+  // wrapped provider. `route` never needs to resolve a real routing
+  // decision -- this recovery path never calls syncAgent, so
+  // `agentRuntimes` is always empty and `reconcileStart`/`start` already
+  // fall back to `defaultProvider` regardless of what `route` returns.
+  return createRoutingRuntimeProvider({
+    providers: { managed, kimi: kimiProvider },
+    defaultProvider: 'managed',
+    route: () => undefined,
+  });
+}
+
 function cancellationRuntime(): RuntimeProvider {
   let provider: Promise<RuntimeProvider> | undefined;
-  const get = () =>
-    (provider ??= createManagedAgentsRuntimeProvider({
-      apiKey: requiredRuntime('ANTHROPIC_API_KEY'),
-      ownershipSecret: requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET'),
-    }));
+  const get = () => (provider ??= buildCancellationRuntime());
   return {
     syncAgent: async (value) => (await get()).syncAgent(value),
     syncEnvironment: async (value) => (await get()).syncEnvironment(value),

@@ -1,3 +1,4 @@
+export * from './access.js';
 export * from './loop.js';
 export * from './provider.js';
 export * from './sandbox.js';
