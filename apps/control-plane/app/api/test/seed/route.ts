@@ -55,7 +55,11 @@ export async function POST(request: Request): Promise<Response> {
       fingerprint: 'scope_hash_42',
       status: 'pending',
       createdAt: at,
-      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+      // The approval must be consumable against the server's real clock, so
+      // its expiry is relative; a fixed future date is a calendar time bomb.
+      expiresAt: isoTimestamp(
+        new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      ),
     });
   const messageId = persistenceId('inboxMessage', 'e2e-message');
   if (!(await repository.getInboxMessage(messageId)))
