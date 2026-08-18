@@ -157,8 +157,8 @@ function cancellationRuntime(): RuntimeProvider {
 }
 
 export function workflowDispatchFromEnv() {
-  const triggerSecret = process.env.TRIGGER_SECRET_KEY;
-  const databaseUrl = process.env.DATABASE_URL;
+  const triggerSecret = process.env.TRIGGER_SECRET_KEY?.trim() || undefined;
+  const databaseUrl = process.env.DATABASE_URL?.trim() || undefined;
   if (triggerSecret === undefined) return undefined;
   if (databaseUrl === undefined) {
     throw new Error(
