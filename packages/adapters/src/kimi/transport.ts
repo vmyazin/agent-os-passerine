@@ -69,7 +69,7 @@ export function createKimiHttpTransport(
   const fetchImpl = options.fetchImpl ?? fetch;
 
   const transport: KimiTransport = {
-    async send(request) {
+    async send(request, sendOptions) {
       const body = JSON.stringify({
         model: request.model,
         ...(request.system === undefined ? {} : { system: request.system }),
@@ -82,6 +82,7 @@ export function createKimiHttpTransport(
         `${baseUrl}/v1/messages`,
         options.apiKey,
         body,
+        sendOptions?.signal,
       );
       if (!response.ok) {
         const text = await response.text();
@@ -132,16 +133,27 @@ async function sendWithRetry(
   url: string,
   apiKey: string,
   body: string,
+  signal: AbortSignal | undefined,
 ): Promise<Response> {
   const headers = {
     'content-type': 'application/json',
     'x-api-key': apiKey,
     'anthropic-version': ANTHROPIC_VERSION,
   };
-  const first = await fetchImpl(url, { method: 'POST', headers, body });
+  const init: RequestInit = {
+    method: 'POST',
+    headers,
+    body,
+    ...(signal === undefined ? {} : { signal }),
+  };
+  const first = await fetchImpl(url, init);
   if (first.ok || !RETRYABLE_STATUS(first.status)) return first;
   await sleep(RETRY_DELAY_MS);
-  return fetchImpl(url, { method: 'POST', headers, body });
+  // A session cancelled during the retry delay must not spend another
+  // request; the caller sees the same abort rejection it would have seen
+  // mid-flight.
+  signal?.throwIfAborted();
+  return fetchImpl(url, init);
 }
 
 function sleep(ms: number): Promise<void> {

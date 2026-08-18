@@ -321,6 +321,120 @@ describe('runKimiAgentLoop', () => {
     });
   });
 
+  it('skips the remaining tool calls of a turn once the signal aborts mid-turn', async () => {
+    const controller = new AbortController();
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          { type: 'tool_use', id: 'call_1', name: 'write', input: { n: 1 } },
+          { type: 'tool_use', id: 'call_2', name: 'write', input: { n: 2 } },
+          { type: 'tool_use', id: 'call_3', name: 'write', input: { n: 3 } },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 3, outputTokens: 2 },
+      },
+    ]);
+    const executed: unknown[] = [];
+    const executor: KimiToolExecutor = {
+      execute: vi.fn(async (_name: string, input: unknown) => {
+        executed.push(input);
+        // A cancel/cleanup landing between two tool calls of the same turn.
+        controller.abort();
+        return { content: 'ok', isError: false };
+      }),
+    };
+
+    const result = await runKimiAgentLoop({
+      transport,
+      model: 'kimi-test',
+      initialInput: {},
+      tools: [],
+      executor,
+      signal: controller.signal,
+      onEvent: () => {},
+    });
+
+    expect(executed).toEqual([{ n: 1 }]);
+    expect(result).toEqual({
+      status: 'cancelled',
+      usage: { inputTokens: 3, outputTokens: 2 },
+      turns: 1,
+    });
+  });
+
+  it('reports cumulative usage after every turn, not only at settlement', async () => {
+    const snapshots: { inputTokens: number; outputTokens: number }[] = [];
+    const { transport } = scriptedTransport([
+      {
+        content: [{ type: 'tool_use', id: 'call_1', name: 'bash', input: {} }],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_2',
+            name: 'submit_result',
+            input: { ok: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 6, outputTokens: 2 },
+      },
+    ]);
+    const executor: KimiToolExecutor = {
+      execute: async () => ({ content: 'ok', isError: false }),
+    };
+
+    await runKimiAgentLoop({
+      transport,
+      model: 'kimi-test',
+      initialInput: {},
+      tools: [],
+      executor,
+      signal: neverAborted(),
+      onEvent: () => {},
+      onUsage: (usage) => snapshots.push({ ...usage }),
+    });
+
+    expect(snapshots).toEqual([
+      { inputTokens: 10, outputTokens: 5 },
+      { inputTokens: 16, outputTokens: 7 },
+    ]);
+  });
+
+  it('threads the loop signal into the transport so a cancel aborts the in-flight request', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>(
+      async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          expect(init?.signal).toBeDefined();
+          init?.signal?.addEventListener('abort', () =>
+            reject(new Error('aborted by signal')),
+          );
+        }),
+    );
+    const transport = createKimiHttpTransport({
+      apiKey: 'kimi-key',
+      fetchImpl,
+    });
+
+    const promise = runKimiAgentLoop({
+      transport,
+      model: 'kimi-test',
+      initialInput: {},
+      tools: [],
+      executor: { execute: async () => ({ content: '', isError: false }) },
+      signal: controller.signal,
+      onEvent: () => {},
+    });
+    controller.abort();
+
+    await expect(promise).rejects.toThrow('aborted by signal');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('returns turn_limit after exhausting maxTurns', async () => {
     const responses: SendResponse[] = Array.from({ length: 3 }, (_, index) => ({
       content: [

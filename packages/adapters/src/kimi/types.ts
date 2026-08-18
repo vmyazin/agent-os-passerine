@@ -25,13 +25,19 @@ export interface KimiToolDefinition {
 }
 
 export interface KimiTransport {
-  send(request: {
-    readonly model: string;
-    readonly system?: string;
-    readonly messages: readonly KimiMessage[];
-    readonly tools: readonly KimiToolDefinition[];
-    readonly maxTokens: number;
-  }): Promise<{
+  send(
+    request: {
+      readonly model: string;
+      readonly system?: string;
+      readonly messages: readonly KimiMessage[];
+      readonly tools: readonly KimiToolDefinition[];
+      readonly maxTokens: number;
+    },
+    // Aborting must abort the in-flight request: without it a cancelled
+    // session's current turn runs to completion and its tool calls can
+    // resurrect a workdir cleanup already destroyed.
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<{
     readonly content: readonly KimiContentBlock[];
     readonly stopReason: string | null;
     readonly usage: {

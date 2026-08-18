@@ -30,6 +30,16 @@ export interface RunKimiAgentLoopOptions {
     type: 'message' | 'tool_call' | 'tool_result';
     detail: string;
   }) => void;
+  /**
+   * Invoked after every completed turn with the run's cumulative token
+   * totals, so a caller can report real spend for a session that never
+   * settles normally (cancelled, cleaned up, timed out) instead of the
+   * zeroes a settle-only accumulation leaves behind.
+   */
+  readonly onUsage?: (usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+  }) => void;
 }
 
 export async function runKimiAgentLoop(
@@ -46,26 +56,36 @@ export async function runKimiAgentLoop(
   let outputTokens = 0;
   let turns = 0;
 
+  const cancelled = () =>
+    Object.freeze({
+      status: 'cancelled' as const,
+      usage: Object.freeze({ inputTokens, outputTokens }),
+      turns,
+    });
+
   while (turns < maxTurns) {
     if (options.signal.aborted) {
-      return Object.freeze({
-        status: 'cancelled' as const,
-        usage: Object.freeze({ inputTokens, outputTokens }),
-        turns,
-      });
+      return cancelled();
     }
     turns += 1;
 
-    const response = await options.transport.send({
-      model: options.model,
-      ...(options.system === undefined ? {} : { system: options.system }),
-      messages: [...messages],
-      tools: options.tools,
-      maxTokens: MAX_TOKENS,
-    });
+    const response = await options.transport.send(
+      {
+        model: options.model,
+        ...(options.system === undefined ? {} : { system: options.system }),
+        messages: [...messages],
+        tools: options.tools,
+        maxTokens: MAX_TOKENS,
+      },
+      // Threaded so a cancel mid-turn aborts the in-flight request rather
+      // than letting this turn (and its tool calls) run to completion
+      // against an already-torn-down session.
+      { signal: options.signal },
+    );
 
     inputTokens += response.usage.inputTokens;
     outputTokens += response.usage.outputTokens;
+    options.onUsage?.({ inputTokens, outputTokens });
 
     messages.push({ role: 'assistant', content: response.content });
 
@@ -92,6 +112,13 @@ export async function runKimiAgentLoop(
     let submitted: { readonly result: unknown } | undefined;
 
     for (const block of toolUseBlocks) {
+      // Re-checked before every dispatch, not just once per turn: a cancel
+      // that lands between two tool calls of the same turn must skip the
+      // rest of them, or a post-cleanup write recreates the destroyed
+      // workdir.
+      if (options.signal.aborted) {
+        return cancelled();
+      }
       if (block.name === 'submit_result') {
         const validation = validateSubmitResult(block.input);
         if (validation.ok) {

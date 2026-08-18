@@ -65,7 +65,8 @@ goals:
   timeoutMs: 3600000
 runtime:
   provider: managed
+  # Replace the line below with `routing: { kimi: kimi }` to route the `kimi`
+  # model-profile provider (see the commented `kimi` model above) onto the
+  # `kimi` runtime; every other provider stays on `managed`. The verification
+  # role may not route to `kimi` -- composition rejects that config.
   routing: {}
-  # Route the `kimi` model-profile provider (see the commented `kimi` model
-  # above) onto the `kimi` runtime; every other provider stays on `managed`.
-  # routing: { kimi: kimi }

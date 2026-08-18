@@ -6,7 +6,11 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
-import { kimiFromEnv, resolveRuntimeKey } from './production-handler.js';
+import {
+  kimiFromEnv,
+  resolveRoleRuntimeKeys,
+  resolveRuntimeKey,
+} from './production-handler.js';
 
 function snapshot(verificationEnvironment: string): ConfigSnapshot {
   const config = loadAgentOsConfig(`
@@ -243,5 +247,127 @@ describe('kimi fail-closed composition: unknown routing targets', () => {
     const builtRuntimeKeys = new Set(['managed']);
     expect(runtimeKey).toBe('managed');
     expect(builtRuntimeKeys.has(runtimeKey)).toBe(true);
+  });
+});
+
+function routedSnapshot(options: {
+  readonly implementationModel?: string;
+  readonly verificationModel?: string;
+  readonly runtimeYaml?: string;
+}): ConfigSnapshot {
+  const config = loadAgentOsConfig(`
+version: 1
+project: { name: test }
+models:
+  standard: { provider: anthropic, model: sonnet }
+  fast: { provider: kimi, model: kimi-k2 }
+agents:
+  specification: { model: standard, environment: specification, mcps: [artifacts] }
+  planning: { model: standard, environment: planning, mcps: [artifacts] }
+  implementation: { model: ${options.implementationModel ?? 'standard'}, environment: implementation, mcps: [artifacts] }
+  review: { model: standard, environment: review, mcps: [artifacts] }
+  verification: { model: ${options.verificationModel ?? 'standard'}, environment: verification, tools: [bash] }
+environments:
+  specification: { runtime: managed, mcps: [artifacts] }
+  planning: { runtime: managed, mcps: [artifacts] }
+  implementation: { runtime: managed, mcps: [artifacts] }
+  review: { runtime: managed, mcps: [artifacts] }
+  verification: { runtime: managed }
+pipelines:
+  feature:
+    steps:
+      - { id: specification, agent: specification }
+      - { id: planning, agent: planning }
+      - { id: implementation, agent: implementation }
+      - { id: review, agent: review }
+      - { id: verification, agent: verification }
+policies: {}
+budgets: { workflowMicrodollars: 2000000, dailyMicrodollars: 5000000, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 3600000 }
+${options.runtimeYaml ?? 'runtime: { provider: managed }'}
+`);
+  return { config } as unknown as ConfigSnapshot;
+}
+
+const ROLE_OPTIONS = {
+  artifactMcpUrl: 'https://artifacts.test/mcp',
+  verificationRegistryHosts: ['registry.npmjs.org'],
+};
+
+function resolveFor(snapshot: ConfigSnapshot, kimiConfigured: boolean) {
+  const roles = resolveFeatureRolesFromSnapshot(snapshot, ROLE_OPTIONS);
+  const builtRuntimeKeys = new Set(
+    kimiConfigured ? ['managed', 'kimi'] : ['managed'],
+  );
+  return resolveRoleRuntimeKeys(
+    snapshot.config as unknown as AgentOsConfig,
+    roles,
+    { builtRuntimeKeys, kimiConfigured },
+  );
+}
+
+describe('resolveRoleRuntimeKeys', () => {
+  const kimiRouting = 'runtime: { provider: managed, routing: { kimi: kimi } }';
+
+  it('refuses to route the verification role to the kimi runtime', () => {
+    // The trusted verification command bakes container-absolute paths
+    // (`rm -rf /workspace/repo`); on the containerless kimi sandbox that
+    // would run against the worker host's real filesystem.
+    expect(() =>
+      resolveFor(
+        routedSnapshot({ verificationModel: 'fast', runtimeYaml: kimiRouting }),
+        true,
+      ),
+    ).toThrow(
+      'the verification role cannot route to the kimi runtime; route it to managed',
+    );
+  });
+
+  it('allows a non-verification role on kimi and reports that the run needs the kimi provider', () => {
+    const resolved = resolveFor(
+      routedSnapshot({
+        implementationModel: 'fast',
+        runtimeYaml: kimiRouting,
+      }),
+      true,
+    );
+    expect(resolved.requiresKimi).toBe(true);
+    expect(resolved.runtimeKeys.get('implementation')).toBe('kimi');
+    expect(resolved.runtimeKeys.get('verification')).toBe('managed');
+  });
+
+  it('keeps a managed-only run off the routing facade entirely', () => {
+    const resolved = resolveFor(routedSnapshot({}), false);
+    expect(resolved.requiresKimi).toBe(false);
+    expect([...resolved.runtimeKeys.values()]).toEqual([
+      'managed',
+      'managed',
+      'managed',
+      'managed',
+      'managed',
+    ]);
+  });
+
+  it('fails closed when a role routes to kimi without KIMI_API_KEY', () => {
+    expect(() =>
+      resolveFor(
+        routedSnapshot({
+          implementationModel: 'fast',
+          runtimeYaml: kimiRouting,
+        }),
+        false,
+      ),
+    ).toThrow(
+      "KIMI_API_KEY is required: config routes 'implementation' to the kimi runtime",
+    );
+  });
+
+  it('fails closed on the legacy starter value `provider: local`', () => {
+    expect(() =>
+      resolveFor(
+        routedSnapshot({ runtimeYaml: 'runtime: { provider: local }' }),
+        false,
+      ),
+    ).toThrow(/unknown runtime 'local' routed for agent/);
   });
 });

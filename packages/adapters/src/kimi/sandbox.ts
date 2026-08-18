@@ -26,7 +26,7 @@ export interface KimiSandbox {
   ): Promise<void>; // exactly-one-occurrence
   runBash(
     command: string,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   destroy(): Promise<void>;
 }
@@ -147,6 +147,13 @@ export async function createKimiSandbox(options: {
               HOME: workdir,
               LANG: 'C.UTF-8',
             },
+            // Node kills the child when this aborts, so a session
+            // cancel/cleanup tears down a long-running command instead of
+            // waiting out its timeout while holding the session mutex (and
+            // with it, the workdir destroy).
+            ...(runOptions?.signal === undefined
+              ? {}
+              : { signal: runOptions.signal }),
           },
           (error, stdout, stderr) => {
             // Node caps each stream at exactly `maxBuffer` bytes and never

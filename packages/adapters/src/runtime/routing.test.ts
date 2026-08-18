@@ -246,20 +246,51 @@ describe('createRoutingRuntimeProvider', () => {
     expect(managed.calls.map((c) => c.method)).toEqual(['syncEnvironment']);
   });
 
-  it('fans cleanupAccess out only to providers that define it', async () => {
-    const withAccess = createStubProvider({ withCleanupAccess: true });
+  it('routes cleanupAccess only to the owning provider, skipping providers that do not define it', async () => {
+    const managed = createStubProvider({ withCleanupAccess: true });
     const withoutAccess = createStubProvider();
     const routing = createRoutingRuntimeProvider({
-      providers: { withAccess, withoutAccess },
-      defaultProvider: 'withAccess',
+      providers: { managed, withoutAccess },
+      defaultProvider: 'managed',
       route: () => undefined,
     });
 
-    const input = { resources: [], credentialRefs: [] };
-    await routing.cleanupAccess?.(input);
+    await routing.cleanupAccess?.({
+      resources: [{ type: 'file', fileId: 'file_managed_1' }],
+      credentialRefs: ['vault_managed_1'],
+    });
 
-    expect(withAccess.calls.map((c) => c.method)).toEqual(['cleanupAccess']);
+    expect(managed.calls.map((c) => c.method)).toEqual(['cleanupAccess']);
     expect(withoutAccess.calls).toEqual([]);
+  });
+
+  it('partitions cleanupAccess between kimi-local ids and the default provider', async () => {
+    const kimi = createStubProvider({ withCleanupAccess: true });
+    const managed = createStubProvider({ withCleanupAccess: true });
+    const routing = createRoutingRuntimeProvider({
+      providers: { kimi, managed },
+      defaultProvider: 'managed',
+      route: () => undefined,
+    });
+
+    await routing.cleanupAccess?.({
+      resources: [
+        { type: 'file', fileId: 'kimi-file-aaa' },
+        { type: 'file', fileId: 'file_managed_1' },
+      ],
+      credentialRefs: ['kimi-cred-bbb', 'vault_managed_1'],
+    });
+
+    expect(kimi.calls).toHaveLength(1);
+    expect(kimi.calls[0]?.args[0]).toEqual({
+      resources: [{ type: 'file', fileId: 'kimi-file-aaa' }],
+      credentialRefs: ['kimi-cred-bbb'],
+    });
+    expect(managed.calls).toHaveLength(1);
+    expect(managed.calls[0]?.args[0]).toEqual({
+      resources: [{ type: 'file', fileId: 'file_managed_1' }],
+      credentialRefs: ['vault_managed_1'],
+    });
   });
 
   it('forwards observeCommand only when the target provider defines it, throwing otherwise', async () => {
@@ -376,6 +407,90 @@ describe('createRoutingRuntimeProvider', () => {
     expect(sendCall?.args[1]).toEqual({ text: 'hi' });
     const resumeCall = kimi.calls.find((c) => c.method === 'resume');
     expect(resumeCall?.args[1]).toEqual({ resumed: true });
+  });
+
+  it('preserves every non-id field of a managed-shaped handle across the wrap/unwrap round trip', async () => {
+    // The managed provider returns a ManagedAgentsRuntimeHandle whose
+    // ownershipCapability/runId/stepId/credentialRefs/uploadedFileIds/
+    // deadlineAt fields ownership assertion and cleanup read back off the
+    // handle. Rebuilding a bare {id} in the facade silently breaks them.
+    const richHandle = {
+      id: 'session-1',
+      ownershipCapability: 'cap-abc',
+      runId: 'run-1',
+      stepId: 'step-1',
+      credentialRefs: ['vault_1'],
+      uploadedFileIds: ['file_1'],
+      deadlineAt: '2026-01-01T00:00:00Z',
+    };
+    const managed = createStubProvider();
+    (managed as { start: RuntimeProvider['start'] }).start = async (
+      request: RuntimeStartRequest,
+    ) => {
+      (managed.calls as Call[]).push({ method: 'start', args: [request] });
+      return richHandle as RuntimeHandle;
+    };
+    const routing = createRoutingRuntimeProvider({
+      providers: { kimi: createStubProvider(), managed },
+      defaultProvider: 'managed',
+      route: () => 'managed',
+    });
+
+    await routing.syncAgent(AGENT_A);
+    const handle = await routing.start(baseRequest(AGENT_A.id));
+    expect(handle).toEqual({ ...richHandle, id: 'managed session-1' });
+
+    await routing.cancel(handle, 'done');
+    await routing.collectOutput(handle);
+
+    for (const method of ['cancel', 'collectOutput']) {
+      const call = managed.calls.find((c) => c.method === method);
+      expect(call?.args[0]).toEqual(richHandle);
+    }
+  });
+
+  it('dispatches a bare (unprefixed) handle to defaultProvider completely unchanged', async () => {
+    // Every managed-only run persists a bare handle: its composition never
+    // built this facade. A facade that is nonetheless in play (the control
+    // plane builds one whenever kimi is configured) must pass it straight
+    // through, not reject it as malformed.
+    const kimi = createStubProvider();
+    const managed = createStubProvider();
+    const routing = createRoutingRuntimeProvider({
+      providers: { kimi, managed },
+      defaultProvider: 'managed',
+      route: () => undefined,
+    });
+
+    const bare = {
+      id: 'session_abc123',
+      ownershipCapability: 'cap-abc',
+    } as RuntimeHandle;
+    await routing.cancel(bare, 'stop');
+    await routing.cleanup(bare);
+
+    expect(managed.calls.map((c) => c.method)).toEqual(['cancel', 'cleanup']);
+    expect(managed.calls[0]?.args[0]).toBe(bare);
+    expect(kimi.calls).toEqual([]);
+  });
+
+  it('still routes a kimi-prefixed handle to kimi and still throws on an unknown prefix', async () => {
+    const kimi = createStubProvider();
+    const managed = createStubProvider();
+    const routing = createRoutingRuntimeProvider({
+      providers: { kimi, managed },
+      defaultProvider: 'managed',
+      route: () => undefined,
+    });
+
+    await routing.cancel({ id: 'kimi kimi_abc123' }, 'stop');
+    expect(kimi.calls.map((c) => c.method)).toEqual(['cancel']);
+    expect(kimi.calls[0]?.args[0]).toEqual({ id: 'kimi_abc123' });
+    expect(managed.calls).toEqual([]);
+
+    await expect(routing.cancel({ id: 'nope session-1' })).rejects.toThrow(
+      RoutingRuntimeProviderError,
+    );
   });
 
   it('rejects an empty providers map', () => {

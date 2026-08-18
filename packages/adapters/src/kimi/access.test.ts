@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
-import { createKimiLocalAccessStore } from './access.js';
+import {
+  createKimiLocalAccessStore,
+  toKimiSandboxMountPath,
+} from './access.js';
+
+describe('toKimiSandboxMountPath', () => {
+  it('maps managed container-absolute mounts onto workdir-relative paths', () => {
+    expect(toKimiSandboxMountPath('/workspace/inputs/source-bundle.json')).toBe(
+      'inputs/source-bundle.json',
+    );
+    expect(toKimiSandboxMountPath('/workspace/inputs/changes.json')).toBe(
+      'inputs/changes.json',
+    );
+  });
+
+  it('strips leading slashes from any other absolute path and leaves relative paths alone', () => {
+    expect(toKimiSandboxMountPath('/a/b.txt')).toBe('a/b.txt');
+    expect(toKimiSandboxMountPath('./inputs/x.json')).toBe('inputs/x.json');
+    expect(toKimiSandboxMountPath('inputs/x.json')).toBe('inputs/x.json');
+  });
+});
 
 describe('createKimiLocalAccessStore', () => {
   it('round-trips staged files through resolveFile', async () => {
@@ -13,7 +33,8 @@ describe('createKimiLocalAccessStore', () => {
     expect(resources).toHaveLength(1);
     const resource = resources[0]!;
     expect(resource.type).toBe('file');
-    expect(resource.mountPath).toBe('/workspace/inputs/hello.txt');
+    // Staging normalizes the managed-shaped mount path for the sandbox.
+    expect(resource.mountPath).toBe('inputs/hello.txt');
     expect(resource.fileId).toMatch(/^kimi-file-[0-9a-f]{32}$/);
     await expect(store.resolveFile(resource.fileId)).resolves.toEqual(bytes);
   });

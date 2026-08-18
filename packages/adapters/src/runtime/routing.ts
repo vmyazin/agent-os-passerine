@@ -29,6 +29,18 @@ export interface RoutingRuntimeProviderOptions {
 
 const HANDLE_DELIMITER = ' ';
 
+/** Registry key the kimi runtime is registered under by every composition. */
+const KIMI_RUNTIME_ID = 'kimi';
+
+/**
+ * Opaque-id prefixes minted by `KimiLocalAccessStore`
+ * (`packages/adapters/src/kimi/access.ts`) for the files/credentials a
+ * kimi-routed step staged in-process. They are the ownership signal
+ * `cleanupAccess` partitions on: anything else was minted by the managed
+ * provider's session-access upload and must only ever be handed back to it.
+ */
+const KIMI_ACCESS_ID_PREFIXES = ['kimi-file-', 'kimi-cred-'] as const;
+
 /**
  * Fans out a single `RuntimeProvider` port across multiple underlying
  * providers, routing each agent (via `route`, falling back to
@@ -63,8 +75,16 @@ export function createRoutingRuntimeProvider(
     return provider;
   }
 
+  /**
+   * Prefixes the handle's id with its owning runtime while preserving every
+   * other field the underlying provider put on it. Managed handles are
+   * `ManagedAgentsRuntimeHandle`s carrying `ownershipCapability`, `runId`,
+   * `stepId`, `credentialRefs`, `uploadedFileIds`, `deadlineAt`, ... — all of
+   * which ownership assertion and cleanup read back off the handle, so
+   * rebuilding a bare `{id}` here would silently break them.
+   */
   function wrapHandle(runtimeId: string, handle: RuntimeHandle): RuntimeHandle {
-    return { id: `${runtimeId}${HANDLE_DELIMITER}${handle.id}` };
+    return { ...handle, id: `${runtimeId}${HANDLE_DELIMITER}${handle.id}` };
   }
 
   /**
@@ -95,6 +115,22 @@ export function createRoutingRuntimeProvider(
     );
   }
 
+  /**
+   * Dispatch rule for an incoming handle:
+   *
+   * - **No delimiter** — the handle belongs to `defaultProvider` and is
+   *   passed through completely unchanged. Compositions only introduce this
+   *   facade for runs that actually need a non-default runtime, so a handle
+   *   persisted by a facade-less run (every managed-only run, and every run
+   *   that predates routing) is bare. Treating bare as "malformed" is what
+   *   made the control plane reject perfectly good managed handles whenever
+   *   `KIMI_API_KEY` happened to be set.
+   * - **`<runtimeId> <innerId>`** — dispatch to `providers[runtimeId]`,
+   *   handing it the handle with its original (unprefixed) id and every
+   *   other field intact.
+   * - **Unknown `<runtimeId>`** — fails closed with
+   *   `RoutingRuntimeProviderError`.
+   */
   function unwrapHandle(handle: RuntimeHandle): {
     runtimeId: string;
     provider: RuntimeProvider;
@@ -102,14 +138,34 @@ export function createRoutingRuntimeProvider(
   } {
     const delimiterIndex = handle.id.indexOf(HANDLE_DELIMITER);
     if (delimiterIndex === -1) {
-      throw new RoutingRuntimeProviderError(
-        `malformed routed handle '${handle.id}'`,
-      );
+      return {
+        runtimeId: defaultProvider,
+        provider: resolveProvider(defaultProvider),
+        inner: handle,
+      };
     }
     const runtimeId = handle.id.slice(0, delimiterIndex);
     const innerId = handle.id.slice(delimiterIndex + 1);
     const provider = resolveProvider(runtimeId);
-    return { runtimeId, provider, inner: { id: innerId } };
+    return { runtimeId, provider, inner: { ...handle, id: innerId } };
+  }
+
+  /**
+   * Which runtime owns a staged access id. Kimi's local access store mints
+   * `kimi-file-*` / `kimi-cred-*`; every other id came from the managed
+   * provider's session-access upload. Ids that look kimi-owned still fall
+   * back to `defaultProvider` when no kimi provider is registered, so
+   * nothing is ever silently dropped.
+   */
+  function accessOwner(id: string): string {
+    const kimiRegistered = Object.prototype.hasOwnProperty.call(
+      providers,
+      KIMI_RUNTIME_ID,
+    );
+    return kimiRegistered &&
+      KIMI_ACCESS_ID_PREFIXES.some((prefix) => id.startsWith(prefix))
+      ? KIMI_RUNTIME_ID
+      : defaultProvider;
   }
 
   return {
@@ -189,13 +245,36 @@ export function createRoutingRuntimeProvider(
       readonly resources: readonly RuntimeFileResource[];
       readonly credentialRefs: readonly string[];
     }): Promise<void> {
-      // Same all-or-nothing fan-out as syncEnvironment: a rejection from one
-      // provider fails the call, but every provider that defines
-      // cleanupAccess still gets invoked.
+      // Partitioned by owning runtime (see accessOwner) rather than fanned
+      // out: handing kimi-local ids to the managed provider would make it
+      // issue deletes for file ids that were never uploaded to Anthropic
+      // (and vice versa). Still all-or-nothing across the partitions -- a
+      // rejection from one owner fails the call, but every owner with work
+      // to do is invoked.
+      const partitions = new Map<
+        string,
+        { resources: RuntimeFileResource[]; credentialRefs: string[] }
+      >();
+      const partition = (runtimeId: string) => {
+        const existing = partitions.get(runtimeId);
+        if (existing !== undefined) return existing;
+        const created = { resources: [], credentialRefs: [] };
+        partitions.set(runtimeId, created);
+        return created;
+      };
+      for (const resource of input.resources) {
+        partition(accessOwner(resource.fileId)).resources.push(resource);
+      }
+      for (const ref of input.credentialRefs) {
+        partition(accessOwner(ref)).credentialRefs.push(ref);
+      }
       await Promise.all(
-        Object.values(providers).map((provider) =>
-          provider.cleanupAccess ? provider.cleanupAccess(input) : undefined,
-        ),
+        [...partitions].map(([runtimeId, owned]) => {
+          const provider = resolveProvider(runtimeId);
+          return provider.cleanupAccess
+            ? provider.cleanupAccess(owned)
+            : undefined;
+        }),
       );
     },
 

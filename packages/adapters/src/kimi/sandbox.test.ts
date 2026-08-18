@@ -183,6 +183,19 @@ describe('createKimiSandbox', () => {
     expect(result.exitCode).toBe(124);
   }, 10_000);
 
+  it('kills the child promptly when the supplied signal aborts', async () => {
+    const sandbox = await makeSandbox();
+    const controller = new AbortController();
+    const started = Date.now();
+    const running = sandbox.runBash('sleep 30', { signal: controller.signal });
+    controller.abort();
+
+    const result = await running;
+
+    expect(result.exitCode).not.toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
   it('truncates stdout over 64 KiB with a marker', async () => {
     const sandbox = await makeSandbox();
     const result = await sandbox.runBash('yes a | head -c 200000', {

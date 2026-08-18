@@ -84,9 +84,15 @@ Stated limitations, not silent gaps:
   the agent itself already wrote into the workdir during the same session.
   An agent can therefore steer the environment its own later commands (and
   a _trusted_ command observed via `observeCommand`, which shares the same
-  workdir) run against. Operators should keep the trusted verification role
-  routed to the managed runtime, not Kimi, until this sandbox gets real
-  container isolation.
+  workdir) run against. The verification role is therefore **unsupported on
+  Kimi and enforced as such** — see Routing and composition below.
+
+The agent-supplied `bash` `timeoutMs` is clamped to 120 s (advertised in the
+tool schema and re-clamped in the executor, since a model may ignore the
+schema), and every `runBash` — the agent's own calls and `observeCommand`'s
+trusted one — is bound to the session's `AbortSignal`, so `cancel()` /
+`cleanup()` kills the child instead of waiting the command out while holding
+the per-session mutex the workdir destroy needs.
 
 Sessions are worker-local process state (an in-memory `Map`, not anything
 persisted): a worker restart loses every live Kimi session outright.
@@ -141,9 +147,26 @@ which runtime each agent resolved to, `start` dispatches to that runtime,
 and every `RuntimeHandle` it issues is prefixed with its owning runtime id
 (`"managed <id>"` / `"kimi <id>"`) so later calls — `events`, `send`,
 `resume`, `cancel`, `collectOutput`, `usage`, `observeCommand`, `cleanup` —
-route back to the same provider the session was started on. A handle whose
-prefix names an unregistered provider fails closed
-(`RoutingRuntimeProviderError`).
+route back to the same provider the session was started on. Prefixing
+preserves the rest of the handle object (`{...handle, id: prefixed}`): a
+managed handle carries `ownershipCapability`, `runId`, `stepId`,
+`credentialRefs`, `uploadedFileIds`, `deadlineAt`, and the managed provider
+reads those back off the handle for ownership assertion and cleanup.
+
+Incoming handles dispatch by exactly three rules:
+
+1. `<runtimeId> <innerId>` → `providers[runtimeId]`, which receives the
+   handle with its original unprefixed id and every other field intact.
+2. **No delimiter → the default provider, passed through unchanged.** A
+   composition only introduces the facade for a run that actually needs a
+   non-default runtime, so every managed-only run's handle is bare; a bare
+   handle is not malformed, it is a default-provider handle.
+3. An unknown `<runtimeId>` fails closed (`RoutingRuntimeProviderError`).
+
+`cleanupAccess` is partitioned by owning runtime rather than fanned out:
+`kimi-file-*` / `kimi-cred-*` ids (minted by `KimiLocalAccessStore`) go to
+the kimi provider only, everything else to the default provider, so neither
+provider is ever asked to release ids it never issued.
 
 Production composition
 (`createProductionFeatureWorkflowFromEnv`) builds the Anthropic managed
@@ -156,7 +179,7 @@ common case, and every run before this feature existed) keeps producing the
 exact same bare, unprefixed managed handle ids it always has, so existing
 persisted/sealed handles are unaffected.
 
-Three fail-closed rules apply at composition, before any session work
+Four fail-closed rules apply at composition, before any session work
 starts:
 
 1. A run that resolves any role to the `kimi` runtime key while
@@ -168,24 +191,38 @@ runtime`) — there is no silent fallback to the managed runtime.
    configured). A routing table naming an unbuilt or misspelled runtime
    fails the same way, instead of quietly defaulting that role onto
    `managed`.
-3. **Behavior change:** this makes `config.runtime.provider` load-bearing
+3. **The `verification` role may not route to `kimi`.** Its trusted command
+   (`exactTrustedCommand`) bakes container-absolute paths — `rm -rf
+/workspace/repo`, `node /workspace/inputs/materialize.mjs` — which on the
+   containerless Kimi sandbox would execute against the worker host's real
+   filesystem. A config that resolves `verification` onto `kimi` throws
+   `the verification role cannot route to the kimi runtime; route it to
+managed`. This is enforced, not merely recommended.
+4. **Behavior change:** this makes `config.runtime.provider` load-bearing
    for the first time. Any resolved runtime key outside `{managed, kimi}`
    now fails closed at composition — including the legacy starter value
    `provider: local`, which `agentos/example.yaml`'s `runtime.provider` used
    before this feature (when the routing section was present but unwired
    and nothing ever read it). Configurations must now name `provider:
-managed` (or route a model provider to `kimi`); the starter config was
-   updated accordingly.
+managed` (or route a model provider to `kimi`); both
+   `agentos/example.yaml` and the CLI's `STARTER_CONFIG`
+   (`apps/cli/src/config-files.ts`) were updated accordingly.
 
 The control plane's independent cancellation-path runtime
 (`apps/control-plane/src/application/runtime.ts`,
-`buildCancellationRuntime`) composes the same two providers so a stored
+`composeCancellationRuntime`) composes the same two providers whenever
+`KIMI_API_KEY` is configured — not only for kimi-routed runs — so a stored
 `kimi <id>` handle can still be cancelled/cleaned up outside the Trigger
-worker that started it. `assertKimiHandleSupported` guards every
-handle-consuming call: if a persisted handle carries the `kimi ` prefix but
-`KIMI_API_KEY` has since been removed from the environment, the guard
-throws instead of letting the bare managed provider receive the prefixed
-string as if it were one of its own session ids.
+worker that started it. Dispatch there is purely handle-id driven: a
+`kimi <id>` handle reaches the kimi provider and a bare handle (what every
+managed-only run persists) passes through to the managed provider unchanged.
+`start`/`reconcileStart` deliberately bypass the facade and bind straight to
+the managed provider, so this process can never persist a `managed <id>`
+handle for a session the worker records bare. `assertKimiHandleSupported`
+guards every handle-consuming call: if a persisted handle carries the
+`kimi ` prefix but `KIMI_API_KEY` has since been removed from the
+environment, the guard throws instead of letting the bare managed provider
+receive the prefixed string as if it were one of its own session ids.
 
 `.env.example` documents `KIMI_API_KEY` (required only when a model profile
 routes to `kimi`), and the commented `KIMI_BASE_URL` (defaults to
@@ -206,9 +243,18 @@ its own worker's sessions and never adopts a foreign one. Token usage
 is returned by `usage()` in the standard `RuntimeUsage` shape alongside
 elapsed wall-clock `runtimeMs`, so the existing per-model pricing
 configuration (input/output microdollars, runtime minutes) prices Kimi work
-without any new billing code.
+without any new billing code. The running total is pushed into the session
+after **every** turn (`runKimiAgentLoop`'s `onUsage`), not only when the loop
+settles, so a session that is cancelled or cleaned up mid-run still reports
+the tokens it actually spent.
 
-Three provider behaviors are accepted v1 limitations, not implementation
+`cancel()`/`cleanup()` abort the session's `AbortSignal`, which now reaches
+the in-flight Moonshot request (threaded through `KimiTransport.send`) and is
+re-checked before every individual tool dispatch inside a turn — so a cancel
+that lands between two tool calls skips the rest of them instead of letting a
+post-cleanup `write` recreate the destroyed workdir.
+
+Two provider behaviors are accepted v1 limitations, not implementation
 mistakes:
 
 - **`send`/`resume` are accepted no-ops.** They're accepted rather than
@@ -216,12 +262,6 @@ mistakes:
   `runKimiAgentLoop` never reads that queue, so nothing injected through
   `send`/`resume` reaches an in-flight loop. `resume` merely forwards its
   `input` to `send`.
-- **`usage()` is meaningful only after session completion.** `session.usage`
-  starts at `{inputTokens: 0, outputTokens: 0}` and is only assigned once,
-  from the loop's final accumulated total, when the whole `runKimiAgentLoop`
-  promise settles (submission, turn limit, or cancellation) — not per turn.
-  A `usage()` call made while the loop is still running therefore always
-  sees the zeroed initial value, never a live in-flight token count.
 - **`maxCostMicrodollars` is not enforced by the provider.** Unlike the
   Managed Agents provider (`managedBudget` in
   `packages/adapters/src/managed-agents/provider.ts`), `start()` never
@@ -249,7 +289,14 @@ bytes/token the managed path would otherwise upload into
 `KimiLocalAccessStore`
 (`packages/adapters/src/kimi/access.ts`) — an in-process map from opaque
 `kimi-file-*`/`kimi-cred-*` ids to bytes/bearer — instead of calling
-`managedProvider.provisionSessionAccess`. Discarding those staged entries
+`managedProvider.provisionSessionAccess`. Staging also rewrites the mount
+paths: the caller hands over the same container-absolute paths the managed
+uploader takes, and `toKimiSandboxMountPath` maps them onto the sandbox by
+stripping the leading `/workspace/` (`/workspace/inputs/source-bundle.json`
+→ `inputs/source-bundle.json`), because the per-session workdir _is_ that
+session's `/workspace` and the sandbox rejects absolute paths outright. A
+Kimi-routed agent therefore finds its inputs at workdir-relative
+`inputs/…`. Discarding those staged entries
 (`cleanupAccess`) is wired to `store.discard(...)` in the Trigger worker
 process that actually staged them (`createKimiRuntimeProviderFromEnv`'s
 default `wireAccessCleanup: true`); the control plane's own cancellation

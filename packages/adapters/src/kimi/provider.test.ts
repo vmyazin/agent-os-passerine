@@ -12,11 +12,50 @@ import type {
 } from '@agentos/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createKimiLocalAccessStore } from './access.js';
 import {
   createKimiRuntimeProvider,
   KimiRuntimeProviderError,
 } from './provider.js';
+import type { KimiSandbox } from './sandbox.js';
 import type { KimiTransport } from './types.js';
+
+/**
+ * Records every runBash invocation the provider makes (the agent's `bash`
+ * tool and `observeCommand` alike) while still running the real sandbox, so
+ * tests can assert on what is actually handed to the child process: the
+ * clamped timeout and the session's abort signal.
+ */
+const { runBashCalls } = vi.hoisted(() => ({
+  runBashCalls: [] as {
+    command: string;
+    options: { timeoutMs?: number; signal?: AbortSignal } | undefined;
+    result: Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  }[],
+}));
+
+vi.mock('./sandbox.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sandbox.js')>();
+  return {
+    ...actual,
+    createKimiSandbox: async (
+      options: Parameters<typeof actual.createKimiSandbox>[0],
+    ): Promise<KimiSandbox> => {
+      const sandbox = await actual.createKimiSandbox(options);
+      return Object.freeze({
+        ...sandbox,
+        runBash: (
+          command: string,
+          runOptions?: { timeoutMs?: number; signal?: AbortSignal },
+        ) => {
+          const result = sandbox.runBash(command, runOptions);
+          runBashCalls.push({ command, options: runOptions, result });
+          return result;
+        },
+      });
+    },
+  };
+});
 
 const OWNERSHIP_SECRET = 'x'.repeat(32); // exactly 32 bytes, the minimum
 
@@ -56,6 +95,7 @@ async function newSandboxRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  runBashCalls.splice(0);
   await Promise.all(
     tempRoots
       .splice(0)
@@ -846,6 +886,195 @@ describe('createKimiRuntimeProvider', () => {
     await expect(fs.stat(workdir)).rejects.toThrow();
     const reconciled = await provider.reconcileStart!(baseRequest());
     expect(reconciled).toBeUndefined();
+  });
+
+  it('materializes a staged managed-shaped absolute mount into the workdir at the mapped path', async () => {
+    // The realistic seam: production staging hands over the same
+    // container-absolute mount paths the managed uploader takes.
+    const store = createKimiLocalAccessStore();
+    const body = '{"version":"source-bundle-v1"}';
+    const staged = store.stage({
+      files: [
+        {
+          bytes: new TextEncoder().encode(body),
+          mountPath: '/workspace/inputs/source-bundle.json',
+        },
+      ],
+      credentials: [],
+    });
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: store.resolveFile,
+    });
+
+    const handle = await provider.start(
+      baseRequest({ resources: staged.resources }),
+    );
+
+    await expect(
+      fs.readFile(
+        path.join(sandboxRoot, handle.id, 'inputs', 'source-bundle.json'),
+        'utf8',
+      ),
+    ).resolves.toBe(body);
+  });
+
+  it('destroys the workdir when materialization fails, leaving nothing behind', async () => {
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: async () => new TextEncoder().encode('{}'),
+    });
+
+    await expect(
+      provider.start(
+        baseRequest({
+          resources: [
+            {
+              type: 'file',
+              fileId: 'kimi-file-abc',
+              // Unnormalized: the sandbox rejects absolute paths.
+              mountPath: '/workspace/inputs/source-bundle.json',
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/absolute paths are not allowed/);
+
+    await expect(fs.readdir(sandboxRoot)).resolves.toEqual([]);
+  });
+
+  it('clamps an agent-supplied bash timeout to the 120s ceiling and binds the child to the session signal', async () => {
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'bash',
+            input: { command: 'true', timeoutMs: 86_400_000 },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_2',
+            name: 'submit_result',
+            input: { ok: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(baseRequest());
+    await collectEvents(provider, handle);
+
+    expect(runBashCalls).toHaveLength(1);
+    expect(runBashCalls[0]?.options?.timeoutMs).toBe(120_000);
+    expect(runBashCalls[0]?.options?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('advertises the bash timeout ceiling in the tool schema it sends to the model', async () => {
+    const { transport, calls } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'submit_result',
+            input: { ok: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(baseRequest());
+    await collectEvents(provider, handle);
+
+    const bashTool = calls[0]?.tools.find((tool) => tool.name === 'bash');
+    expect(
+      (
+        bashTool?.input_schema as {
+          properties: { timeoutMs: { maximum: number } };
+        }
+      ).properties.timeoutMs.maximum,
+    ).toBe(120_000);
+  });
+
+  it('cancel kills an in-flight bash child instead of waiting out its timeout', async () => {
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'bash',
+            input: { command: 'sleep 30' },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(baseRequest());
+    await vi.waitFor(() => expect(runBashCalls).toHaveLength(1));
+
+    await provider.cancel(handle, 'stop');
+
+    // Resolves promptly (the test would otherwise time out on `sleep 30`).
+    const result = await runBashCalls[0]!.result;
+    expect(result.exitCode).not.toBe(0);
+  }, 10_000);
+
+  it('reports the tokens a cancelled session actually spent', async () => {
+    let resolveSecondTurn: (() => void) | undefined;
+    let sends = 0;
+    const transport: KimiTransport = {
+      async send() {
+        sends += 1;
+        if (sends === 1) {
+          return {
+            content: [
+              {
+                type: 'tool_use' as const,
+                id: 'call_1',
+                name: 'bash',
+                input: { command: 'true' },
+              },
+            ],
+            stopReason: 'tool_use',
+            usage: { inputTokens: 10, outputTokens: 5 },
+          };
+        }
+        // Second turn never settles: the session is still running when the
+        // cancel arrives, which is exactly when usage() used to read zero.
+        await new Promise<void>((resolve) => {
+          resolveSecondTurn = resolve;
+        });
+        throw new Error('unreachable');
+      },
+    };
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(baseRequest());
+    await vi.waitFor(() => expect(sends).toBe(2));
+    await provider.cancel(handle, 'stop');
+
+    const usage = await provider.usage(handle);
+    expect(usage.inputTokens).toBe(10);
+    expect(usage.outputTokens).toBe(5);
+    resolveSecondTurn?.();
   });
 
   it('cleanupAccess forwards resources/credentialRefs to the accessCleanup hook and is a no-op without one', async () => {

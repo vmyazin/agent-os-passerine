@@ -155,6 +155,42 @@ export function assertKimiHandleSupported(
   }
 }
 
+/**
+ * Composes the control plane's recovery/cancellation runtime from an
+ * already-built managed provider and (when configured) the kimi provider.
+ *
+ * Dispatch is entirely handle-id driven: a `kimi <id>` handle reaches the
+ * kimi provider, and a bare (unprefixed) handle -- what every managed-only
+ * run's Trigger worker persists, since that composition never builds a
+ * routing facade at all -- passes through to the managed provider byte for
+ * byte.
+ *
+ * `start`/`reconcileStart` deliberately bypass the facade and bind straight
+ * to the managed provider. This recovery path never calls `syncAgent`, so
+ * the facade could only ever route them to the default provider anyway --
+ * but it would also *prefix* the handle it returned (`managed <id>`),
+ * persisting an id shape the Trigger worker never produces for the same
+ * session. Binding directly keeps both processes agreeing byte for byte on
+ * what a managed handle id looks like.
+ */
+export function composeCancellationRuntime(input: {
+  readonly managed: RuntimeProvider;
+  readonly kimi: RuntimeProvider | undefined;
+}): RuntimeProvider {
+  const { managed, kimi } = input;
+  if (kimi === undefined) return managed;
+  const routed = createRoutingRuntimeProvider({
+    providers: { managed, kimi },
+    defaultProvider: 'managed',
+    route: () => undefined,
+  });
+  return {
+    ...routed,
+    start: (request) => managed.start(request),
+    reconcileStart: async (request) => managed.reconcileStart?.(request),
+  };
+}
+
 async function buildCancellationRuntime(): Promise<RuntimeProvider> {
   const ownershipSecret = requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET');
   const managed = await createManagedAgentsRuntimeProvider({
@@ -172,21 +208,7 @@ async function buildCancellationRuntime(): Promise<RuntimeProvider> {
     store: createKimiLocalAccessStore(),
     wireAccessCleanup: false,
   });
-  if (kimiProvider === undefined) return managed;
-  // Cancel/cleanup/events dispatch entirely off the handle-id prefix
-  // (`unwrapHandle`), so wrapping here is safe and self-consistent: this
-  // function builds one singleton for the whole control-plane process, and
-  // every handle it ever stores (via runtimeHandles.store, right after this
-  // same instance's own reconcileStart/start) was produced by this same
-  // wrapped provider. `route` never needs to resolve a real routing
-  // decision -- this recovery path never calls syncAgent, so
-  // `agentRuntimes` is always empty and `reconcileStart`/`start` already
-  // fall back to `defaultProvider` regardless of what `route` returns.
-  return createRoutingRuntimeProvider({
-    providers: { managed, kimi: kimiProvider },
-    defaultProvider: 'managed',
-    route: () => undefined,
-  });
+  return composeCancellationRuntime({ managed, kimi: kimiProvider });
 }
 
 function cancellationRuntime(): RuntimeProvider {

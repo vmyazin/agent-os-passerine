@@ -46,7 +46,10 @@ import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
 import { createFeatureWorkflowTaskHandler } from './task-handler.js';
 import { createTriggerApprovalWaiter } from './trigger-adapter.js';
-import type { WorkflowPublicationAuthority } from './types.js';
+import type {
+  FeatureWorkflowRoles,
+  WorkflowPublicationAuthority,
+} from './types.js';
 import { createTrustedWorkflowVerifier } from './verifier.js';
 import { createDurableFeatureWorkflow } from './workflow.js';
 
@@ -243,6 +246,60 @@ export function resolveRuntimeKey(
   if (model === undefined)
     throw new Error(`config has no model profile for '${definition.model}'`);
   return config.runtime.routing[model.provider] ?? config.runtime.provider;
+}
+
+/**
+ * Fail-closed routing resolution for one run's feature roles, evaluated at
+ * composition time before any session work starts. Returns the runtime key
+ * each role's agent resolved to, plus whether the run needs the kimi
+ * provider at all (only then is the routing facade introduced).
+ *
+ * Rejects, with a named error:
+ *
+ * - a role routed to `kimi` while no kimi provider was built
+ *   (`KIMI_API_KEY` absent) -- never a silent fallback to managed;
+ * - a role routed to any runtime key outside the built provider set (a typo,
+ *   or the legacy `provider: local`);
+ * - the `verification` role routed to `kimi` at all. Its trusted command
+ *   bakes container-absolute paths (`rm -rf /workspace/repo`, `node
+ *   /workspace/inputs/materialize.mjs`; see `exactTrustedCommand`), which on
+ *   the containerless kimi sandbox would run against the worker host's real
+ *   filesystem.
+ */
+export function resolveRoleRuntimeKeys(
+  config: AgentOsConfig,
+  roles: FeatureWorkflowRoles,
+  options: {
+    readonly builtRuntimeKeys: ReadonlySet<string>;
+    readonly kimiConfigured: boolean;
+  },
+): {
+  readonly runtimeKeys: ReadonlyMap<string, string>;
+  readonly requiresKimi: boolean;
+} {
+  const runtimeKeys = new Map<string, string>();
+  let requiresKimi = false;
+  for (const [roleName, role] of Object.entries(roles)) {
+    const runtimeKey = resolveRuntimeKey(config, role.agent);
+    runtimeKeys.set(role.agent.id, runtimeKey);
+    if (runtimeKey === 'kimi' && !options.kimiConfigured) {
+      throw new Error(
+        `KIMI_API_KEY is required: config routes '${role.agent.id}' to the kimi runtime`,
+      );
+    }
+    if (!options.builtRuntimeKeys.has(runtimeKey)) {
+      throw new Error(
+        `unknown runtime '${runtimeKey}' routed for agent '${role.agent.id}'`,
+      );
+    }
+    if (roleName === 'verification' && runtimeKey === 'kimi') {
+      throw new Error(
+        'the verification role cannot route to the kimi runtime; route it to managed',
+      );
+    }
+    if (runtimeKey === 'kimi') requiresKimi = true;
+  }
+  return { runtimeKeys, requiresKimi };
 }
 
 export async function createProductionFeatureWorkflowFromEnv(
@@ -535,34 +592,14 @@ export async function createProductionFeatureWorkflowFromEnv(
         artifactMcpUrl,
         verificationRegistryHosts,
       });
-      // Fail-closed routing check, before any session work: a config that
-      // routes a role's agent to the kimi runtime with no KIMI_API_KEY
-      // configured must reject with a named, actionable error rather than
-      // silently falling back to the managed runtime. Every resolved
-      // runtime key is also checked against the actually-built provider
-      // set (not just 'kimi' specifically), so a routing table naming an
-      // unbuilt/unknown runtime (e.g. a typo, or a provider this
-      // composition never built) fails closed here too instead of quietly
-      // running that role on the managed provider by default.
+      // Fail-closed routing check, before any session work (see
+      // resolveRoleRuntimeKeys for the three rules it enforces).
       const builtRuntimeKeys = new Set<string>(['managed']);
       if (kimiProvider !== undefined) builtRuntimeKeys.add('kimi');
-      const roleRuntimeKeys = new Map<string, string>();
-      let requiresKimi = false;
-      for (const role of Object.values(roleDefinitions)) {
-        const runtimeKey = resolveRuntimeKey(config, role.agent);
-        roleRuntimeKeys.set(role.agent.id, runtimeKey);
-        if (runtimeKey === 'kimi' && kimiProvider === undefined) {
-          throw new Error(
-            `KIMI_API_KEY is required: config routes '${role.agent.id}' to the kimi runtime`,
-          );
-        }
-        if (!builtRuntimeKeys.has(runtimeKey)) {
-          throw new Error(
-            `unknown runtime '${runtimeKey}' routed for agent '${role.agent.id}'`,
-          );
-        }
-        if (runtimeKey === 'kimi') requiresKimi = true;
-      }
+      const { requiresKimi } = resolveRoleRuntimeKeys(config, roleDefinitions, {
+        builtRuntimeKeys,
+        kimiConfigured: kimiProvider !== undefined,
+      });
       // Only wrap the managed provider in the routing facade when this run's
       // config actually routes at least one role to kimi -- the facade
       // prefixes every handle id (`managed <id>` / `kimi <id>`), and that

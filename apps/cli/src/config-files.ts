@@ -134,7 +134,7 @@ goals:
   maxRetries: 2
   timeoutMs: 3600000
 runtime:
-  provider: local
+  provider: managed
   routing: {}
 `;
 

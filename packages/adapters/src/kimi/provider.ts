@@ -69,6 +69,16 @@ export function createKimiRuntimeProvider(
 
 // --- tool definitions -------------------------------------------------
 
+/**
+ * Hard ceiling on the agent-supplied `bash` timeout. The tool call holds the
+ * per-session mutex for its whole duration -- the same mutex `cleanup()`'s
+ * workdir destroy and `observeCommand` wait on -- so an unbounded,
+ * model-chosen timeout would let the agent park the session indefinitely.
+ * Advertised in the tool schema and clamped again in the executor, since a
+ * model is free to ignore the schema.
+ */
+const MAX_BASH_TIMEOUT_MS = 120_000;
+
 const BASH_TOOL: KimiToolDefinition = {
   name: 'bash',
   description: 'Run a bash command in the sandbox working directory.',
@@ -76,7 +86,11 @@ const BASH_TOOL: KimiToolDefinition = {
     type: 'object',
     properties: {
       command: { type: 'string' },
-      timeoutMs: { type: 'integer', minimum: 1 },
+      timeoutMs: {
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_BASH_TIMEOUT_MS,
+      },
     },
     required: ['command'],
     additionalProperties: false,
@@ -343,13 +357,23 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     });
     if (resources.length > 0) {
       const resolveFile = this.#resolveFile!;
-      const materialized = await Promise.all(
-        resources.map(async (resource) => ({
-          path: resource.mountPath ?? resource.fileId,
-          content: await resolveFile(resource.fileId),
-        })),
-      );
-      await sandbox.materialize(materialized);
+      // The workdir already exists at this point, so any failure while
+      // resolving or writing the mounted files (an unknown file id, a mount
+      // path the sandbox rejects, a disk error) must destroy it before
+      // rethrowing -- start() never returns a handle here, so nothing else
+      // would ever be able to clean it up.
+      try {
+        const materialized = await Promise.all(
+          resources.map(async (resource) => ({
+            path: resource.mountPath ?? resource.fileId,
+            content: await resolveFile(resource.fileId),
+          })),
+        );
+        await sandbox.materialize(materialized);
+      } catch (error) {
+        await sandbox.destroy().catch(() => undefined);
+        throw error;
+      }
     }
 
     const handle: RuntimeHandle = Object.freeze({ id: sessionId });
@@ -406,6 +430,17 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       signal: controller.signal,
       onEvent: (event) =>
         this.#emit(session, event.type, { detail: event.detail }),
+      // Per-turn, not just at settlement: a cancelled session's usage() has
+      // to report the tokens it actually spent. Assigned unconditionally --
+      // the totals are cumulative and monotonic for the life of the loop, so
+      // a turn that lands after cancellation only ever adds real spend (it
+      // can never revive or lower a terminal session's snapshot).
+      onUsage: (usage) => {
+        session.usage = {
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+        };
+      },
     }).then(
       (result) => {
         // A concurrent cancel()/cleanup()/timeout may have already
@@ -594,7 +629,12 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       // child-process env (PATH/HOME/LANG only) -- there is no channel for
       // the apiKey to reach it, satisfying the "never leak credentials to
       // observed commands" requirement without extra plumbing here.
-      const result = await session.sandbox.runBash(expectedCommand);
+      // Bound by the session's abort signal for the same reason the agent's
+      // own bash calls are: cancel()/cleanup() must be able to reclaim the
+      // mutex (and the workdir) without waiting out the command's timeout.
+      const result = await session.sandbox.runBash(expectedCommand, {
+        signal: session.controller.signal,
+      });
       const completedAt = this.#clock();
       return Object.freeze({
         command: expectedCommand,
@@ -681,12 +721,12 @@ async function runTool(
     switch (name) {
       case 'bash': {
         const parsed = bashInputSchema.parse(input);
-        const result = await session.sandbox.runBash(
-          parsed.command,
-          parsed.timeoutMs === undefined
-            ? undefined
-            : { timeoutMs: parsed.timeoutMs },
-        );
+        const result = await session.sandbox.runBash(parsed.command, {
+          ...(parsed.timeoutMs === undefined
+            ? {}
+            : { timeoutMs: Math.min(parsed.timeoutMs, MAX_BASH_TIMEOUT_MS) }),
+          signal: session.controller.signal,
+        });
         return {
           content: JSON.stringify({
             stdout: result.stdout,
