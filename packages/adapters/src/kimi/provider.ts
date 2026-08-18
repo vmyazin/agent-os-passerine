@@ -386,15 +386,19 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
         this.#emit(session, event.type, { detail: event.detail }),
     }).then(
       (result) => {
-        session.usage = {
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        };
+        // A concurrent cancel()/cleanup()/timeout may have already
+        // finalized this session (and emitted its own terminal event)
+        // while this turn was in flight; #terminate no-ops in that case so
+        // a late turn can never resurrect a cancelled run or overwrite its
+        // final usage snapshot with whatever this stale turn reports.
+        const alreadyTerminal = isTerminal(session.status);
+        if (!alreadyTerminal) {
+          session.usage = {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+          };
+        }
         if (result.status === 'submitted') {
-          // A concurrent cancel()/cleanup()/timeout may have already
-          // finalized this session (and emitted its own terminal event)
-          // while this turn was in flight; #terminate no-ops in that case
-          // so a late submit_result can never resurrect a cancelled run.
           if (
             this.#terminate(session, 'submitted', 'terminated', {
               reason: 'submitted',
@@ -698,6 +702,7 @@ async function runTool(
           bearer,
           'artifact.put',
           parsed,
+          session.controller.signal,
         );
         const metadata = extractPutMetadata(structured);
         session.putArtifacts.push({
@@ -730,6 +735,7 @@ async function runTool(
           bearer,
           'artifact.get',
           parsed,
+          session.controller.signal,
         );
         return { content: JSON.stringify(structured), isError: false };
       }
@@ -741,27 +747,55 @@ async function runTool(
   }
 }
 
+// Bounds every artifact MCP call so a stuck server can never hold the
+// per-session mutex (and therefore cancel()/cleanup()) open indefinitely.
+const ARTIFACT_MCP_TIMEOUT_MS = 60_000;
+
 async function callArtifactMcp(
   artifactMcp: ResolvedArtifactMcp,
   bearer: string,
   method: 'artifact.put' | 'artifact.get',
   args: Record<string, unknown>,
+  sessionSignal: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const response = await artifactMcp.fetchImpl(artifactMcp.url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      authorization: `Bearer ${bearer}`,
-      'mcp-protocol-version': ARTIFACT_MCP_PROTOCOL_VERSION,
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: randomUUID(),
-      method: 'tools/call',
-      params: { name: method, arguments: args },
-    }),
-  });
+  // Tied to the session's own abort signal (cancel()/cleanup()/timeout)
+  // *and* a fixed upper bound, so cancelling the session -- or a merely
+  // slow/hung Artifact MCP server -- always releases the mutex promptly
+  // instead of holding it open behind an unbounded fetch.
+  const signal = AbortSignal.any([
+    sessionSignal,
+    AbortSignal.timeout(ARTIFACT_MCP_TIMEOUT_MS),
+  ]);
+  let response: Response;
+  try {
+    response = await artifactMcp.fetchImpl(artifactMcp.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${bearer}`,
+        'mcp-protocol-version': ARTIFACT_MCP_PROTOCOL_VERSION,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: randomUUID(),
+        method: 'tools/call',
+        params: { name: method, arguments: args },
+      }),
+      signal,
+    });
+  } catch (error) {
+    // Normalize to a fixed, generic message regardless of what the
+    // underlying fetch implementation's abort/timeout error happens to say
+    // -- it must never be able to echo request details (the bearer is only
+    // ever sent as a header, never part of this thrown message).
+    if (signal.aborted) {
+      throw new Error('artifact MCP request was aborted or timed out', {
+        cause: error,
+      });
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new Error(
       `artifact MCP request failed with status ${response.status}`,

@@ -749,6 +749,70 @@ describe('createKimiRuntimeProvider', () => {
     ]);
   });
 
+  it('cleanup completes promptly even when an artifact tool call is stuck behind a hung fetchImpl', async () => {
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'artifact_put',
+            input: {
+              artifactId: 'report',
+              version: 1,
+              mediaType: 'text/plain',
+              contentBase64: Buffer.from('x').toString('base64'),
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const resolveCredential = vi.fn(async () => 'bearer-token');
+    // Mimics real fetch()'s AbortSignal contract: never settles on its own,
+    // but rejects once the signal it was given aborts. This is the
+    // scenario a stuck Artifact MCP server produces.
+    const fetchImpl = vi.fn(
+      (_url: Parameters<typeof fetch>[0], init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) {
+            reject(new Error('simulated abort'));
+            return;
+          }
+          signal?.addEventListener('abort', () => {
+            reject(new Error('simulated abort'));
+          });
+        }),
+    );
+
+    const { provider } = await makeProvider({
+      transport,
+      artifactMcp: {
+        url: 'https://control.agentos.test/api/mcp/artifacts',
+        resolveCredential,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    });
+
+    const handle = await provider.start(
+      baseRequest({ credentialRefs: ['vault_abc123'] }),
+    );
+
+    // Wait until the loop has issued the tool_call for artifact_put -- at
+    // that point it has synchronously queued onto the session mutex and is
+    // about to call the (permanently hanging, absent an abort) fetchImpl.
+    for await (const event of provider.events(handle)) {
+      if (event.type === 'tool_call') break;
+    }
+
+    const cleanupStarted = Date.now();
+    await provider.cleanup(handle);
+    expect(Date.now() - cleanupStarted).toBeLessThan(5_000);
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
   it('throws for credentialRefs without artifactMcp configuration (fail closed)', async () => {
     const { provider } = await makeProvider({
       transport: neverRespondingTransport(),
