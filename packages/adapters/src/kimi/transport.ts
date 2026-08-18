@@ -38,18 +38,20 @@ const contentBlockSchema = z.discriminatedUnion('type', [
     .strict(),
 ]);
 
-const responseSchema = z
-  .object({
-    content: z.array(contentBlockSchema),
-    stop_reason: z.string(),
-    usage: z
-      .object({
-        input_tokens: z.number(),
-        output_tokens: z.number(),
-      })
-      .strict(),
-  })
-  .strict();
+// The outer envelope and usage object are intentionally NOT `.strict()`:
+// real Anthropic-compatible Messages responses carry additional fields
+// (id, type, role, model, stop_sequence, container, cache token counts,
+// etc.) that this transport doesn't need. Fail-closed validation is scoped
+// to the content-block union above, where an unrecognized block type is a
+// genuine protocol violation worth rejecting.
+const responseSchema = z.object({
+  content: z.array(contentBlockSchema),
+  stop_reason: z.string().nullable(),
+  usage: z.object({
+    input_tokens: z.number(),
+    output_tokens: z.number(),
+  }),
+});
 
 export interface CreateKimiHttpTransportOptions {
   readonly apiKey: string;

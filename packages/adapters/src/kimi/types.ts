@@ -33,7 +33,7 @@ export interface KimiTransport {
     readonly maxTokens: number;
   }): Promise<{
     readonly content: readonly KimiContentBlock[];
-    readonly stopReason: string;
+    readonly stopReason: string | null;
     readonly usage: {
       readonly inputTokens: number;
       readonly outputTokens: number;

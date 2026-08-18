@@ -437,6 +437,50 @@ describe('createKimiHttpTransport', () => {
     }
   });
 
+  it('accepts a realistic full Anthropic Messages envelope with extra fields', async () => {
+    // Real Anthropic-compatible responses carry many fields beyond the four
+    // this transport cares about; a strict outer schema would reject this.
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        id: 'msg_01XyZAbCdEfGhIjKlMnOpQrS',
+        type: 'message',
+        role: 'assistant',
+        model: 'kimi-k2-turbo-preview',
+        content: [{ type: 'text', text: 'hello' }],
+        stop_reason: null,
+        stop_sequence: null,
+        container: null,
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 0,
+            ephemeral_1h_input_tokens: 0,
+          },
+        },
+      }),
+    );
+    const transport = createKimiHttpTransport({
+      apiKey: 'kimi-key',
+      fetchImpl,
+    });
+
+    const result = await transport.send({
+      model: 'kimi-k2-turbo-preview',
+      messages: [],
+      tools: [],
+      maxTokens: 32,
+    });
+
+    expect(result).toEqual({
+      content: [{ type: 'text', text: 'hello' }],
+      stopReason: null,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+  });
+
   it('throws KimiTransportError with a bounded body slice on a persistent non-2xx response', async () => {
     const fetchImpl = vi.fn<typeof fetch>(
       async () => new Response('x'.repeat(1000), { status: 500 }),

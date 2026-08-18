@@ -14,7 +14,7 @@ const DEFAULT_MAX_TURNS = 64;
 // as a caller-configurable option in this task's interface; use a fixed
 // generous budget for agent-loop turns.
 const MAX_TOKENS = 8192;
-const MAX_SUBMIT_RESULT_LENGTH = 256 * 1024;
+const MAX_SUBMIT_RESULT_BYTES = 256 * 1024;
 const STALL_PROMPT = 'Continue. Use submit_result to finish.';
 
 export interface RunKimiAgentLoopOptions {
@@ -156,10 +156,10 @@ function validateSubmitResult(
   } catch {
     return { ok: false, error: 'submit_result input is not JSON-serializable' };
   }
-  if (serialized.length > MAX_SUBMIT_RESULT_LENGTH) {
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_SUBMIT_RESULT_BYTES) {
     return {
       ok: false,
-      error: `submit_result payload exceeds ${MAX_SUBMIT_RESULT_LENGTH} characters`,
+      error: `submit_result payload exceeds ${MAX_SUBMIT_RESULT_BYTES} bytes`,
     };
   }
   return { ok: true };
