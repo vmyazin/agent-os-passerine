@@ -67,6 +67,34 @@ export function createRoutingRuntimeProvider(
     return { id: `${runtimeId}${HANDLE_DELIMITER}${handle.id}` };
   }
 
+  /**
+   * Looks up the runtime recorded for `agentId` at `syncAgent` time.
+   *
+   * `start` requires a prior `syncAgent` call and throws when the agent is
+   * unrecorded — starting a session for an unknown agent is always a bug.
+   * `reconcileStart` instead falls back to `defaultProvider`: it exists to
+   * recover in-flight sessions after a process restart, when `agentRuntimes`
+   * may be empty even though the agent was synced (and routed) in a prior
+   * process. Falling back lets the default provider report "no matching
+   * session" (`undefined`) so the workflow's absence reconciliation can
+   * proceed, instead of the routing facade itself blocking recovery.
+   */
+  function lookupRuntimeId(
+    agentId: string,
+    fallback: 'throw' | 'default',
+  ): string {
+    const recorded = agentRuntimes.get(agentId);
+    if (recorded) {
+      return recorded;
+    }
+    if (fallback === 'default') {
+      return defaultProvider;
+    }
+    throw new RoutingRuntimeProviderError(
+      `agent '${agentId}' was never synced`,
+    );
+  }
+
   function unwrapHandle(handle: RuntimeHandle): {
     runtimeId: string;
     provider: RuntimeProvider;
@@ -93,6 +121,9 @@ export function createRoutingRuntimeProvider(
     },
 
     async syncEnvironment(environment: RuntimeEnvironment): Promise<void> {
+      // Fan-out is all-or-nothing: if any provider rejects, the whole call
+      // rejects, but Promise.all still lets every provider's sync run (none
+      // are skipped because an earlier one failed).
       await Promise.all(
         Object.values(providers).map((provider) =>
           provider.syncEnvironment(environment),
@@ -101,12 +132,7 @@ export function createRoutingRuntimeProvider(
     },
 
     async start(request: RuntimeStartRequest): Promise<RuntimeHandle> {
-      const runtimeId = agentRuntimes.get(request.agentId);
-      if (!runtimeId) {
-        throw new RoutingRuntimeProviderError(
-          `agent '${request.agentId}' was never synced`,
-        );
-      }
+      const runtimeId = lookupRuntimeId(request.agentId, 'throw');
       const provider = resolveProvider(runtimeId);
       const handle = await provider.start(request);
       return wrapHandle(runtimeId, handle);
@@ -115,12 +141,7 @@ export function createRoutingRuntimeProvider(
     async reconcileStart(
       request: RuntimeStartRequest,
     ): Promise<RuntimeHandle | undefined> {
-      const runtimeId = agentRuntimes.get(request.agentId);
-      if (!runtimeId) {
-        throw new RoutingRuntimeProviderError(
-          `agent '${request.agentId}' was never synced`,
-        );
-      }
+      const runtimeId = lookupRuntimeId(request.agentId, 'default');
       const provider = resolveProvider(runtimeId);
       if (!provider.reconcileStart) {
         return undefined;
@@ -168,6 +189,9 @@ export function createRoutingRuntimeProvider(
       readonly resources: readonly RuntimeFileResource[];
       readonly credentialRefs: readonly string[];
     }): Promise<void> {
+      // Same all-or-nothing fan-out as syncEnvironment: a rejection from one
+      // provider fails the call, but every provider that defines
+      // cleanupAccess still gets invoked.
       await Promise.all(
         Object.values(providers).map((provider) =>
           provider.cleanupAccess ? provider.cleanupAccess(input) : undefined,

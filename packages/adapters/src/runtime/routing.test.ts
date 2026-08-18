@@ -317,7 +317,28 @@ describe('createRoutingRuntimeProvider', () => {
     expect(handle).toEqual({ id: 'kimi reconciled-1' });
   });
 
-  it('round-trips the wrapped handle id through events/collectOutput/usage/cleanup', async () => {
+  it('forwards reconcileStart to defaultProvider for an agent that was never synced (process-restart recovery), wrapping with the default provider prefix', async () => {
+    const kimi = createStubProvider();
+    const managed = createStubProvider({
+      withReconcileStart: true,
+      startHandleId: 'recovered-1',
+    });
+    const routing = createRoutingRuntimeProvider({
+      providers: { kimi, managed },
+      defaultProvider: 'managed',
+      route: () => undefined,
+    });
+
+    // No syncAgent call at all: simulates agentRuntimes being empty after a
+    // process restart while a session may still exist upstream.
+    const handle = await routing.reconcileStart?.(baseRequest('never-synced'));
+
+    expect(handle).toEqual({ id: 'managed recovered-1' });
+    expect(managed.calls.map((c) => c.method)).toEqual(['reconcileStart']);
+    expect(kimi.calls).toEqual([]);
+  });
+
+  it('round-trips the wrapped handle id through events/send/resume/collectOutput/usage/cleanup', async () => {
     const kimi = createStubProvider({ startHandleId: 'round-trip-1' });
     const routing = createRoutingRuntimeProvider({
       providers: { kimi },
@@ -333,14 +354,28 @@ describe('createRoutingRuntimeProvider', () => {
     const first = await iterator.next();
     expect(first.value?.id).toBe('evt-1');
 
+    await routing.send(handle, { text: 'hi' });
+    await routing.resume(handle, { resumed: true });
     await routing.collectOutput(handle);
     await routing.usage(handle);
     await routing.cleanup(handle);
 
-    for (const method of ['events', 'collectOutput', 'usage', 'cleanup']) {
+    for (const method of [
+      'events',
+      'send',
+      'resume',
+      'collectOutput',
+      'usage',
+      'cleanup',
+    ]) {
       const call = kimi.calls.find((c) => c.method === method);
       expect(call?.args[0]).toEqual({ id: 'round-trip-1' });
     }
+
+    const sendCall = kimi.calls.find((c) => c.method === 'send');
+    expect(sendCall?.args[1]).toEqual({ text: 'hi' });
+    const resumeCall = kimi.calls.find((c) => c.method === 'resume');
+    expect(resumeCall?.args[1]).toEqual({ resumed: true });
   });
 
   it('rejects an empty providers map', () => {
