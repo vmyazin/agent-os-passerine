@@ -294,6 +294,260 @@ describe('createKimiRuntimeProvider', () => {
     );
   });
 
+  it('a submit_result arriving after cancel does not resurrect the session', async () => {
+    let callCount = 0;
+    let resolveSecondCallStarted: () => void;
+    const secondCallStarted = new Promise<void>((resolve) => {
+      resolveSecondCallStarted = resolve;
+    });
+    let resolveSecondResponse: (value: SendResponse) => void;
+    const secondResponse = new Promise<SendResponse>((resolve) => {
+      resolveSecondResponse = resolve;
+    });
+    const transport: KimiTransport = {
+      async send() {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'call_1',
+                name: 'bash',
+                input: { command: 'true' },
+              },
+            ],
+            stopReason: 'tool_use',
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        }
+        resolveSecondCallStarted();
+        return secondResponse;
+      },
+    };
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(baseRequest());
+    await secondCallStarted;
+    await provider.cancel(handle, 'pre-empt');
+
+    // The in-flight turn resolves with a submit_result -- loop.ts returns
+    // status:'submitted' without ever re-checking the abort signal. The
+    // provider must not let this resurrect an already-cancelled session.
+    resolveSecondResponse!({
+      content: [
+        {
+          type: 'tool_use',
+          id: 'call_2',
+          name: 'submit_result',
+          input: { sneaky: true },
+        },
+      ],
+      stopReason: 'tool_use',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+
+    const events = await collectEvents(provider, handle);
+    const terminalEvents = events.filter(
+      (event) => event.type === 'terminated' || event.type === 'error',
+    );
+    expect(terminalEvents).toHaveLength(1);
+    expect(terminalEvents[0]?.type).toBe('terminated');
+    expect(
+      (terminalEvents[0]?.payload as { reason?: string } | undefined)?.reason,
+    ).toBe('pre-empt');
+
+    await expect(provider.collectOutput(handle)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  });
+
+  it('cancel with a never-resolving in-flight transport still lets collectOutput reject promptly', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(baseRequest());
+    await provider.cancel(handle, 'stuck');
+
+    // Must resolve without ever awaiting the (permanently pending) loop
+    // promise -- collectOutput fails fast once status is already terminal.
+    await expect(provider.collectOutput(handle)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  });
+
+  it('a rejecting transport fails the session without an unhandled rejection', async () => {
+    const transport: KimiTransport = {
+      async send() {
+        throw new Error('transport exploded');
+      },
+    };
+    const { provider } = await makeProvider({ transport });
+    const handle = await provider.start(baseRequest());
+
+    const events = await collectEvents(provider, handle);
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'error' &&
+          (event.payload as { message?: string } | undefined)?.message ===
+            'transport exploded',
+      ),
+    ).toBe(true);
+
+    await expect(provider.collectOutput(handle)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  });
+
+  it('turn_limit resolution emits an error event and collectOutput rejects', async () => {
+    const transport: KimiTransport = {
+      async send() {
+        return {
+          content: [{ type: 'text', text: 'still thinking...' }],
+          stopReason: null,
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+    const { provider } = await makeProvider({ transport });
+    const handle = await provider.start(baseRequest());
+
+    const events = await collectEvents(provider, handle);
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'error' &&
+          (event.payload as { reason?: string } | undefined)?.reason ===
+            'turn_limit',
+      ),
+    ).toBe(true);
+
+    await expect(provider.collectOutput(handle)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  }, 10_000);
+
+  it('enforces request.timeoutMs by cancelling the session after the deadline', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(baseRequest({ timeoutMs: 20 }));
+
+    const events = await collectEvents(provider, handle);
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'terminated' &&
+          (event.payload as { reason?: string } | undefined)?.reason ===
+            'timeout',
+      ),
+    ).toBe(true);
+
+    await expect(provider.collectOutput(handle)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  }, 10_000);
+
+  it('rejects a non-positive request.timeoutMs (fail closed)', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    await expect(provider.start(baseRequest({ timeoutMs: 0 }))).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  });
+
+  it('fails closed for unknown handles across events/usage/collectOutput/observeCommand', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const bogus: RuntimeHandle = Object.freeze({ id: 'kimi_does_not_exist' });
+
+    const events = await collectEvents(provider, bogus);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('error');
+
+    await expect(provider.usage(bogus)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+    await expect(provider.collectOutput(bogus)).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+    await expect(provider.observeCommand!(bogus, 'true')).rejects.toThrow(
+      KimiRuntimeProviderError,
+    );
+  });
+
+  it('cleanup on a running session terminates any parked events() consumer', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(baseRequest());
+
+    const eventsPromise = collectEvents(provider, handle);
+    // Give the events() generator a turn to park on its waiter before we
+    // clean up -- otherwise this wouldn't exercise the "wake a parked
+    // consumer" path at all.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await provider.cleanup(handle);
+
+    const events = await eventsPromise;
+    expect(events.at(-1)?.type).toBe('terminated');
+    expect(
+      (events.at(-1)?.payload as { reason?: string } | undefined)?.reason,
+    ).toBe('cleanup');
+  });
+
+  it('serializes observeCommand behind an in-flight slow bash tool call (mutex)', async () => {
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'bash',
+            input: { command: 'sleep 0.2 && echo bash >> order.log' },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_2',
+            name: 'submit_result',
+            input: { ok: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const { provider, sandboxRoot } = await makeProvider({ transport });
+    const handle = await provider.start(baseRequest());
+
+    // Wait until the loop has issued the tool_call event for the slow bash
+    // command -- at that point it has synchronously queued onto the session
+    // mutex (queuing is synchronous; only execution of the sleep is async),
+    // so racing observeCommand against it here is deterministic, not a
+    // best-effort timing hope.
+    for await (const event of provider.events(handle)) {
+      if (event.type === 'tool_call') break;
+    }
+
+    await provider.observeCommand!(handle, 'echo observe >> order.log');
+
+    const log = await fs.readFile(
+      path.join(sandboxRoot, handle.id, 'order.log'),
+      'utf8',
+    );
+    expect(log).toBe('bash\nobserve\n');
+  }, 10_000);
+
   it('accumulates usage across turns', async () => {
     let now = Date.parse('2026-01-01T00:00:00.000Z');
     const clock = () => new Date(now).toISOString();

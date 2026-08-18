@@ -207,6 +207,7 @@ interface KimiSession {
   loopPromise: Promise<KimiLoopResult>;
   usage: { inputTokens: number; outputTokens: number };
   result: unknown;
+  failure: string | undefined;
   status: KimiSessionStatus;
   nextEventSeq: number;
   mutex: Promise<void>;
@@ -290,6 +291,14 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
         'request.credentialRefs require artifactMcp configuration',
       );
     }
+    if (
+      request.timeoutMs !== undefined &&
+      (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)
+    ) {
+      throw new KimiRuntimeProviderError(
+        'request.timeoutMs must be a positive integer',
+      );
+    }
 
     const sessionId = deriveSessionId(
       this.#ownershipSecret,
@@ -342,6 +351,7 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       }),
       usage: { inputTokens: 0, outputTokens: 0 },
       result: undefined,
+      failure: undefined,
       status: 'running',
       nextEventSeq: 0,
       mutex: Promise.resolve(),
@@ -381,24 +391,50 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
           outputTokens: result.usage.outputTokens,
         };
         if (result.status === 'submitted') {
-          session.status = 'submitted';
-          session.result = result.result;
-          this.#emit(session, 'terminated', { reason: 'submitted' });
+          // A concurrent cancel()/cleanup()/timeout may have already
+          // finalized this session (and emitted its own terminal event)
+          // while this turn was in flight; #terminate no-ops in that case
+          // so a late submit_result can never resurrect a cancelled run.
+          if (
+            this.#terminate(session, 'submitted', 'terminated', {
+              reason: 'submitted',
+            })
+          ) {
+            session.result = result.result;
+          }
         } else if (result.status === 'turn_limit') {
-          session.status = 'turn_limit';
-          this.#emit(session, 'error', { reason: 'turn_limit' });
+          this.#terminate(session, 'turn_limit', 'error', {
+            reason: 'turn_limit',
+          });
         } else {
-          // Cancellation already emitted its terminal event in cancel().
-          session.status = 'cancelled';
+          this.#terminate(session, 'cancelled', 'terminated', {
+            reason: 'cancelled',
+          });
         }
         return result;
       },
       (error: unknown) => {
-        session.status = 'failed';
-        this.#emit(session, 'error', { message: errorMessage(error) });
+        const message = errorMessage(error);
+        if (this.#terminate(session, 'failed', 'error', { message })) {
+          session.failure = message;
+        }
         throw error;
       },
     );
+    // Attach a handler immediately so a routine transport failure (or a
+    // cancellation the transport never actually cancels) never surfaces as
+    // an unhandled promise rejection; later `await session.loopPromise`
+    // call sites (collectOutput, cleanup) still observe the rejection
+    // normally since this doesn't replace the stored promise.
+    void session.loopPromise.catch(() => undefined);
+
+    if (request.timeoutMs !== undefined) {
+      const timer = setTimeout(() => {
+        void this.cancel(handle, 'timeout');
+      }, request.timeoutMs);
+      timer.unref?.();
+      void session.loopPromise.finally(() => clearTimeout(timer));
+    }
 
     return handle;
   }
@@ -455,16 +491,25 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     const session = this.#sessions.get(handle.id);
     if (session === undefined || isTerminal(session.status)) return;
     session.controller.abort();
-    session.status = 'cancelled';
-    this.#emit(session, 'terminated', { reason: reason ?? 'cancelled' });
+    this.#terminate(session, 'cancelled', 'terminated', {
+      reason: reason ?? 'cancelled',
+    });
   }
 
   async collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput> {
     const session = this.#requireSession(handle);
-    const result = await session.loopPromise;
-    if (result.status !== 'submitted') {
+    if (session.status === 'running') {
+      // Only wait on the loop when it's genuinely still running. Once the
+      // session is terminal (e.g. cancelled), the underlying transport may
+      // never settle (Task 1's transport doesn't honor the abort signal),
+      // so awaiting loopPromise here would otherwise block forever.
+      await session.loopPromise.catch(() => undefined);
+    }
+    if (session.status !== 'submitted') {
+      const detail =
+        session.failure === undefined ? '' : `: ${session.failure}`;
       throw new KimiRuntimeProviderError(
-        `session did not submit a result (status: ${result.status})`,
+        `session did not submit a result (status: ${session.status}${detail})`,
       );
     }
     return toRuntimeOutput(session.result, session.putArtifacts);
@@ -485,14 +530,23 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     if (session === undefined) return;
     if (!isTerminal(session.status)) {
       session.controller.abort();
-      // Do not await loop completion: Task 1's transport does not honor the
-      // abort signal on an in-flight request (createKimiHttpTransport never
-      // passes it to fetch), so a still-running turn could otherwise block
-      // cleanup indefinitely. Swallow so an eventual settlement never
-      // surfaces as an unhandled rejection.
+      // Finalize and wake any parked events() consumers immediately: the
+      // loop's own resolution may never observe the abort (Task 1's
+      // transport doesn't honor the signal on an in-flight request), so
+      // nothing else would ever mark this session terminal otherwise.
+      this.#terminate(session, 'cancelled', 'terminated', {
+        reason: 'cleanup',
+      });
+      // Do not await loop completion: for the same reason, a still-running
+      // turn could block cleanup indefinitely. Swallow so an eventual
+      // settlement never surfaces as an unhandled rejection (a handler is
+      // also attached at loopPromise creation time; this is redundant but
+      // harmless).
       void session.loopPromise.catch(() => undefined);
     }
-    await session.sandbox.destroy();
+    // Run destroy() under the same mutex as tool calls / observeCommand so
+    // it can't race an in-flight bash/file operation still using workdir.
+    await withMutex(session, () => session.sandbox.destroy());
     this.#sessions.delete(handle.id);
   }
 
@@ -524,6 +578,26 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       throw new KimiRuntimeProviderError(`unknown session: ${handle.id}`);
     }
     return session;
+  }
+
+  /**
+   * Transitions `session` to a terminal `status` and emits the terminal
+   * event, unless the session is already terminal -- in which case this is
+   * a no-op and returns false. Callers that only mutate session state on a
+   * successful transition (e.g. stashing `result`) must check the return
+   * value, so a late loop resolution can never resurrect or duplicate an
+   * already-finalized (cancelled/cleaned-up/timed-out) session.
+   */
+  #terminate(
+    session: KimiSession,
+    status: KimiSessionStatus,
+    type: RuntimeEventType,
+    payload: unknown,
+  ): boolean {
+    if (isTerminal(session.status)) return false;
+    session.status = status;
+    this.#emit(session, type, payload);
+    return true;
   }
 
   #emit(session: KimiSession, type: RuntimeEventType, payload: unknown): void {
