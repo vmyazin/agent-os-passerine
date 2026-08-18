@@ -121,7 +121,15 @@ export async function createKimiSandbox(options: {
           `editFile found ${occurrences} occurrences of oldText in ${relativePath}, expected exactly one`,
         );
       }
-      await fs.writeFile(resolved, current.replace(oldText, newText), 'utf8');
+      // A function replacer bypasses `$&`/`$$`/`` $` ``/`$'` special-token
+      // interpretation that `String.prototype.replace` applies when the
+      // replacement is a plain string, which would otherwise silently
+      // corrupt `newText` containing those sequences.
+      await fs.writeFile(
+        resolved,
+        current.replace(oldText, () => newText),
+        'utf8',
+      );
     },
 
     async runBash(command, runOptions) {
@@ -141,10 +149,18 @@ export async function createKimiSandbox(options: {
             },
           },
           (error, stdout, stderr) => {
+            // Node caps each stream at exactly `maxBuffer` bytes and never
+            // exceeds it; a legitimate command whose output happens to land
+            // exactly at that boundary produces no error at all. So the
+            // *only* reliable signal that a stream was actually cut off is
+            // the maxBuffer overflow error itself — not the output length,
+            // which is identical (== MAX_OUTPUT_BYTES) in both the
+            // truncated and the exactly-at-the-boundary case.
+            const overflow = maxBufferOverflow(error);
             resolve(
               Object.freeze({
-                stdout: applyTruncationMarker(stdout),
-                stderr: applyTruncationMarker(stderr),
+                stdout: overflow.stdout ? stdout + TRUNCATED_MARKER : stdout,
+                stderr: overflow.stderr ? stderr + TRUNCATED_MARKER : stderr,
                 exitCode: resolveExitCode(error),
               }),
             );
@@ -195,10 +211,28 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-function applyTruncationMarker(output: string): string {
-  return Buffer.byteLength(output, 'utf8') >= MAX_OUTPUT_BYTES
-    ? output + TRUNCATED_MARKER
-    : output;
+const MAX_BUFFER_OVERFLOW_CODE = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+
+function maxBufferOverflow(error: Error | null): {
+  readonly stdout: boolean;
+  readonly stderr: boolean;
+} {
+  if (
+    error === null ||
+    (error as NodeJS.ErrnoException).code !== MAX_BUFFER_OVERFLOW_CODE
+  ) {
+    return { stdout: false, stderr: false };
+  }
+  // Node's child_process module names the overflowing stream in the error
+  // message ("stdout maxBuffer length exceeded" / "stderr maxBuffer length
+  // exceeded"). If that message format ever changes and neither name is
+  // found, fail closed by marking both — we know at least one overflowed.
+  const mentionsStdout = error.message.includes('stdout');
+  const mentionsStderr = error.message.includes('stderr');
+  if (!mentionsStdout && !mentionsStderr) {
+    return { stdout: true, stderr: true };
+  }
+  return { stdout: mentionsStdout, stderr: mentionsStderr };
 }
 
 function resolveExitCode(error: Error | null): number {
@@ -206,5 +240,5 @@ function resolveExitCode(error: Error | null): number {
   const err = error as NodeJS.ErrnoException & { killed?: boolean };
   if (err.killed === true) return 124; // timed out and was killed
   if (typeof err.code === 'number') return err.code;
-  return 1; // e.g. maxBuffer overflow (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)
+  return 1; // e.g. maxBuffer overflow (MAX_BUFFER_OVERFLOW_CODE)
 }

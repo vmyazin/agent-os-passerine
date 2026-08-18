@@ -85,6 +85,13 @@ describe('createKimiSandbox', () => {
     await expect(sandbox.editFile('f.txt', 'abc', 'q')).rejects.toThrow();
   });
 
+  it('editFile round-trips replacement text containing $$ and $& byte-exact', async () => {
+    const sandbox = await makeSandbox();
+    await sandbox.writeFile('script.sh', 'PLACEHOLDER');
+    await sandbox.editFile('script.sh', 'PLACEHOLDER', 'echo $$ and $&');
+    await expect(sandbox.readFile('script.sh')).resolves.toBe('echo $$ and $&');
+  });
+
   it('rejects ../escape paths for read, write, and edit', async () => {
     const sandbox = await makeSandbox();
     await expect(sandbox.readFile('../escape.txt')).rejects.toThrow();
@@ -176,13 +183,24 @@ describe('createKimiSandbox', () => {
     expect(result.exitCode).toBe(124);
   }, 10_000);
 
-  it('truncates stdout at 64 KiB with a marker', async () => {
+  it('truncates stdout over 64 KiB with a marker', async () => {
     const sandbox = await makeSandbox();
     const result = await sandbox.runBash('yes a | head -c 200000', {
       timeoutMs: 10_000,
     });
     expect(result.stdout.endsWith('\n[truncated]')).toBe(true);
     expect(result.stdout.length).toBeLessThan(200000);
+  }, 15_000);
+
+  it('does not mark exactly-64-KiB stdout as truncated', async () => {
+    const sandbox = await makeSandbox();
+    const result = await sandbox.runBash(
+      "head -c 65536 /dev/zero | tr '\\0' 'a'",
+      { timeoutMs: 10_000 },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBe(65536);
+    expect(result.stdout.endsWith('\n[truncated]')).toBe(false);
   }, 15_000);
 
   it('destroy removes the workdir tree', async () => {
