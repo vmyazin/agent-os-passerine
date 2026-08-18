@@ -75,7 +75,9 @@ describe('Local authentication bypass route', () => {
     const response = await POST(request);
 
     expect(response.status).toBe(303);
-    expect(response.headers.get('location')).toBe('http://localhost:3000/inbox');
+    expect(response.headers.get('location')).toBe(
+      'http://localhost:3000/inbox',
+    );
 
     const setCookies = response.headers.getSetCookie();
     const sessionCookieHeader = setCookies.find((c) =>
