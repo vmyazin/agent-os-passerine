@@ -1,6 +1,6 @@
 # Build progress
 
-Last reviewed: 2026-08-17
+Last reviewed: 2026-08-18
 
 ## Completed foundation steps
 
@@ -41,6 +41,21 @@ Last reviewed: 2026-08-17
    validation shared by task entry, reconciliation, and durable execution, and
    a sanitized bounded goal projection with run-page and CLI
    (`--criteria-json`, `goal show`) parity.
+7. **Self-hosted runtime, started via the Kimi provider:** a `kimi`
+   `RuntimeProvider` (`packages/adapters/src/kimi/`) that owns its own agent
+   loop against Moonshot's Anthropic-compatible Messages API and executes
+   tools in a local, path-confined process sandbox; secretless
+   provider-executed `observeCommand` mutually excluded from the agent loop
+   by a per-session mutex, preserving the existing signed trusted-test-report
+   and DoD attestation chain unchanged; `config.runtime.{provider, routing}`
+   is now authoritative and fail-closed (an unbuilt/unconfigured resolved
+   runtime, including the legacy starter `provider: local`, rejects at
+   composition instead of silently defaulting); and step-scoped Artifact MCP
+   access staged locally in-process and discarded worker-side. See
+   [kimi-runtime.md](./architecture/kimi-runtime.md) for the full design,
+   including the limitations recorded below and its process/path isolation
+   boundary, unenforced `networking: limited`, and worker-local sessions
+   that fail closed on restart by design.
 
 ## Verification boundary
 
@@ -49,6 +64,14 @@ calls. PostgreSQL integration runs when `TEST_DATABASE_URL` is supplied. Live
 Managed Agents and R2 smoke tests require the explicit `AGENTOS_LIVE_TESTS=1`
 opt-in. No Trigger deployment, model session, R2 write, GitHub branch, or pull
 request has been created by the implementation session.
+
+The Kimi runtime provider follows the same boundary: its unit, routing, and
+composition tests all run against a fake transport and are credential-free
+and cost-free by default. The one live gate,
+`pnpm --filter @agentos/adapters smoke:kimi`, sends one real Moonshot request
+and stays skipped (exit 0) unless both `AGENTOS_LIVE_TESTS=1` and
+`KIMI_API_KEY` are set, so no build or CI run spends against a real Kimi
+session unless an operator opts in explicitly.
 
 The durable workflow task is testable through stable local interfaces. The
 repo-owned task registers its fail-closed concrete composition at module load;
@@ -89,8 +112,11 @@ through the startup options parameter so Neon's proxy honors it.
 - Broader reliability/security operations: webhook signatures and replay
   protection, dead-letter UI, telemetry, rotation, alerts, and adversarial live
   validation.
-- Rootless self-hosted VM runtime provider and managed/self-hosted equivalence
-  measurements.
+- Rootless container/VM isolation for the self-hosted runtime (the Kimi
+  provider's sandbox remains process/path-confined only, with
+  `networking: limited` unenforced — see
+  [kimi-runtime.md](./architecture/kimi-runtime.md)) and managed/self-hosted
+  equivalence measurements.
 - Signed diagnostic/repair triggers, recurring business tasks, PWA push
   notifications, and mobile approval/reply flows.
 

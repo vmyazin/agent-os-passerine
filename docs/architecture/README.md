@@ -34,6 +34,11 @@ The bounded goal loop — its three-step cap, immutable criterion provenance,
 signed command evidence, child ownership, and replay model — is documented in
 [durable-goal-workflow.md](./durable-goal-workflow.md).
 
+The self-hosted Kimi runtime provider — its agent loop and wire format, the
+process sandbox and its stated isolation limits, trusted command
+observation, and fail-closed model-profile routing/composition — is
+documented in [kimi-runtime.md](./kimi-runtime.md).
+
 Dependencies point inward: delivery apps and adapters can depend on core, while
 core stays portable. Apps do not import one another, and provider-specific types
 must not leak through public core APIs.
