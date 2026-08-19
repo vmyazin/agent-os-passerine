@@ -25,7 +25,10 @@ interface SubcommandRule {
 const SUBCOMMAND_RULES: Record<string, SubcommandRule> = {
   'rev-parse': { flags: [], allowPositional: true },
   'ls-tree': { flags: ['-r', '-z'], allowPositional: true },
-  'cat-file': { flags: ['-p', 'blob', 'commit', 'tree'], allowPositional: true },
+  'cat-file': {
+    flags: ['-p', '-t', 'blob', 'commit', 'tree'],
+    allowPositional: true,
+  },
   'hash-object': {
     flags: ['-w', '--stdin'],
     allowPositional: false,

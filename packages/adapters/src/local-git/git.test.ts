@@ -86,6 +86,15 @@ describe('runGit argument validation', () => {
     ).rejects.toThrow(LocalGitError);
   });
 
+  it('allows cat-file -t to report an object type', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const head = await runGit(repo, ['rev-parse', 'HEAD']);
+    await expect(runGit(repo, ['cat-file', '-t', head])).resolves.toBe(
+      'commit',
+    );
+  });
+
   it('rejects commit-tree with -F to read a message from a file', async () => {
     const root = await fixtureRoot();
     const repo = await seedRepo(root, 'exp');

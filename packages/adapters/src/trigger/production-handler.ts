@@ -59,13 +59,22 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const sourceBundleSchema = z
   .object({
     version: z.literal('source-bundle-v1'),
-    repository: z
-      .object({
-        owner: z.string().min(1).max(100),
-        name: z.string().min(1).max(100),
-        repositoryId: z.number().int().positive().safe(),
-      })
-      .strict(),
+    repository: z.union([
+      z
+        .object({
+          owner: z.string().min(1).max(100),
+          name: z.string().min(1).max(100),
+          repositoryId: z.number().int().positive().safe(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('local'),
+          owner: z.literal('local'),
+          name: z.string().min(1).max(100),
+        })
+        .strict(),
+    ]),
     baseBranch: z.string().min(1).max(255),
     repositorySha: z.string().regex(/^[0-9a-f]{40}$/),
     treeSha: z.string().regex(/^[0-9a-f]{40}$/),
