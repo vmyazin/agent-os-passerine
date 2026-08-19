@@ -178,7 +178,7 @@ export type PublicationChange = PublicationManifestBody['changes'][number];
 
 export interface PublicationAuthorizationClaims {
   readonly purpose: 'publish-draft-pr';
-  readonly audience: 'github-publisher';
+  readonly audience: 'github-publisher' | 'local-git-publisher';
   readonly projectId: string;
   readonly runId: string;
   readonly stepId: string;
@@ -196,7 +196,7 @@ export interface PublicationAuthorizationClaims {
 const authorizationClaimsSchema = z
   .object({
     purpose: z.literal('publish-draft-pr'),
-    audience: z.literal('github-publisher'),
+    audience: z.enum(['github-publisher', 'local-git-publisher']),
     projectId: idSchema,
     runId: idSchema,
     stepId: idSchema,
@@ -445,13 +445,14 @@ export function validatePublicationAuthorization(
   parsed: ParsedPublicationManifest,
   verifier: AttestationVerifier<PublicationAuthorizationClaims>,
   now: Date,
+  audience: 'github-publisher' | 'local-git-publisher' = 'github-publisher',
 ): PublicationAuthorizationClaims {
   const manifest = parsed.manifest;
   const subject = `${manifest.projectId}:${manifest.runId}:${parsed.manifestDigest}`;
   const claims = verifier.verify(parsed.authorization, { subject });
   const expected = {
     purpose: 'publish-draft-pr',
-    audience: 'github-publisher',
+    audience,
     projectId: manifest.projectId,
     runId: manifest.runId,
     stepId: manifest.stepId,

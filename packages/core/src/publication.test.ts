@@ -350,6 +350,52 @@ describe('publication manifest', () => {
     ).toThrow(/expired/i);
   });
 
+  it('rejects tokens issued for the wrong audience in either direction', () => {
+    const manifest = body();
+    const manifestDigest = canonicalPublicationManifestDigest(manifest);
+    const localAuthorization = issuer.issue({
+      subject: `${manifest.projectId}:${manifest.runId}:${manifestDigest}`,
+      issuedAt: '2026-08-17T11:59:00.000Z',
+      claims: { ...authorize(manifest).claims, audience: 'local-git-publisher' },
+    });
+    const parsedGithub = parsePublicationManifest({
+      manifest,
+      authorization: authorize(manifest),
+    });
+    const parsedLocal = parsePublicationManifest({
+      manifest,
+      authorization: localAuthorization,
+    });
+
+    // A github-audience token validated against the default ('github-publisher')
+    // audience succeeds; validated against 'local-git-publisher' it fails.
+    expect(
+      validatePublicationAuthorization(parsedGithub, verifier, now),
+    ).toMatchObject({ audience: 'github-publisher' });
+    expect(() =>
+      validatePublicationAuthorization(
+        parsedGithub,
+        verifier,
+        now,
+        'local-git-publisher',
+      ),
+    ).toThrow(/authorization/i);
+
+    // A local-git-publisher token validated against that audience succeeds;
+    // validated against the default 'github-publisher' audience it fails.
+    expect(
+      validatePublicationAuthorization(
+        parsedLocal,
+        verifier,
+        now,
+        'local-git-publisher',
+      ),
+    ).toMatchObject({ audience: 'local-git-publisher' });
+    expect(() =>
+      validatePublicationAuthorization(parsedLocal, verifier, now),
+    ).toThrow(/authorization/i);
+  });
+
   it('rejects publication authorizations with an excessive validity window', () => {
     const manifest = body();
     const manifestDigest = canonicalPublicationManifestDigest(manifest);

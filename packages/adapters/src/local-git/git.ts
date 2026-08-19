@@ -45,6 +45,37 @@ const ALLOWED_SUBCOMMANDS = new Set(Object.keys(SUBCOMMAND_RULES));
 const MAX_ARGUMENT_LENGTH = 4096;
 
 /**
+ * Only the git identity variables needed to stamp a deterministic author /
+ * committer on plumbing-created commits (see local-git/publisher.ts) may be
+ * injected. Anything else (e.g. GIT_SSH_COMMAND, GIT_ALTERNATE_OBJECT_
+ * DIRECTORIES) could change how git resolves objects or talks to the
+ * network, which would defeat the containment/allowlisting done elsewhere
+ * in this file.
+ */
+const ALLOWED_ENV_KEYS = new Set([
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+]);
+
+function assertSafeEnv(env: Readonly<Record<string, string>> | undefined): void {
+  if (env === undefined) return;
+  for (const [envKey, value] of Object.entries(env)) {
+    if (!ALLOWED_ENV_KEYS.has(envKey))
+      throw new LocalGitError(
+        'forbidden_argument',
+        `git environment variable is not allowed: ${envKey}`,
+      );
+    if (value.length > MAX_ARGUMENT_LENGTH || /[\0\n]/.test(value))
+      throw new LocalGitError(
+        'forbidden_argument',
+        `git environment value for ${envKey} is too long or contains forbidden characters`,
+      );
+  }
+}
+
+/**
  * Per-subcommand argument allowlisting. The subcommand allowlist alone is
  * not enough: e.g. `hash-object <path>` reads an arbitrary file into the
  * object store (retrievable via cat-file) without ever touching
@@ -132,6 +163,10 @@ export async function runGit(
      * byte-for-byte. Defaults to false, preserving the historical
      * trimmed behavior every other caller relies on. */
     readonly raw?: boolean;
+    /** Extra environment variables merged over `process.env`, restricted to
+     * `ALLOWED_ENV_KEYS`. Omitting this preserves the historical behavior
+     * (child inherits `process.env` unchanged) byte-for-byte. */
+    readonly env?: Readonly<Record<string, string>>;
   } = {},
 ): Promise<string> {
   const subcommand = args[0];
@@ -141,9 +176,14 @@ export async function runGit(
       `git subcommand is not allowed: ${subcommand ?? '(none)'}`,
     );
   assertSafeArguments(subcommand, args.slice(1));
+  assertSafeEnv(options.env);
   return new Promise<string>((resolvePromise, rejectPromise) => {
     const child = spawn('git', ['-C', repository, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env:
+        options.env === undefined
+          ? process.env
+          : { ...process.env, ...options.env },
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

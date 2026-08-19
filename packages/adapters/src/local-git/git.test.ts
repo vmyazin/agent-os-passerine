@@ -149,3 +149,39 @@ describe('runGit argument validation', () => {
     ).resolves.toBe(commit);
   });
 });
+
+describe('runGit env injection', () => {
+  it('stamps a deterministic author/committer identity from the allowed env keys', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const tree = await runGit(repo, ['rev-parse', 'HEAD^{tree}']);
+    const parent = await runGit(repo, ['rev-parse', 'HEAD']);
+    const commit = await runGit(
+      repo,
+      ['commit-tree', tree, '-p', parent, '-m', 'identity test'],
+      {
+        env: {
+          GIT_AUTHOR_NAME: 'Agent OS Publisher',
+          GIT_AUTHOR_EMAIL: 'agentos@localhost',
+          GIT_COMMITTER_NAME: 'Agent OS Publisher',
+          GIT_COMMITTER_EMAIL: 'agentos@localhost',
+        },
+      },
+    );
+    const shown = await runGit(repo, ['cat-file', '-p', commit]);
+    expect(shown).toContain('author Agent OS Publisher <agentos@localhost>');
+    expect(
+      shown,
+    ).toContain('committer Agent OS Publisher <agentos@localhost>');
+  });
+
+  it('rejects environment variables outside the allowlist', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await expect(
+      runGit(repo, ['rev-parse', 'HEAD'], {
+        env: { GIT_SSH_COMMAND: 'evil' },
+      }),
+    ).rejects.toThrow(LocalGitError);
+  });
+});
