@@ -233,6 +233,15 @@ export interface InboxProjection {
   readonly repliedAt?: IsoTimestamp;
 }
 
+export interface ApprovalSummary {
+  readonly title?: string;
+  readonly requirements?: readonly string[];
+  readonly criteria?: readonly {
+    readonly id: string;
+    readonly description: string;
+  }[];
+}
+
 export interface ApprovalProjection {
   readonly id: string;
   readonly runId: string;
@@ -242,6 +251,7 @@ export interface ApprovalProjection {
   readonly createdAt: IsoTimestamp;
   readonly expiresAt: IsoTimestamp;
   readonly consumedAt?: IsoTimestamp;
+  readonly summary?: ApprovalSummary;
 }
 
 function projectApproval(approval: Approval): ApprovalProjection {
@@ -502,6 +512,27 @@ export class ControlPlaneService {
       resolve(config: AgentOsConfig): Promise<string>;
     },
     private readonly trustedGoalCommands?: ReadonlySet<string>,
+    private readonly artifacts?: {
+      get(input: {
+        readonly scope: {
+          readonly projectId: string;
+          readonly runId: string;
+          readonly stepId: string;
+        };
+        readonly key: string;
+        readonly maxBytes: number;
+      }): Promise<{ readonly bytes: Uint8Array } | undefined>;
+      list(input: {
+        readonly scope: {
+          readonly projectId: string;
+          readonly runId: string;
+          readonly stepId: string;
+        };
+        readonly limit: number;
+      }): Promise<{
+        readonly items: readonly { readonly artifactId: string; readonly key: string }[];
+      }>;
+    },
   ) {}
 
   async getConfiguration(includeCanonical = true): Promise<{
@@ -989,10 +1020,104 @@ export class ControlPlaneService {
         this.repository.listApprovals(run.id, { status: 'pending', limit }),
       ),
     );
-    return pages
+    const projected = pages
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(projectApproval);
+    return Promise.all(
+      projected.map(async (approval) => ({
+        ...approval,
+        ...(await this.approvalSummary(approval)),
+      })),
+    );
+  }
+
+  /**
+   * Human-readable context for a spec/DoD approval: the feature title plus
+   * the specification requirements and Definition of Done criteria the
+   * agent stored as artifacts. Fail-soft by design — an unreadable artifact
+   * degrades to the bare approval, never to an inbox error.
+   */
+  private async approvalSummary(
+    approval: ApprovalProjection,
+  ): Promise<{ summary?: ApprovalSummary }> {
+    if (
+      this.artifacts === undefined ||
+      approval.scopePreview !== 'feature-spec-and-dod'
+    )
+      return {};
+    try {
+      const run = await this.repository.getRun(
+        persistenceId('run', approval.runId),
+      );
+      if (run === undefined) return {};
+      const title = safeString(record(run.input), 'title');
+      const scope = {
+        projectId: run.projectId,
+        runId: run.id,
+        stepId: 'specification',
+      };
+      const page = await this.artifacts.list({ scope, limit: 10 });
+      const bodyOf = async (artifactId: string): Promise<unknown> => {
+        const item = page.items.find(
+          (candidate) => candidate.artifactId === artifactId,
+        );
+        if (item === undefined) return undefined;
+        const value = await this.artifacts!.get({
+          scope,
+          key: item.key,
+          maxBytes: 1_000_000,
+        });
+        if (value === undefined) return undefined;
+        return JSON.parse(new TextDecoder().decode(value.bytes));
+      };
+      const bounded = (value: unknown): string | undefined =>
+        typeof value === 'string'
+          ? redactText(value).slice(0, 500)
+          : undefined;
+      const specification = (await bodyOf('specification')) as
+        | { requirements?: unknown }
+        | undefined;
+      const dod = (await bodyOf('dod')) as { criteria?: unknown } | undefined;
+      const requirements = Array.isArray(specification?.requirements)
+        ? specification.requirements
+            .slice(0, 20)
+            .map(bounded)
+            .filter((entry): entry is string => entry !== undefined)
+        : undefined;
+      const criteria = Array.isArray(dod?.criteria)
+        ? dod.criteria
+            .slice(0, 20)
+            .flatMap((entry: unknown) => {
+              if (entry === null || typeof entry !== 'object') return [];
+              const candidate = entry as { id?: unknown; description?: unknown };
+              const id = bounded(candidate.id);
+              const description = bounded(candidate.description);
+              return id !== undefined && description !== undefined
+                ? [{ id, description }]
+                : [];
+            })
+        : undefined;
+      if (
+        title === undefined &&
+        requirements === undefined &&
+        criteria === undefined
+      )
+        return {};
+      return {
+        summary: {
+          ...(title === undefined ? {} : { title }),
+          ...(requirements === undefined || requirements.length === 0
+            ? {}
+            : { requirements }),
+          ...(criteria === undefined || criteria.length === 0
+            ? {}
+            : { criteria }),
+        },
+      };
+    } catch {
+      return {};
+    }
   }
 
   async replyInbox(

@@ -552,6 +552,28 @@ export function controlPlaneService(): ControlPlaneService {
               ) => (await resolver.resolve(config)).repositorySha,
             };
           })();
+    // Approval summaries read spec/DoD artifact bodies; without R2 env the
+    // inbox degrades to bare approvals instead of failing.
+    const approvalArtifacts = (() => {
+      const repository = repositoryFromEnv();
+      const configured =
+        (process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() ?? '') !== '' &&
+        (process.env.CLOUDFLARE_R2_ARTIFACT_BUCKET?.trim() ?? '') !== '' &&
+        (process.env.CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID?.trim() ?? '') !==
+          '' &&
+        (process.env.CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY?.trim() ?? '') !==
+          '';
+      if (!configured) return undefined;
+      return createR2ArtifactStore({
+        accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
+        bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
+        accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
+        secretAccessKey: requiredRuntime(
+          'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
+        ),
+        manifest: createDomainArtifactManifestStore(repository),
+      });
+    })();
     service = new ControlPlaneService(
       repositoryFromEnv(),
       () => isoTimestamp(new Date().toISOString()),
@@ -559,6 +581,7 @@ export function controlPlaneService(): ControlPlaneService {
       dispatch,
       repositoryHead,
       trustedGoalCommandsFromEnv(),
+      approvalArtifacts,
     );
   }
   return service;

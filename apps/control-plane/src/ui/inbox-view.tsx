@@ -34,9 +34,51 @@ function RequestMarker({ kind }: { readonly kind: InboxItem['kind'] }) {
 }
 
 function ApprovalMessage({ approval }: { approval: ApprovalProjection }) {
+  const summary = approval.summary;
   return (
     <>
-      <p className="inbox-message-copy">{approval.scopePreview}</p>
+      {summary === undefined ? (
+        <p className="inbox-message-copy">{approval.scopePreview}</p>
+      ) : (
+        <div className="inbox-message-copy">
+          <p>
+            The specification agent scoped
+            {summary.title === undefined ? (
+              ' this feature'
+            ) : (
+              <>
+                {' '}
+                <strong>{summary.title}</strong>
+              </>
+            )}
+            . Approving lets implementation start; rejecting ends the run.
+          </p>
+          {summary.requirements === undefined ? null : (
+            <>
+              <p>
+                <strong>It will build:</strong>
+              </p>
+              <ul>
+                {summary.requirements.map((requirement, index) => (
+                  <li key={index}>{requirement}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {summary.criteria === undefined ? null : (
+            <>
+              <p>
+                <strong>It counts as done when:</strong>
+              </p>
+              <ul>
+                {summary.criteria.map((criterion) => (
+                  <li key={criterion.id}>{criterion.description}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
       <details className="inbox-evidence">
         <summary>Review request details</summary>
         <dl>

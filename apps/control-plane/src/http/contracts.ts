@@ -244,6 +244,24 @@ export const approvalSchema = z
     createdAt: z.string(),
     expiresAt: z.string(),
     consumedAt: z.string().optional(),
+    summary: z
+      .object({
+        title: z.string().max(500).optional(),
+        requirements: z.array(z.string().max(500)).max(20).optional(),
+        criteria: z
+          .array(
+            z
+              .object({
+                id: z.string().max(500),
+                description: z.string().max(500),
+              })
+              .strict(),
+          )
+          .max(20)
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
