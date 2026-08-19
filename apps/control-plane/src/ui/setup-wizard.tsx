@@ -183,17 +183,47 @@ export function SetupWizard() {
   const createLocalRepository = () => createRepository({ name: localName });
 
   // One click sets up everything a fresh end-to-end walkthrough needs: a new
-  // auto-numbered test repository (test-proj-01, -02, ...), the matching
-  // project name and path in the YAML, and a small canned feature in step 4.
-  // Apply, head resolution, and run start stay explicit so the flow is
-  // still visible step by step.
-  const fillTestProject = async () => {
-    const created = await createRepository({ namePrefix: 'test-proj' });
+  // auto-numbered repository, the matching project name and path in the
+  // YAML, and a first feature in step 4. Apply, head resolution, and run
+  // start stay explicit so the flow is still visible step by step.
+  //
+  // First features are deliberately dependency-free vanilla modules: the
+  // sealed verifier runs `pnpm test` with no network and no package
+  // installs, so a first feature that adds dependencies cannot verify.
+  const TEST_PROJECTS = [
+    {
+      key: 'todo',
+      label: 'Todo app',
+      namePrefix: 'todo-app',
+      title: 'Add todo store module',
+      description:
+        'Add src/todo-store.mjs exporting createTodoStore() with add(text) returning the new todo {id, text, done}, complete(id) marking it done, and list() returning a defensive copy of all todos. Ids increment from 1; completing an unknown id throws. Keep it in-memory, ESM, and dependency-free. Add test/todo-store.test.mjs with node:test covering add, complete, list, and the unknown-id error, matching the existing test style.',
+    },
+    {
+      key: 'dashboard',
+      label: 'Marketing dashboard',
+      namePrefix: 'dashboard',
+      title: 'Add campaign metrics module',
+      description:
+        'Add src/metrics.mjs exporting summarizeCampaigns(events) where events is an array of {campaign, impressions, clicks, conversions, costCents}. Return {campaigns, totals}: per-campaign and total ctr (clicks/impressions), conversionRate (conversions/clicks), and cpaCents (costCents/conversions), each rounded to 4 decimals and 0 when the denominator is 0. Aggregate multiple events for the same campaign. ESM, dependency-free. Add test/metrics.test.mjs with node:test covering aggregation, the zero-denominator guards, and totals, matching the existing test style.',
+    },
+    {
+      key: 'snake',
+      label: 'Snake game',
+      namePrefix: 'snake',
+      title: 'Add snake game core',
+      description:
+        'Add src/snake.mjs exporting createGame({width, height, rng}) with state() returning {snake, food, score, alive, direction}, turn(direction) ignoring 180-degree reversals, and tick() advancing one step: the snake moves, grows and scores when eating food, and dies on wall or self collision. Place food with the injectable rng so tests are deterministic. ESM, dependency-free. Add test/snake.test.mjs with node:test covering movement, reversal rejection, eating and growth, and both collision deaths, matching the existing test style.',
+    },
+  ] as const;
+
+  const fillTestProject = async (
+    project: (typeof TEST_PROJECTS)[number],
+  ) => {
+    const created = await createRepository({ namePrefix: project.namePrefix });
     if (created === undefined) return;
-    setTitle('Add greet module');
-    setDescription(
-      'Add src/greet.mjs exporting greet(name) returning the string Hello, <name>! and test/greet.test.mjs covering it with node:test, matching the existing test style.',
-    );
+    setTitle(project.title);
+    setDescription(project.description);
   };
 
   const apply = async () => {
@@ -406,23 +436,28 @@ export function SetupWizard() {
               >
                 {creatingLocalRepository ? 'Creating…' : 'Create local repository'}
               </button>
-              <button
-                className="secondary"
-                disabled={creatingLocalRepository}
-                onClick={() => void fillTestProject()}
-                type="button"
-              >
-                {creatingLocalRepository
-                  ? 'Creating…'
-                  : 'Fill e2e test project'}
-              </button>
+              {TEST_PROJECTS.map((project) => (
+                <button
+                  className="secondary"
+                  disabled={creatingLocalRepository}
+                  key={project.key}
+                  onClick={() => void fillTestProject(project)}
+                  type="button"
+                >
+                  {creatingLocalRepository
+                    ? 'Creating…'
+                    : `Fill: ${project.label}`}
+                </button>
+              ))}
             </div>
             <p>
               <small>
-                Fill e2e test project creates the next test-proj-NN
-                repository and pre-fills the configuration and a small
+                Each Fill button creates the next numbered repository for
+                that project type (todo-app-01, dashboard-01, snake-01, …)
+                and pre-fills the configuration and a small dependency-free
                 first feature; you still apply, resolve the head, and start
-                the run.
+                the run. Later runs grow the same project one feature at a
+                time.
               </small>
             </p>
             {localRepositoryError !== '' ? (
