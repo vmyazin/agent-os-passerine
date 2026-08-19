@@ -1,0 +1,254 @@
+// Generated from agentos/passerine.yaml, the configuration proven by the
+// first live end-to-end run. Placeholders: project name, local path, branch.
+export const SETUP_CONFIG_TEMPLATE_LOCAL = `version: 1
+project:
+  name: my-project
+  localPath: /REPLACE/WITH/ABSOLUTE/PATH
+  defaultBranch: main
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    inputMicrodollarsPerMillionTokens: 3000000
+    outputMicrodollarsPerMillionTokens: 15000000
+    runtimeMicrodollarsPerMinute: 1334
+agents:
+  specifier:
+    model: sonnet
+    environment: spec-env
+    tools:
+      - read
+      - glob
+      - grep
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
+    prompt: |
+      You are the specification agent in an automated workflow. The user message is a
+      specification-request-v1 JSON with the feature title and description. The repository snapshot file source-bundle.json is mounted read-only; find it with
+      glob (it is typically at /mnt/session/uploads/workspace/inputs/source-bundle.json).
+
+      Write a precise, minimal specification and a measurable Definition of Done. Keep scope
+      to exactly what is asked.
+
+      Store two artifacts with the artifact_put MCP tool. For each call use version 1,
+      mediaType "application/json", and contentBase64 set to the base64 encoding of the JSON
+      body. The tool result's structuredContent.metadata object is the artifact reference —
+      keep it verbatim.
+      1. artifactId "specification", body:
+         {"version":"feature-spec-v1","title":"<short title>","requirements":["<requirement>", ...]}
+      2. artifactId "dod", body:
+         {"version":"definition-of-done-v1","criteria":[{"id":"<slug like tests-pass>","description":"<criterion>","verifier":"test-report"}, ...]}
+
+      Then send exactly one message for the whole session. Its entire content must be only
+      this JSON (no markdown fences, no other words, embed both metadata objects verbatim):
+      {"version":"specification-output-v1","specification":<metadata of specification>,"definitionOfDone":<metadata of dod>}
+      Never send any other text message at any point.
+  planner:
+    model: sonnet
+    environment: plan-env
+    tools:
+      - read
+      - glob
+      - grep
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
+    prompt: |
+      You are the planning agent in an automated workflow. The user message is a
+      plan-request-v1 JSON carrying artifact references for the approved specification and
+      Definition of Done. Every referenced input artifact is mounted read-only as a file
+      named <stepId>-<artifactId>.json (for example specification-specification.json and
+      specification-dod.json) in the same directory as source-bundle.json — typically
+      /mnt/session/uploads/workspace/inputs/. Find them with glob and read them with the
+      read tool; never call artifact_get for another step's artifacts (it is denied).
+
+      Produce a short, concrete implementation plan. Prefer the smallest change that
+      satisfies the Definition of Done.
+
+      Store one artifact with the artifact_put MCP tool: artifactId "plan", version 1,
+      mediaType "application/json", contentBase64 = base64 of:
+      {"version":"implementation-plan-v1","steps":["<step>", ...]}
+      The tool result's structuredContent.metadata object is the artifact reference.
+
+      Then send exactly one message for the whole session. Its entire content must be only
+      this JSON (no markdown fences, no other words, metadata embedded verbatim):
+      {"version":"plan-output-v1","plan":<metadata of plan>}
+      Never send any other text message at any point.
+  implementer:
+    model: sonnet
+    environment: impl-env
+    tools:
+      - read
+      - edit
+      - write
+      - glob
+      - grep
+      - bash
+    mcps: []
+    retries: 1
+    timeoutMs: 900000
+    prompt: |
+      You are the implementation agent in an automated workflow. The user message is an
+      implementation-request-v1 (or fix-request-v1) JSON carrying artifact references for
+      the plan (and on fix rounds the prior change set and review). Every referenced input
+      artifact is mounted read-only as a file named <stepId>-<artifactId>.json (for example
+      planning-plan.json) in the same directory as source-bundle.json — typically
+      /mnt/session/uploads/workspace/inputs/. Find them with glob and read them with the
+      read tool; never call artifact_get for another step's artifacts (it is denied).
+      source-bundle.json is JSON with the repository's files.
+
+      Implement the planned change with tests. Follow the repository's existing style. Keep
+      the diff minimal and complete. Materialize the repository files into a working
+      directory, apply your changes, and verify by running exactly "pnpm test" with Bash —
+      it must exit 0 before you finish.
+
+      Store two artifacts with the artifact_put MCP tool. Use version 1, mediaType
+      "application/json", contentBase64 = base64 of the JSON body. Each tool result's
+      structuredContent.metadata is the artifact reference.
+      1. artifactId "changes", body:
+         {"version":"change-set-v1","changes":[{"operation":"add"|"modify","path":"<repo relative path>","mode":"100644","content":"<full file content>"} or {"operation":"delete","path":"<path>"} ...]}
+      2. artifactId "tests", body:
+         {"version":"test-evidence-v1","passed":true,"command":"pnpm test","exitCode":0}
+         The command string must be exactly "pnpm test".
+
+      Then send exactly one message for the whole session. Its entire content must be only
+      this JSON (no markdown fences, no other words, metadata embedded verbatim):
+      {"version":"implementation-output-v1","changeSet":<metadata of changes>,"testEvidence":<metadata of tests>}
+      Never send any other text message at any point.
+  reviewer:
+    model: sonnet
+    environment: review-env
+    tools:
+      - read
+      - glob
+      - grep
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
+    prompt: |
+      You are the review agent in an automated workflow. The user message is a
+      review-request-v1 JSON carrying artifact references for the change set, test evidence,
+      and Definition of Done. Every referenced input artifact is mounted read-only as a file
+      named <stepId>-<artifactId>.json (for example implementation-changes.json,
+      implementation-tests.json, specification-dod.json; on re-review the fix step's files
+      are fix-changes.json and fix-tests.json) in the same directory as source-bundle.json —
+      typically /mnt/session/uploads/workspace/inputs/. Find them with glob and read them
+      with the read tool; never call artifact_get for another step's artifacts (it is
+      denied).
+
+      Review the change set against the Definition of Done. Approve only work that fully
+      satisfies it; otherwise request changes with concrete findings.
+
+      Store one artifact with the artifact_put MCP tool: artifactId "review", version 1,
+      mediaType "application/json", contentBase64 = base64 of:
+      {"version":"review-result-v1","decision":"approved"|"changes_requested","findings":["<finding>", ...]}
+      The tool result's structuredContent.metadata object is the artifact reference.
+
+      Then send exactly one message for the whole session. Its entire content must be only
+      this JSON (no markdown fences, no other words, metadata embedded verbatim, decision
+      matching the stored artifact):
+      {"version":"review-output-v1","review":<metadata of review>,"decision":"approved"|"changes_requested"}
+      Never send any other text message at any point.
+  verifier:
+    model: sonnet
+    environment: sealed
+    tools:
+      - bash
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
+    prompt: |
+      You are the trusted verification agent. The user message is a
+      trusted-verification-request-v1 JSON containing an exactCommand field. Run exactly
+      that command once with Bash — character for character, no other commands, no other
+      tools. Do not send any text messages before or after; the observed command execution
+      is the entire deliverable.
+environments:
+  spec-env:
+    runtime: cloud
+    variables: {}
+    tools: []
+    mcps:
+      - artifacts
+    networking:
+      type: limited
+  plan-env:
+    runtime: cloud
+    variables: {}
+    tools: []
+    mcps:
+      - artifacts
+    networking:
+      type: limited
+  impl-env:
+    runtime: cloud
+    variables: {}
+    tools: []
+    mcps:
+      - artifacts
+    networking:
+      type: limited
+  review-env:
+    runtime: cloud
+    variables: {}
+    tools: []
+    mcps:
+      - artifacts
+    networking:
+      type: limited
+  sealed:
+    runtime: cloud
+    variables: {}
+    tools: []
+    mcps: []
+    networking:
+      type: limited
+pipelines:
+  feature:
+    steps:
+      - id: specification
+        agent: specifier
+      - id: planning
+        agent: planner
+      - id: implementation
+        agent: implementer
+      - id: review
+        agent: reviewer
+      - id: verification
+        agent: verifier
+policies:
+  protectedPaths:
+    - .git
+    - .git/**
+    - .github/workflows
+    - .github/workflows/**
+    - CODEOWNERS
+    - '**/CODEOWNERS'
+    - .gitmodules
+    - .env*
+    - '**/.env*'
+    - agentos/**
+    - agentos
+  allowBinary: false
+  allowSymlinks: false
+  maxFileBytes: 1000000
+  tools:
+    allow: []
+    deny: []
+  mcp:
+    allow: []
+    deny: []
+budgets:
+  workflowMicrodollars: 10000000
+  dailyMicrodollars: 20000000
+  concurrency: 2
+  admissionReservePercent: 80
+goals:
+  maxSteps: 3
+  maxRetries: 2
+  timeoutMs: 3600000
+runtime:
+  provider: managed
+  routing: {}
+`;

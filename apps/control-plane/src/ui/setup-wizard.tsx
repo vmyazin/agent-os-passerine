@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 
 import { SETUP_CONFIG_TEMPLATE } from './setup-template';
+import { SETUP_CONFIG_TEMPLATE_LOCAL } from './setup-template-local';
 
 interface ReadinessItem {
   readonly key: string;
@@ -20,8 +21,22 @@ interface ReadinessGroup {
 
 interface Readiness {
   readonly ready: boolean;
+  readonly readyForGitHub: boolean;
+  readonly readyForLocal: boolean;
   readonly repository?: string;
   readonly groups: readonly ReadinessGroup[];
+}
+
+type ProjectMode = 'github' | 'local';
+
+/** The pristine (operator-untouched) template text for a given mode. */
+function templateForMode(mode: ProjectMode): string {
+  return mode === 'github' ? SETUP_CONFIG_TEMPLATE : SETUP_CONFIG_TEMPLATE_LOCAL;
+}
+
+interface LocalRepositoryResult {
+  readonly localPath: string;
+  readonly headSha: string;
 }
 
 interface AppliedConfiguration {
@@ -73,7 +88,14 @@ function StepHeading({
 export function SetupWizard() {
   const [readiness, setReadiness] = useState<Readiness | undefined>();
   const [readinessError, setReadinessError] = useState('');
+  const [mode, setMode] = useState<ProjectMode>('github');
   const [yaml, setYaml] = useState(SETUP_CONFIG_TEMPLATE);
+  const [localName, setLocalName] = useState('');
+  const [creatingLocalRepository, setCreatingLocalRepository] = useState(false);
+  const [localRepositoryError, setLocalRepositoryError] = useState('');
+  const [localRepositoryResult, setLocalRepositoryResult] = useState<
+    LocalRepositoryResult | undefined
+  >();
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState('');
   const [applied, setApplied] = useState<AppliedConfiguration | undefined>();
@@ -102,6 +124,54 @@ export function SetupWizard() {
   useEffect(() => {
     void loadReadiness();
   }, []);
+
+  // Switching modes only swaps the textarea when it still holds the
+  // pristine template for the mode being left — an operator's edits (in
+  // either mode) are never overwritten.
+  const selectMode = (nextMode: ProjectMode) => {
+    if (nextMode === mode) return;
+    setYaml((current) =>
+      current === templateForMode(mode) ? templateForMode(nextMode) : current,
+    );
+    setMode(nextMode);
+  };
+
+  const createLocalRepository = async () => {
+    if (creatingLocalRepository) return;
+    setCreatingLocalRepository(true);
+    setLocalRepositoryError('');
+    try {
+      const response = await fetch('/api/setup/local-repository', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({ name: localName }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = (await response.json()) as {
+        localPath: string;
+        branch: string;
+        headSha: string;
+      };
+      setLocalRepositoryResult({
+        localPath: result.localPath,
+        headSha: result.headSha,
+      });
+      setYaml((current) =>
+        current.replace(/^(\s*localPath:).*$/m, `$1 ${result.localPath}`),
+      );
+    } catch (error) {
+      setLocalRepositoryError(
+        error instanceof Error
+          ? error.message
+          : 'local repository creation failed',
+      );
+    } finally {
+      setCreatingLocalRepository(false);
+    }
+  };
 
   const apply = async () => {
     if (applying) return;
@@ -182,6 +252,10 @@ export function SetupWizard() {
     }
   };
 
+  const modeReady =
+    readiness !== undefined &&
+    (mode === 'github' ? readiness.readyForGitHub : readiness.readyForLocal);
+
   return (
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="setup-title">
@@ -194,7 +268,7 @@ export function SetupWizard() {
       </section>
 
       <section aria-labelledby="setup-step-1">
-        <StepHeading step={1} title="Environment readiness" done={readiness?.ready === true} />
+        <StepHeading step={1} title="Environment readiness" done={modeReady} />
         {readiness === undefined && readinessError === '' ? (
           <p>Checking the environment…</p>
         ) : null}
@@ -209,7 +283,7 @@ export function SetupWizard() {
         {readiness !== undefined ? (
           <>
             <p>
-              {readiness.ready
+              {modeReady
                 ? 'Every subsystem is configured.'
                 : 'Set the missing variables in .env.local, restart the control plane, then check again.'}
               {readiness.repository !== undefined
@@ -217,24 +291,32 @@ export function SetupWizard() {
                 : ''}
             </p>
             <ul>
-              {readiness.groups.map((group) => (
-                <li key={group.id}>
-                  <strong>
-                    {group.ready ? '✓' : '✗'} {group.title}
-                  </strong>
-                  {group.ready ? null : (
-                    <ul>
-                      {group.items
-                        .filter((item) => !item.ready)
-                        .map((item) => (
-                          <li key={item.key}>
-                            <code>{item.key}</code> — {item.hint}
-                          </li>
-                        ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
+              {readiness.groups.map((group) => {
+                const notRequiredForMode =
+                  (mode === 'github' && group.id === 'local') ||
+                  (mode === 'local' && group.id === 'github');
+                return (
+                  <li key={group.id}>
+                    <strong>
+                      {group.ready ? '✓' : '✗'} {group.title}
+                      {!group.ready && notRequiredForMode
+                        ? ' — not required for this project type'
+                        : ''}
+                    </strong>
+                    {group.ready ? null : (
+                      <ul>
+                        {group.items
+                          .filter((item) => !item.ready)
+                          .map((item) => (
+                            <li key={item.key}>
+                              <code>{item.key}</code> — {item.hint}
+                            </li>
+                          ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
             <button className="secondary" onClick={() => void loadReadiness()} type="button">
               Check again
@@ -245,11 +327,74 @@ export function SetupWizard() {
 
       <section aria-labelledby="setup-step-2">
         <StepHeading step={2} title="Apply configuration" done={applied !== undefined} />
+        <div className="button-row" role="group" aria-label="Project type">
+          <button
+            aria-pressed={mode === 'github'}
+            className={mode === 'github' ? undefined : 'secondary'}
+            onClick={() => selectMode('github')}
+            type="button"
+          >
+            GitHub project
+          </button>
+          <button
+            aria-pressed={mode === 'local'}
+            className={mode === 'local' ? undefined : 'secondary'}
+            onClick={() => selectMode('local')}
+            type="button"
+          >
+            Local experiment
+          </button>
+        </div>
+        {mode === 'local' ? (
+          <p>
+            <small>
+              Local repository, cloud execution: agent sessions run in the
+              Managed Agents sandbox and artifacts are stored in R2.
+            </small>
+          </p>
+        ) : null}
         <p>
-          Edit the template: set the project name, the repository URL, and the
-          default branch. The agents, environments, prompts, and policies below
-          are a working baseline.
+          Edit the template: set the project name,{' '}
+          {mode === 'local' ? 'the local repository path' : 'the repository URL'},
+          and the default branch. The agents, environments, prompts, and
+          policies below are a working baseline.
         </p>
+        {mode === 'local' ? (
+          <div>
+            <label>
+              Local repository name
+              <input
+                onChange={(event) => setLocalName(event.target.value)}
+                pattern="[a-z0-9][a-z0-9-]{0,63}"
+                style={{ width: '100%' }}
+                type="text"
+                value={localName}
+              />
+            </label>
+            <p>
+              <small>Lowercase letters, digits, and hyphens.</small>
+            </p>
+            <div className="button-row">
+              <button
+                className="secondary"
+                disabled={creatingLocalRepository || localName.trim() === ''}
+                onClick={() => void createLocalRepository()}
+                type="button"
+              >
+                {creatingLocalRepository ? 'Creating…' : 'Create local repository'}
+              </button>
+            </div>
+            {localRepositoryError !== '' ? (
+              <p role="alert">{localRepositoryError}</p>
+            ) : null}
+            {localRepositoryResult !== undefined ? (
+              <p>
+                Created <code>{localRepositoryResult.localPath}</code> at{' '}
+                <code>{localRepositoryResult.headSha.slice(0, 12)}…</code>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <textarea
           aria-label="Project configuration YAML"
           onChange={(event) => setYaml(event.target.value)}
@@ -259,11 +404,11 @@ export function SetupWizard() {
           value={yaml}
         />
         <div className="button-row">
-          <button disabled={applying || readiness?.ready !== true} onClick={() => void apply()} type="button">
+          <button disabled={applying || !modeReady} onClick={() => void apply()} type="button">
             {applying ? 'Applying…' : 'Apply configuration'}
           </button>
         </div>
-        {readiness !== undefined && readiness.ready !== true ? (
+        {readiness !== undefined && !modeReady ? (
           <p>Complete step 1 before applying.</p>
         ) : null}
         {applyError !== '' ? <p role="alert">{applyError}</p> : null}
@@ -279,8 +424,9 @@ export function SetupWizard() {
       <section aria-labelledby="setup-step-3">
         <StepHeading step={3} title="Repository head" done={head !== undefined} />
         <p>
-          The run pins the exact commit it builds on. Refresh after every merge
-          so the base matches the repository.
+          The run pins the exact commit it builds on — this works the same
+          way for GitHub and local projects. Refresh after every merge so the
+          base matches the repository.
         </p>
         <div className="button-row">
           <button
@@ -350,6 +496,13 @@ export function SetupWizard() {
             Run started: <a href={`/runs/${runId}`}>{runId}</a>. Watch its
             steps there, and grant the specification approval in the{' '}
             <a href="/inbox">inbox</a> when it appears.
+            {mode === 'local' ? (
+              <>
+                {' '}When it succeeds, the result is a local branch — inspect
+                it with <code>git log agentos/{runId}-…</code> in your
+                repository.
+              </>
+            ) : null}
           </p>
         ) : null}
       </section>
