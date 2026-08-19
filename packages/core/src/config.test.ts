@@ -241,3 +241,57 @@ describe('Agent OS configuration', () => {
     expect(AgentOsConfigSchema.safeParse(candidate).success).toBe(false);
   });
 });
+
+describe('local experiment projects', () => {
+  it('accepts an absolute localPath without a repository', () => {
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: exp, localPath: /workspaces/exp }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    expect(config.project.localPath).toBe('/workspaces/exp');
+  });
+
+  it('rejects a relative or traversing localPath', () => {
+    for (const bad of ['relative/path', '/workspaces/../etc', '/a/./b']) {
+      expect(() =>
+        loadAgentOsConfig(`
+version: 1
+project: { name: exp, localPath: ${JSON.stringify(bad)} }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`),
+      ).toThrow();
+    }
+  });
+
+  it('rejects repository and localPath together', () => {
+    expect(() =>
+      loadAgentOsConfig(`
+version: 1
+project: { name: exp, repository: https://github.com/o/r, localPath: /w/exp }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`),
+    ).toThrow(/localPath|repository/);
+  });
+});

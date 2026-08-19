@@ -154,9 +154,30 @@ export const AgentOsConfigSchema = z
       .object({
         name: Identifier,
         repository: z.string().url().optional(),
+        // Local experiment projects: an absolute directory path inside the
+        // operator's workspaces root. Containment against the root is a
+        // runtime check; the schema enforces shape only.
+        localPath: z
+          .string()
+          .min(2)
+          .max(1_024)
+          .regex(/^\//, 'localPath must be absolute')
+          .refine(
+            (value) =>
+              !value
+                .split('/')
+                .some((segment) => segment === '..' || segment === '.'),
+            'localPath must not contain relative segments',
+          )
+          .optional(),
         defaultBranch: Identifier.default('main'),
       })
-      .strict(),
+      .strict()
+      .refine(
+        (value) =>
+          value.repository === undefined || value.localPath === undefined,
+        'project.repository and project.localPath are mutually exclusive',
+      ),
     models: z.record(z.string(), ModelProfileSchema),
     agents: z.record(z.string(), AgentDefinitionSchema),
     environments: z.record(z.string(), EnvironmentDefinitionSchema),
