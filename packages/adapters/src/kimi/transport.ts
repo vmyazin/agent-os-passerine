@@ -20,6 +20,17 @@ const contentBlockSchema = z.discriminatedUnion('type', [
       text: z.string(),
     })
     .strict(),
+  // Current Kimi models are reasoning models and emit thinking blocks on
+  // the Anthropic-compatible endpoint. The block may carry extra fields
+  // (e.g. a signature), so it alone is not strict; unknown block TYPES
+  // still fail closed via the discriminated union.
+  z
+    .object({
+      type: z.literal('thinking'),
+      thinking: z.string(),
+      signature: z.string().optional(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal('tool_use'),
@@ -119,6 +130,9 @@ function toContentBlock(
       name: block.name,
       input: block.input,
     });
+  }
+  if (block.type === 'thinking') {
+    return Object.freeze({ type: 'thinking', thinking: block.thinking });
   }
   return Object.freeze({
     type: 'tool_result',

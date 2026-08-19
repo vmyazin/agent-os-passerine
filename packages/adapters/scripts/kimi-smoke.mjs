@@ -17,7 +17,7 @@ if (environment.AGENTOS_LIVE_TESTS !== '1' || kimi === undefined) {
 }
 
 const transport = createKimiHttpTransport(kimi);
-const model = environment.KIMI_SMOKE_MODEL?.trim() || 'kimi-k2-0905-preview';
+const model = environment.KIMI_SMOKE_MODEL?.trim() || 'kimi-k2.7-code';
 
 // No sandbox, no session: this only proves credentials + endpoint
 // compatibility against the Kimi Messages endpoint.
@@ -27,7 +27,7 @@ const response = await transport.send({
     { role: 'user', content: [{ type: 'text', text: 'Reply with OK.' }] },
   ],
   tools: [],
-  maxTokens: 32,
+  maxTokens: 256,
 });
 
 process.stdout.write(

@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { runKimiAgentLoop } from './loop.js';
 import { createKimiHttpTransport } from './transport.js';
-import type { KimiToolExecutor, KimiTransport } from './types.js';
+import type {
+  KimiContentBlock,
+  KimiToolExecutor,
+  KimiTransport,
+} from './types.js';
 
 type SendRequest = Parameters<KimiTransport['send']>[0];
 type SendResponse = Awaited<ReturnType<KimiTransport['send']>>;
@@ -549,6 +553,50 @@ describe('createKimiHttpTransport', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('accepts thinking blocks from reasoning models and replays them', async () => {
+    const calls: unknown[] = [];
+    const transport = {
+      send: async (request: {
+        messages: readonly unknown[];
+      }): Promise<{
+        content: readonly KimiContentBlock[];
+        stopReason: string | null;
+        usage: { inputTokens: number; outputTokens: number };
+      }> => {
+        calls.push(request.messages);
+        return calls.length === 1
+          ? {
+              content: [
+                { type: 'thinking', thinking: 'Let me consider.' },
+                {
+                  type: 'tool_use',
+                  id: 'tu-1',
+                  name: 'submit_result',
+                  input: { done: true },
+                },
+              ],
+              stopReason: 'tool_use',
+              usage: { inputTokens: 1, outputTokens: 1 },
+            }
+          : {
+              content: [],
+              stopReason: 'end_turn',
+              usage: { inputTokens: 0, outputTokens: 0 },
+            };
+      },
+    };
+    const result = await runKimiAgentLoop({
+      transport,
+      model: 'kimi-test',
+      initialInput: { task: 'x' },
+      tools: [],
+      executor: { execute: async () => ({ content: '', isError: false }) },
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    expect(result.status).toBe('submitted');
   });
 
   it('accepts a realistic full Anthropic Messages envelope with extra fields', async () => {

@@ -5,6 +5,7 @@ export interface KimiMessage {
 
 export type KimiContentBlock =
   | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'thinking'; readonly thinking: string }
   | {
       readonly type: 'tool_use';
       readonly id: string;

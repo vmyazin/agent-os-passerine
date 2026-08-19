@@ -13,7 +13,7 @@ models:
   # to run that role on the Kimi runtime (requires KIMI_API_KEY).
   # kimi:
   #   provider: kimi
-  #   model: kimi-k2-0905-preview
+  #   model: kimi-k2.7-code
   #   inputMicrodollarsPerMillionTokens: 0
   #   outputMicrodollarsPerMillionTokens: 0
   #   runtimeMicrodollarsPerMinute: 0
