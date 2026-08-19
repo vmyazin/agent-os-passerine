@@ -1,15 +1,49 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { initializeLocalRepository } from '@agentos/adapters';
 import type {
   RuntimeEvent,
   RuntimeHandle,
   RuntimeProvider,
   RuntimeStartRequest,
 } from '@agentos/core';
-import { describe, expect, it } from 'vitest';
+import { loadAgentOsConfig } from '@agentos/core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   assertKimiHandleSupported,
   composeCancellationRuntime,
+  ReaderConfigurationError,
+  repositoryHeadResolverFromEnv,
 } from './runtime';
+
+const localConfigYaml = (localPath: string) => `
+version: 1
+project: { name: exp, localPath: ${localPath} }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`;
+
+const GITHUB_CONFIG_YAML = `
+version: 1
+project: { name: exp, repository: https://github.com/team/repo }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`;
 
 type Call = { readonly method: string; readonly args: readonly unknown[] };
 
@@ -149,5 +183,52 @@ describe('assertKimiHandleSupported', () => {
     expect(() =>
       assertKimiHandleSupported({ id: 'kimichunk_abc123' }, false),
     ).not.toThrow();
+  });
+});
+
+describe('repositoryHeadResolverFromEnv', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('resolves a local experiment repository head via git rev-parse, without any GitHub reader env', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentos-head-resolver-'));
+    try {
+      const seeded = await initializeLocalRepository({
+        workspacesRoot: root,
+        name: 'exp',
+      });
+      vi.stubEnv('AGENTOS_LOCAL_WORKSPACES_ROOT', root);
+
+      const config = loadAgentOsConfig(localConfigYaml(seeded.localPath));
+      const resolved = await repositoryHeadResolverFromEnv().resolve(config);
+
+      expect(resolved).toEqual({
+        repository: 'local/exp',
+        branch: 'main',
+        repositorySha: seeded.headSha,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('wraps a misconfigured trusted reader in ReaderConfigurationError on the GitHub branch', async () => {
+    vi.stubEnv('GITHUB_APP_ID', '42');
+    // Reused publisher identity -- exactly what trustedReaderConfiguration()
+    // rejects.
+    vi.stubEnv('GITHUB_READER_APP_ID', '42');
+    vi.stubEnv(
+      'GITHUB_SELECTED_REPOSITORIES_JSON',
+      JSON.stringify([
+        { installationId: 1, owner: 'team', name: 'repo', repositoryId: 3 },
+      ]),
+    );
+
+    const config = loadAgentOsConfig(GITHUB_CONFIG_YAML);
+
+    await expect(
+      repositoryHeadResolverFromEnv().resolve(config),
+    ).rejects.toBeInstanceOf(ReaderConfigurationError);
   });
 });

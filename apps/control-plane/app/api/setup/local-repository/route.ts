@@ -1,10 +1,13 @@
-import { readFile, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { initializeLocalRepository } from '@agentos/adapters';
+import {
+  initializeLocalRepository,
+  LocalRepositoryAlreadyExistsError,
+} from '@agentos/adapters';
 
 import { localWorkspacesRootFromEnv } from '../../../../src/application/runtime';
 import { ServiceError } from '../../../../src/application/control-plane-service';
@@ -70,23 +73,18 @@ export function POST(request: Request): Promise<Response> {
           'set AGENTOS_LOCAL_WORKSPACES_ROOT to enable local experiments',
           409,
         );
-      const target = join(root, body.name);
-      const alreadyExists = await stat(target).then(
-        () => true,
-        () => false,
-      );
-      if (alreadyExists)
-        throw new ServiceError(
-          'already_exists',
-          `a local repository named "${body.name}" already exists`,
-          409,
-        );
       const packageManagerLine = await packageManagerLineFromMonorepoRoot();
-      return initializeLocalRepository({
-        workspacesRoot: root,
-        name: body.name,
-        ...(packageManagerLine === undefined ? {} : { packageManagerLine }),
-      });
+      try {
+        return await initializeLocalRepository({
+          workspacesRoot: root,
+          name: body.name,
+          ...(packageManagerLine === undefined ? {} : { packageManagerLine }),
+        });
+      } catch (error) {
+        if (error instanceof LocalRepositoryAlreadyExistsError)
+          throw new ServiceError('already_exists', error.message, 409);
+        throw error;
+      }
     },
   );
 }

@@ -55,4 +55,56 @@ describe('control-plane GitHub reader identity', () => {
       'GITHUB_READER_APP_PRIVATE_KEY is required',
     );
   });
+
+  // A deployment that has also opted into local experiments
+  // (AGENTOS_LOCAL_WORKSPACES_ROOT set) is NOT exempt from eager reader
+  // validation once it has started configuring a reader App
+  // (GITHUB_READER_APP_ID set): only a genuinely local-only deployment --
+  // no reader App id configured at all -- defers reader construction.
+  it('still validates the reader eagerly when local workspaces are also configured but a reader App id is set', () => {
+    enableDispatch();
+    process.env.AGENTOS_LOCAL_WORKSPACES_ROOT = '/workspaces/experiments';
+    process.env.GITHUB_APP_ID = '42';
+    process.env.GITHUB_READER_APP_ID = '42';
+
+    expect(() => workflowDispatchFromEnv()).toThrow(
+      'must identify a separate read-only GitHub App',
+    );
+  });
+
+  it('still requires the separate reader private key when local workspaces are also configured', () => {
+    enableDispatch();
+    process.env.AGENTOS_LOCAL_WORKSPACES_ROOT = '/workspaces/experiments';
+    process.env.GITHUB_APP_ID = '42';
+    process.env.GITHUB_READER_APP_ID = '43';
+    process.env.GITHUB_READER_SELECTED_REPOSITORIES_JSON = JSON.stringify([
+      {
+        installationId: 2,
+        owner: 'team',
+        name: 'repo',
+        repositoryId: 3,
+      },
+    ]);
+
+    expect(() => workflowDispatchFromEnv()).toThrow(
+      'GITHUB_READER_APP_PRIVATE_KEY is required',
+    );
+  });
+
+  it('defers reader validation for a genuinely local-only deployment (no reader App id at all)', () => {
+    enableDispatch();
+    process.env.AGENTOS_LOCAL_WORKSPACES_ROOT = '/workspaces/experiments';
+    delete process.env.GITHUB_READER_APP_ID;
+    delete process.env.GITHUB_APP_ID;
+    delete process.env.GITHUB_SELECTED_REPOSITORIES_JSON;
+
+    // No GitHub reader/publisher env at all: construction must not throw
+    // trying to validate a reader this deployment will never use. (It will
+    // still fail later, for an unrelated reason -- no R2 env configured --
+    // proving reader validation specifically was skipped, not that
+    // everything happened to succeed.)
+    expect(() => workflowDispatchFromEnv()).toThrow(
+      'CLOUDFLARE_R2_ACCOUNT_ID is required',
+    );
+  });
 });

@@ -9,7 +9,10 @@ export type {
   LocalGitPublisherOptions,
   LocalPublicationResult,
 } from './publisher.js';
-export { initializeLocalRepository } from './initialize.js';
+export {
+  initializeLocalRepository,
+  LocalRepositoryAlreadyExistsError,
+} from './initialize.js';
 export type {
   InitializeLocalRepositoryOptions,
   InitializeLocalRepositoryResult,

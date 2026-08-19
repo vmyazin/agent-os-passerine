@@ -85,6 +85,17 @@ function parsedRuntimeJson<T>(name: string): T {
   }
 }
 
+/**
+ * Distinguishes "the trusted GitHub reader is misconfigured or unset" from
+ * every other failure mode a repository-head resolution can hit, so the
+ * `GET /api/setup/repository-head` route can map it to a 503
+ * (`reader_unavailable`) instead of the generic 502
+ * (`repository_head_unavailable`) it uses for resolution failures.
+ */
+export class ReaderConfigurationError extends Error {
+  override readonly name = 'ReaderConfigurationError';
+}
+
 function trustedReaderConfiguration() {
   const readerAppId = Number(requiredRuntime('GITHUB_READER_APP_ID'));
   const publisherAppId = Number(requiredRuntime('GITHUB_APP_ID'));
@@ -149,7 +160,16 @@ export function repositoryHeadResolverFromEnv(): {
     | undefined;
   const getGithub = () => {
     if (github === undefined) {
-      const reader = trustedReaderConfiguration();
+      let reader: ReturnType<typeof trustedReaderConfiguration>;
+      try {
+        reader = trustedReaderConfiguration();
+      } catch (error) {
+        throw new ReaderConfigurationError(
+          error instanceof Error
+            ? error.message
+            : 'trusted reader is not configured',
+        );
+      }
       github = {
         resolver: createTrustedRepositoryHeadResolver({
           githubApp: reader.githubApp,
@@ -358,17 +378,22 @@ export function workflowDispatchFromEnv() {
     );
   }
   const repository = repositoryFromEnv();
-  // A deployment that has not opted into local experiments (no
-  // AGENTOS_LOCAL_WORKSPACES_ROOT) is a classic GitHub-only deployment:
-  // validate its trusted reader configuration eagerly, at this exact point,
-  // byte-identical to the pre-local-experiments behavior -- misconfiguration
-  // (e.g. reusing the publisher App identity) fails dispatch construction
-  // immediately, before the R2/artifact checks below. A deployment that HAS
-  // opted in might be local-only and must not be required to configure a
-  // GitHub reader it will never use, so its reader construction is deferred
-  // into the GitHub ingestor's lazy branch further down.
+  // A deployment validates its trusted reader configuration eagerly, at
+  // this exact point, whenever there is any indication it might actually
+  // need a GitHub reader: either it has not opted into local experiments at
+  // all (no AGENTOS_LOCAL_WORKSPACES_ROOT -- the classic, pre-local-
+  // experiments deployment shape), or it HAS opted in but has also started
+  // configuring a reader App (GITHUB_READER_APP_ID set) -- a
+  // GitHub-and-local deployment should discover a broken reader (e.g.
+  // reusing the publisher App identity) at construction time, not mid-
+  // dispatch the first time a GitHub-bound run needs it. Only a genuinely
+  // local-only deployment -- local workspaces configured AND no reader App
+  // id set at all -- defers reader construction into the GitHub ingestor's
+  // lazy branch further down, since that deployment may never need a
+  // GitHub reader and must not be required to configure one.
   const eagerReader =
-    localWorkspacesRootFromEnv() === undefined
+    localWorkspacesRootFromEnv() === undefined ||
+    (process.env.GITHUB_READER_APP_ID?.trim() ?? '') !== ''
       ? trustedReaderConfiguration()
       : undefined;
   const artifacts = createR2ArtifactStore({

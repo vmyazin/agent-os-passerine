@@ -4,6 +4,7 @@ import { parseAgentOsConfig } from '@agentos/core';
 
 import {
   controlPlaneService,
+  ReaderConfigurationError,
   repositoryHeadResolverFromEnv,
 } from '../../../../src/application/runtime';
 import { ServiceError } from '../../../../src/application/control-plane-service';
@@ -35,24 +36,24 @@ export function GET(request: Request): Promise<Response> {
           409,
         );
       }
-      let resolver: ReturnType<typeof repositoryHeadResolverFromEnv>;
-      try {
-        resolver = repositoryHeadResolverFromEnv();
-      } catch (error) {
-        throw new ServiceError(
-          'reader_unavailable',
-          error instanceof Error
-            ? error.message.slice(0, 500)
-            : 'trusted reader is not configured',
-          503,
-        );
-      }
+      // Construction itself never throws (it just builds closures); the
+      // trusted reader is only ever built -- and validated -- lazily, the
+      // first time resolve() actually needs the GitHub arm, so
+      // ReaderConfigurationError can only surface from the resolve() call
+      // below.
+      const resolver = repositoryHeadResolverFromEnv();
       const config = parseAgentOsConfig(
         JSON.parse(active.active.canonicalConfig),
       );
       try {
         return await resolver.resolve(config);
       } catch (error) {
+        if (error instanceof ReaderConfigurationError)
+          throw new ServiceError(
+            'reader_unavailable',
+            error.message.slice(0, 500),
+            503,
+          );
         throw new ServiceError(
           'repository_head_unavailable',
           error instanceof Error

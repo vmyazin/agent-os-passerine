@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { initializeLocalRepository } from './initialize.js';
+import {
+  initializeLocalRepository,
+  LocalRepositoryAlreadyExistsError,
+} from './initialize.js';
 import { cleanupFixtures, fixtureRoot } from './test-support.js';
 
 const exec = promisify(execFile);
@@ -88,12 +91,12 @@ describe('initializeLocalRepository', () => {
     expect(packageJson.packageManager).toBe('pnpm@11.12.0');
   });
 
-  it('rejects an already-existing directory', async () => {
+  it('rejects an already-existing directory with a distinguishable error', async () => {
     const root = await fixtureRoot();
     await initializeLocalRepository({ workspacesRoot: root, name: 'exp-dup' });
     await expect(
       initializeLocalRepository({ workspacesRoot: root, name: 'exp-dup' }),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(LocalRepositoryAlreadyExistsError);
   });
 
   it('rejects names outside the allowed pattern', async () => {
@@ -104,5 +107,25 @@ describe('initializeLocalRepository', () => {
     await expect(
       initializeLocalRepository({ workspacesRoot: root, name: 'UPPER' }),
     ).rejects.toThrow(/repository name/);
+  });
+
+  it('removes the directory it created if initialization fails partway through', async () => {
+    const root = await fixtureRoot();
+    // Force every `git` invocation after the (already-succeeded) `mkdir`
+    // to fail deterministically by making the `git` binary unresolvable,
+    // without touching the target directory itself -- a reliable trigger
+    // for "mkdir succeeded, then a later step failed" that doesn't depend
+    // on filesystem permission quirks.
+    const originalPath = process.env.PATH;
+    process.env.PATH = '/nonexistent-agentos-test-path';
+    try {
+      await expect(
+        initializeLocalRepository({ workspacesRoot: root, name: 'exp-fail' }),
+      ).rejects.toThrow();
+    } finally {
+      process.env.PATH = originalPath;
+    }
+
+    await expect(stat(join(root, 'exp-fail'))).rejects.toThrow();
   });
 });
