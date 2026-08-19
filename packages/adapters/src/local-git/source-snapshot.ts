@@ -114,9 +114,9 @@ export function createLocalSourceSnapshotIngestor(
         ]);
       } catch (error) {
         if (error instanceof LocalGitError)
-          throw new Error(
-            'source snapshot pinned SHA not found in repository',
-          );
+          throw new Error('source snapshot pinned SHA not found in repository', {
+            cause: error,
+          });
         throw error;
       }
       if (objectType !== 'commit')

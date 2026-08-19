@@ -497,7 +497,7 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
     }
 
     const succeededAt = now().toISOString();
-    record = await options.store.save(
+    await options.store.save(
       key,
       record.revision,
       { phase: 'succeeded', commitSha, updatedAt: succeededAt },
