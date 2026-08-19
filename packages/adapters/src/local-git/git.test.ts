@@ -60,3 +60,69 @@ describe('runGit', () => {
     );
   });
 });
+
+describe('runGit argument validation', () => {
+  it('rejects hash-object with a path argument instead of --stdin', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await expect(
+      runGit(repo, ['hash-object', '-w', '/etc/passwd']),
+    ).rejects.toThrow(LocalGitError);
+  });
+
+  it('rejects hash-object missing the required --stdin flag', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await expect(runGit(repo, ['hash-object', '-w'])).rejects.toThrow(
+      LocalGitError,
+    );
+  });
+
+  it('rejects ls-tree with an unknown flag', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await expect(
+      runGit(repo, ['ls-tree', '--stdin-paths', 'HEAD']),
+    ).rejects.toThrow(LocalGitError);
+  });
+
+  it('rejects commit-tree with -F to read a message from a file', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const tree = await runGit(repo, ['rev-parse', 'HEAD^{tree}']);
+    await expect(
+      runGit(repo, ['commit-tree', tree, '-F', '/etc/passwd']),
+    ).rejects.toThrow(LocalGitError);
+  });
+
+  it('allows the legitimate plumbing flows used by later tasks', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+
+    const blob = await runGit(repo, ['hash-object', '-w', '--stdin'], {
+      input: 'hello world\n',
+    });
+    expect(blob).toMatch(/^[0-9a-f]{40}$/);
+
+    const tree = await runGit(repo, ['mktree', '-z'], {
+      input: `100644 blob ${blob}\tfile.txt\0`,
+    });
+    expect(tree).toMatch(/^[0-9a-f]{40}$/);
+
+    const parent = await runGit(repo, ['rev-parse', 'HEAD']);
+    const commit = await runGit(repo, [
+      'commit-tree',
+      tree,
+      '-p',
+      parent,
+      '-m',
+      'test commit',
+    ]);
+    expect(commit).toMatch(/^[0-9a-f]{40}$/);
+
+    await runGit(repo, ['update-ref', 'refs/heads/x', commit, '']);
+    await expect(
+      runGit(repo, ['rev-parse', 'refs/heads/x']),
+    ).resolves.toBe(commit);
+  });
+});

@@ -11,16 +11,72 @@ export class LocalGitError extends Error {
   }
 }
 
-const ALLOWED_SUBCOMMANDS = new Set([
-  'rev-parse',
-  'ls-tree',
-  'cat-file',
-  'hash-object',
-  'mktree',
-  'commit-tree',
-  'update-ref',
-  'status',
-]);
+interface SubcommandRule {
+  /** Exact-match tokens (flags, or safe positional keywords) always allowed. */
+  readonly flags: readonly string[];
+  /** Whether arguments outside `flags` are permitted at all, as long as they
+   * don't start with '-'. `hash-object` sets this false so content can only
+   * ever arrive via stdin, never via a filesystem path argument. */
+  readonly allowPositional: boolean;
+  /** Flags that must be present for the call to be considered safe. */
+  readonly requiredFlags?: readonly string[];
+}
+
+const SUBCOMMAND_RULES: Record<string, SubcommandRule> = {
+  'rev-parse': { flags: [], allowPositional: true },
+  'ls-tree': { flags: ['-r', '-z'], allowPositional: true },
+  'cat-file': { flags: ['-p', 'blob', 'commit', 'tree'], allowPositional: true },
+  'hash-object': {
+    flags: ['-w', '--stdin'],
+    allowPositional: false,
+    requiredFlags: ['--stdin'],
+  },
+  mktree: { flags: ['-z', '--missing', '--missing=error'], allowPositional: true },
+  'commit-tree': { flags: ['-p', '-m'], allowPositional: true },
+  'update-ref': { flags: [], allowPositional: true },
+  status: { flags: ['--porcelain'], allowPositional: true },
+};
+
+const ALLOWED_SUBCOMMANDS = new Set(Object.keys(SUBCOMMAND_RULES));
+
+const MAX_ARGUMENT_LENGTH = 4096;
+
+/**
+ * Per-subcommand argument allowlisting. The subcommand allowlist alone is
+ * not enough: e.g. `hash-object <path>` reads an arbitrary file into the
+ * object store (retrievable via cat-file) without ever touching
+ * assertContainedRepository, which only validates the repository path, not
+ * plumbing arguments. Every argument must either be a known-safe flag for
+ * its subcommand, or (where positionals are allowed at all) a value that
+ * does not look like a flag and is bounded in size and character content.
+ */
+function assertSafeArguments(subcommand: string, rest: readonly string[]): void {
+  const rule = SUBCOMMAND_RULES[subcommand];
+  if (rule === undefined)
+    throw new LocalGitError(
+      'forbidden_subcommand',
+      `git subcommand is not allowed: ${subcommand}`,
+    );
+  for (const arg of rest) {
+    if (arg.length > MAX_ARGUMENT_LENGTH || /[\0\n]/.test(arg))
+      throw new LocalGitError(
+        'forbidden_argument',
+        `argument to git ${subcommand} is too long or contains forbidden characters`,
+      );
+    if (rule.flags.includes(arg)) continue;
+    if (!rule.allowPositional || arg.startsWith('-'))
+      throw new LocalGitError(
+        'forbidden_argument',
+        `argument is not allowed for git ${subcommand}: ${arg}`,
+      );
+  }
+  for (const required of rule.requiredFlags ?? [])
+    if (!rest.includes(required))
+      throw new LocalGitError(
+        'forbidden_argument',
+        `git ${subcommand} requires ${required}`,
+      );
+}
 
 /**
  * Containment gate for every local-repository path. Realpath resolution
@@ -73,6 +129,7 @@ export async function runGit(
       'forbidden_subcommand',
       `git subcommand is not allowed: ${subcommand ?? '(none)'}`,
     );
+  assertSafeArguments(subcommand, args.slice(1));
   return new Promise<string>((resolvePromise, rejectPromise) => {
     const child = spawn('git', ['-C', repository, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -107,6 +164,10 @@ export async function runGit(
         ),
       );
     });
+    // Without this handler, an EPIPE while writing (e.g. the process died
+    // before we finished writing input) becomes an uncaught exception
+    // rather than surfacing through the 'error'/'close' handlers above.
+    child.stdin.on('error', () => {});
     if (options.input !== undefined) child.stdin.write(options.input);
     child.stdin.end();
   });
