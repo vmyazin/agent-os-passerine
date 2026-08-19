@@ -18,6 +18,7 @@ import {
   type ArtifactCapabilityKey,
   type ArtifactMetadata,
   type ConfigSnapshot,
+  type GitHubPublicationRepository,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
   type RuntimeAgent,
@@ -396,9 +397,10 @@ export async function createProductionFeatureWorkflowFromEnv(
     secret: testReportKey.secret,
     kind: 'trusted-test-report',
   });
-  const selectedRepositories = parsedJson<
-    PublicationManifestBody['repository'][]
-  >(environment, 'GITHUB_SELECTED_REPOSITORIES_JSON');
+  const selectedRepositories = parsedJson<GitHubPublicationRepository[]>(
+    environment,
+    'GITHUB_SELECTED_REPOSITORIES_JSON',
+  );
   if (selectedRepositories.length !== 1)
     throw new Error('the POC requires exactly one selected repository');
   const issuer = createHmacAttestationIssuer<PublicationAuthorizationClaims>({

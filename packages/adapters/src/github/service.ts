@@ -1,7 +1,7 @@
 import type {
   AttestationVerifier,
+  GitHubPublicationRepository,
   PublicationAuthorizationClaims,
-  PublicationManifestBody,
 } from '@agentos/core';
 
 import { createGitHubAppClientFactory } from './github-app.js';
@@ -28,7 +28,7 @@ export interface TrustedGitHubPublisherServiceOptions {
   };
   readonly databaseEnvironment: Readonly<Record<string, string | undefined>>;
   readonly authorizationVerifier: AttestationVerifier<PublicationAuthorizationClaims>;
-  readonly selectedRepositories: readonly PublicationManifestBody['repository'][];
+  readonly selectedRepositories: readonly GitHubPublicationRepository[];
   readonly policyResolver: TrustedPublicationPolicyResolver;
   readonly isCancelled?: (projectId: string, runId: string) => Promise<boolean>;
 }

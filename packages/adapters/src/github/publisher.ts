@@ -3,11 +3,13 @@ import { createHash } from 'node:crypto';
 import {
   canonicalPublicationPolicyDigest,
   evaluatePublicationPolicy,
+  isLocalRepository,
   normalizeRepositoryPathSyntax,
   normalizePublicationPolicySnapshot,
   parsePublicationManifest,
   validatePublicationAuthorization,
   type AttestationVerifier,
+  type GitHubPublicationRepository,
   type PublicationAuthorizationClaims,
   type PublicationChange,
   type PublicationManifestBody,
@@ -46,7 +48,7 @@ export interface TrustedGitHubPublisherOptions {
   readonly clients: GitHubInstallationClientFactory;
   readonly store: PublicationStore;
   readonly authorizationVerifier: AttestationVerifier<PublicationAuthorizationClaims>;
-  readonly selectedRepositories: readonly PublicationManifestBody['repository'][];
+  readonly selectedRepositories: readonly GitHubPublicationRepository[];
   readonly policyResolver: (input: {
     readonly projectId: string;
     readonly runId: string;
@@ -99,6 +101,8 @@ function publicationKey(
   manifest: PublicationManifestBody,
   digest: string,
 ): string {
+  if (isLocalRepository(manifest.repository))
+    rejected('local publications must use the local publisher');
   return hash(
     [
       manifest.projectId,
@@ -111,6 +115,8 @@ function publicationKey(
 }
 
 function bindingKey(manifest: PublicationManifestBody): string {
+  if (isLocalRepository(manifest.repository))
+    rejected('local publications must use the local publisher');
   return hash(
     [manifest.projectId, manifest.runId, manifest.repository.repositoryId].join(
       '\0',
@@ -119,8 +125,8 @@ function bindingKey(manifest: PublicationManifestBody): string {
 }
 
 function sameRepository(
-  left: PublicationManifestBody['repository'],
-  right: PublicationManifestBody['repository'],
+  left: GitHubPublicationRepository,
+  right: GitHubPublicationRepository,
 ): boolean {
   return (
     left.owner.toLocaleLowerCase('en-US') ===
@@ -177,7 +183,7 @@ function storedBlobShas(
 
 function validateRepository(
   actual: Awaited<ReturnType<GitHubInstallationClient['getRepository']>>,
-  expected: PublicationManifestBody['repository'],
+  expected: GitHubPublicationRepository,
   expectedBranch: string,
 ): void {
   if (
@@ -337,8 +343,11 @@ export function createTrustedGitHubPublisher(
   const prepare = async (input: unknown) => {
     const parsed = parsePublicationManifest(input);
     const manifest = parsed.manifest;
+    if (isLocalRepository(manifest.repository))
+      rejected('local publications must use the local publisher');
+    const expectedRepository: GitHubPublicationRepository = manifest.repository;
     const selected = options.selectedRepositories.some((candidate) =>
-      sameRepository(candidate, manifest.repository),
+      sameRepository(candidate, expectedRepository),
     );
     if (!selected) rejected('Repository is not selected for publication');
     verifyAuthorization(parsed, options.authorizationVerifier, now());
@@ -369,6 +378,9 @@ export function createTrustedGitHubPublisher(
 
   const execute = async (input: unknown): Promise<PublicationResult> => {
     const { parsed, manifest, policy } = await prepare(input);
+    if (isLocalRepository(manifest.repository))
+      rejected('local publications must use the local publisher');
+    const expectedRepository: GitHubPublicationRepository = manifest.repository;
 
     const key = publicationKey(manifest, parsed.manifestDigest);
     const branch = branchForRun(manifest.runId);
@@ -377,7 +389,7 @@ export function createTrustedGitHubPublisher(
       bindingKey: bindingKey(manifest),
       projectId: manifest.projectId,
       runId: manifest.runId,
-      repositoryId: manifest.repository.repositoryId,
+      repositoryId: expectedRepository.repositoryId,
       manifestDigest: parsed.manifestDigest,
       policyDigest: manifest.policyDigest,
       baseSha: manifest.expectedBase.sha,
@@ -465,8 +477,8 @@ export function createTrustedGitHubPublisher(
     };
 
     const scope: InstallationClientScope = {
-      ...manifest.repository,
-      repositoryIds: [manifest.repository.repositoryId],
+      ...expectedRepository,
+      repositoryIds: [expectedRepository.repositoryId],
       permissions: { contents: 'write', pullRequests: 'write' },
     };
 
@@ -475,7 +487,7 @@ export function createTrustedGitHubPublisher(
         const repository = await github.getRepository();
         validateRepository(
           repository,
-          manifest.repository,
+          expectedRepository,
           manifest.expectedBase.branch,
         );
         const baseRef = await github.getReference(manifest.expectedBase.branch);
@@ -531,7 +543,7 @@ export function createTrustedGitHubPublisher(
               branch,
               base: manifest.expectedBase.branch,
               baseSha: manifest.expectedBase.sha,
-              repositoryId: manifest.repository.repositoryId,
+              repositoryId: expectedRepository.repositoryId,
               commitSha: record.commitSha,
               title,
               body,
@@ -676,7 +688,7 @@ export function createTrustedGitHubPublisher(
           const beforeRefRepository = await github.getRepository();
           validateRepository(
             beforeRefRepository,
-            manifest.repository,
+            expectedRepository,
             manifest.expectedBase.branch,
           );
           const beforeRefBase = await github.getReference(
@@ -705,7 +717,7 @@ export function createTrustedGitHubPublisher(
           const afterRefRepository = await github.getRepository();
           validateRepository(
             afterRefRepository,
-            manifest.repository,
+            expectedRepository,
             manifest.expectedBase.branch,
           );
         }
@@ -805,7 +817,7 @@ export function createTrustedGitHubPublisher(
             branch,
             base: manifest.expectedBase.branch,
             baseSha: manifest.expectedBase.sha,
-            repositoryId: manifest.repository.repositoryId,
+            repositoryId: expectedRepository.repositoryId,
             commitSha,
             title,
             body,

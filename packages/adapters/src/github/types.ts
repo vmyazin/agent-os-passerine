@@ -1,4 +1,4 @@
-import type { PublicationManifestBody } from '@agentos/core';
+import type { GitHubPublicationRepository } from '@agentos/core';
 import type { PublicationPhase } from './public-types.js';
 
 export type {
@@ -97,7 +97,7 @@ export interface PullRequest {
   readonly body: string;
 }
 
-export type InstallationClientScope = PublicationManifestBody['repository'] & {
+export type InstallationClientScope = GitHubPublicationRepository & {
   readonly repositoryIds: readonly [number];
   readonly permissions: {
     readonly contents: 'write';
@@ -105,11 +105,10 @@ export type InstallationClientScope = PublicationManifestBody['repository'] & {
   };
 };
 
-export type ReadOnlyInstallationClientScope =
-  PublicationManifestBody['repository'] & {
-    readonly repositoryIds: readonly [number];
-    readonly permissions: { readonly contents: 'read' };
-  };
+export type ReadOnlyInstallationClientScope = GitHubPublicationRepository & {
+  readonly repositoryIds: readonly [number];
+  readonly permissions: { readonly contents: 'read' };
+};
 
 export interface GitHubInstallationClientFactory {
   withClient<T>(

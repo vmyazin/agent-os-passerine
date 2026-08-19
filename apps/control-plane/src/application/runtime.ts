@@ -22,7 +22,7 @@ import {
   isoTimestamp,
   parseAgentOsConfig,
   persistenceId,
-  type PublicationManifestBody,
+  type GitHubPublicationRepository,
   type RuntimeHandle,
   type RuntimeProvider,
 } from '@agentos/core';
@@ -80,13 +80,13 @@ function trustedReaderConfiguration() {
     throw new Error(
       'GITHUB_READER_APP_ID must identify a separate read-only GitHub App',
     );
-  const selectedRepositories = parsedRuntimeJson<
-    PublicationManifestBody['repository'][]
-  >('GITHUB_READER_SELECTED_REPOSITORIES_JSON');
+  const selectedRepositories = parsedRuntimeJson<GitHubPublicationRepository[]>(
+    'GITHUB_READER_SELECTED_REPOSITORIES_JSON',
+  );
   if (selectedRepositories.length !== 1)
     throw new Error('the POC requires exactly one selected reader repository');
   const publisherRepositories = parsedRuntimeJson<
-    PublicationManifestBody['repository'][]
+    GitHubPublicationRepository[]
   >('GITHUB_SELECTED_REPOSITORIES_JSON');
   const readerRepository = selectedRepositories[0]!;
   const publisherRepository = publisherRepositories[0];

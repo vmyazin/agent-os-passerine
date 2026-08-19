@@ -95,7 +95,7 @@ const branchSchema = z
     }
     return true;
   }, 'invalid base branch');
-const repositorySchema = z
+const githubRepositorySchema = z
   .object({
     owner: z.string().regex(OWNER, 'invalid repository owner'),
     name: z.string().regex(REPOSITORY, 'invalid repository name'),
@@ -103,6 +103,27 @@ const repositorySchema = z
     repositoryId: z.number().int().positive().safe(),
   })
   .strict();
+const localRepositorySchema = z
+  .object({
+    kind: z.literal('local'),
+    owner: z.literal('local'),
+    name: z.string().regex(REPOSITORY, 'invalid repository name'),
+  })
+  .strict();
+export const publicationRepositorySchema = z.union([
+  githubRepositorySchema,
+  localRepositorySchema,
+]);
+export type PublicationRepository = z.infer<typeof publicationRepositorySchema>;
+export type GitHubPublicationRepository = z.infer<
+  typeof githubRepositorySchema
+>;
+export type LocalPublicationRepository = z.infer<typeof localRepositorySchema>;
+export function isLocalRepository(
+  value: PublicationRepository,
+): value is LocalPublicationRepository {
+  return 'kind' in value && value.kind === 'local';
+}
 const expectedBaseSchema = z
   .object({
     branch: branchSchema,
@@ -140,7 +161,7 @@ export const publicationManifestBodySchema = z
     projectId: idSchema,
     runId: idSchema,
     stepId: idSchema,
-    repository: repositorySchema,
+    repository: publicationRepositorySchema,
     expectedBase: expectedBaseSchema,
     configDigest: digestSchema,
     policyDigest: digestSchema,
@@ -179,7 +200,7 @@ const authorizationClaimsSchema = z
     projectId: idSchema,
     runId: idSchema,
     stepId: idSchema,
-    repository: repositorySchema,
+    repository: publicationRepositorySchema,
     expectedBase: expectedBaseSchema,
     configDigest: digestSchema,
     policyDigest: digestSchema,

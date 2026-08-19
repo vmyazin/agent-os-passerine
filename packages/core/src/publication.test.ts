@@ -9,8 +9,10 @@ import {
   canonicalPublicationManifestDigest,
   DEFAULT_PUBLICATION_POLICY,
   evaluatePublicationPolicy,
+  isLocalRepository,
   normalizePublicationPolicySnapshot,
   parsePublicationManifest,
+  publicationRepositorySchema,
   validatePublicationAuthorization,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
@@ -383,5 +385,38 @@ describe('publication manifest', () => {
         authorization: authorize(branchInjection),
       }),
     ).toThrow(/branch/i);
+  });
+});
+
+describe('local repository identity', () => {
+  it('accepts the local variant and narrows it', () => {
+    const parsed = publicationRepositorySchema.parse({
+      kind: 'local',
+      owner: 'local',
+      name: 'experiment-1',
+    });
+    expect(isLocalRepository(parsed)).toBe(true);
+  });
+
+  it('rejects local variants with GitHub identifiers', () => {
+    expect(() =>
+      publicationRepositorySchema.parse({
+        kind: 'local',
+        owner: 'local',
+        name: 'x',
+        repositoryId: 1,
+      }),
+    ).toThrow();
+  });
+
+  it('keeps rejecting GitHub identities without positive ids', () => {
+    expect(() =>
+      publicationRepositorySchema.parse({
+        owner: 'octo',
+        name: 'repo',
+        installationId: 0,
+        repositoryId: 1,
+      }),
+    ).toThrow();
   });
 });

@@ -8,6 +8,7 @@ import {
   createHmacAttestationIssuer,
   createHmacAttestationVerifier,
   DEFAULT_PUBLICATION_POLICY,
+  type GitHubPublicationRepository,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
 } from '@agentos/core';
@@ -910,7 +911,9 @@ describe('trusted GitHub publisher', () => {
       clients: state.factory,
       store: state.store,
       authorizationVerifier: verifier,
-      selectedRepositories: [manifest().repository],
+      selectedRepositories: [
+        manifest().repository as GitHubPublicationRepository,
+      ],
       policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
       now: () => new Date('2026-08-17T12:00:00.000Z'),
       isCancelled: async () => cancelled,
@@ -935,7 +938,9 @@ describe('trusted GitHub publisher', () => {
       clients: state.factory,
       store: state.store,
       authorizationVerifier: verifier,
-      selectedRepositories: [manifest().repository],
+      selectedRepositories: [
+        manifest().repository as GitHubPublicationRepository,
+      ],
       policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
       now: () => new Date('2026-08-17T12:00:00.000Z'),
       isCancelled: async () => cancelled,
@@ -964,7 +969,9 @@ describe('trusted GitHub publisher', () => {
       clients: state.factory,
       store: state.store,
       authorizationVerifier: verifier,
-      selectedRepositories: [manifest().repository],
+      selectedRepositories: [
+        manifest().repository as GitHubPublicationRepository,
+      ],
       policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
       now: () => new Date('2026-08-17T12:00:00.000Z'),
       isCancelled: async () => cancelled,
@@ -1023,7 +1030,9 @@ describe('trusted GitHub publisher', () => {
       clients: state.factory,
       store,
       authorizationVerifier: verifier,
-      selectedRepositories: [manifest().repository],
+      selectedRepositories: [
+        manifest().repository as GitHubPublicationRepository,
+      ],
       policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
       now: () => new Date('2026-08-17T12:00:00.000Z'),
       isCancelled: async () => cancelled,
@@ -1043,7 +1052,9 @@ describe('trusted GitHub publisher', () => {
         clients: state.factory,
         store: state.store,
         authorizationVerifier: verifier,
-        selectedRepositories: [manifest().repository],
+        selectedRepositories: [
+          manifest().repository as GitHubPublicationRepository,
+        ],
         policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
         now: () => new Date('2026-08-17T12:00:00.000Z'),
         ...(when === 'before'
@@ -1085,7 +1096,9 @@ describe('trusted GitHub publisher', () => {
       clients: state.factory,
       store: state.store,
       authorizationVerifier: verifier,
-      selectedRepositories: [manifest().repository],
+      selectedRepositories: [
+        manifest().repository as GitHubPublicationRepository,
+      ],
       policyResolver: async () => DEFAULT_PUBLICATION_POLICY,
       now: () => clock,
     });

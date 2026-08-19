@@ -1,11 +1,11 @@
-import type { PublicationManifestBody } from '@agentos/core';
+import type { GitHubPublicationRepository } from '@agentos/core';
 
 import { createGitHubReadOnlyClientFactory } from './github-app.js';
 import type { GitHubReadOnlyClientFactory } from './types.js';
 
 export interface TrustedRepositoryHeadResolver {
   resolve(input: {
-    readonly repository: PublicationManifestBody['repository'];
+    readonly repository: GitHubPublicationRepository;
     readonly repositoryUrl: string;
     readonly defaultBranch: string;
   }): Promise<string>;
