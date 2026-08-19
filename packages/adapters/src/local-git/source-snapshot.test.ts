@@ -36,10 +36,13 @@ function ingestorFor(
 }
 
 describe('local source snapshot ingestion', () => {
-  it('writes a source-bundle-v1 artifact that round-trips repository content', async () => {
+  it('writes a source-bundle-v1 artifact that round-trips repository content byte-exactly', async () => {
     const root = await fixtureRoot();
     const repo = await seedRepo(root, 'exp');
-    await writeFile(join(repo, 'script.sh'), '#!/bin/sh\necho hi\n');
+    // seedRepo's file.txt ends with a newline ('hello\n'); script.sh here
+    // deliberately does NOT, so the round-trip covers both cases -- content
+    // must come back byte-identical to what was seeded either way.
+    await writeFile(join(repo, 'script.sh'), '#!/bin/sh\necho hi');
     await chmod(join(repo, 'script.sh'), 0o755);
     await exec('git', ['-C', repo, 'add', 'script.sh']);
     await exec('git', ['-C', repo, 'commit', '-m', 'add script']);
@@ -84,11 +87,12 @@ describe('local source snapshot ingestion', () => {
     expect(body.baseBranch).toBe('main');
     expect(body.repositorySha).toBe(headSha);
     expect(body.treeSha).toBe(expectedTreeSha);
-    // `runGit` trimEnd()s stdout, so a file's trailing newline is not
-    // preserved through this ingestor -- see the caveat documented next to
-    // the `cat-file blob` call in source-snapshot.ts.
+    // Content must be byte-identical to what was seeded, including the
+    // trailing newline on file.txt and the absence of one on script.sh --
+    // this ingestor's `cat-file blob` read uses `raw: true` specifically
+    // so trailing bytes are never dropped.
     expect(body.files).toEqual([
-      { path: 'file.txt', mode: '100644', content: 'hello' },
+      { path: 'file.txt', mode: '100644', content: 'hello\n' },
       {
         path: 'script.sh',
         mode: '100755',
@@ -97,7 +101,7 @@ describe('local source snapshot ingestion', () => {
     ]);
   });
 
-  it('rejects a binding pinned to a nonexistent SHA', async () => {
+  it('rejects a binding pinned to a nonexistent SHA with a clear message', async () => {
     const root = await fixtureRoot();
     const repo = await seedRepo(root, 'exp');
     const { ingestor } = ingestorFor(root, {
@@ -108,7 +112,9 @@ describe('local source snapshot ingestion', () => {
         repositorySha: 'a'.repeat(40),
       },
     });
-    await expect(ingestor.ensure('run-1')).rejects.toThrow();
+    await expect(ingestor.ensure('run-1')).rejects.toThrow(
+      'source snapshot pinned SHA not found in repository',
+    );
   });
 
   it('rejects a tree containing a symlink', async () => {

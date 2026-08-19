@@ -95,6 +95,20 @@ describe('runGit argument validation', () => {
     );
   });
 
+  it('the raw option preserves trailing bytes that the default trims', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const blob = await runGit(repo, ['hash-object', '-w', '--stdin'], {
+      input: 'trailing newline\n\n',
+    });
+    await expect(runGit(repo, ['cat-file', 'blob', blob])).resolves.toBe(
+      'trailing newline',
+    );
+    await expect(
+      runGit(repo, ['cat-file', 'blob', blob], { raw: true }),
+    ).resolves.toBe('trailing newline\n\n');
+  });
+
   it('rejects commit-tree with -F to read a message from a file', async () => {
     const root = await fixtureRoot();
     const repo = await seedRepo(root, 'exp');

@@ -124,7 +124,15 @@ export async function assertContainedRepository(
 export async function runGit(
   repository: string,
   args: readonly string[],
-  options: { readonly input?: Uint8Array | string } = {},
+  options: {
+    readonly input?: Uint8Array | string;
+    /** When true, resolves with stdout decoded as UTF-8 exactly as
+     * received, with no `trimEnd()` applied. Needed by callers (e.g. blob
+     * content reads) that must preserve trailing whitespace/newlines
+     * byte-for-byte. Defaults to false, preserving the historical
+     * trimmed behavior every other caller relies on. */
+    readonly raw?: boolean;
+  } = {},
 ): Promise<string> {
   const subcommand = args[0];
   if (subcommand === undefined || !ALLOWED_SUBCOMMANDS.has(subcommand))
@@ -156,8 +164,10 @@ export async function runGit(
       rejectPromise(new LocalGitError('git_failed', error.message)),
     );
     child.on('close', (code) => {
-      if (code === 0)
-        return resolvePromise(Buffer.concat(stdout).toString('utf8').trimEnd());
+      if (code === 0) {
+        const text = Buffer.concat(stdout).toString('utf8');
+        return resolvePromise(options.raw === true ? text : text.trimEnd());
+      }
       rejectPromise(
         new LocalGitError(
           'git_failed',

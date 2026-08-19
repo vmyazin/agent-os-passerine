@@ -10,7 +10,7 @@ import {
   MAX_SOURCE_BUNDLE_BYTES,
   type TrustedSourceSnapshotIngestor,
 } from '../github/source-snapshot.js';
-import { assertContainedRepository, runGit } from './git.js';
+import { assertContainedRepository, runGit, LocalGitError } from './git.js';
 
 export interface LocalSourceSnapshotBinding {
   readonly projectId: string;
@@ -100,10 +100,32 @@ export function createLocalSourceSnapshotIngestor(
         options.workspacesRoot,
       );
 
-      // `git rev-parse <full-sha>` does not verify the object exists (it
-      // just normalizes the revision expression), so it alone cannot catch
-      // a bogus pinned SHA -- the `cat-file -t` call below is what
-      // actually verifies existence and that the object is a commit.
+      // `cat-file -t` is the primary existence/type check: it is the call
+      // that actually looks the object up in the object database. A
+      // syntactically valid but nonexistent 40-hex SHA makes git exit
+      // non-zero here, which `runGit` surfaces as a `LocalGitError` --
+      // normalize that into a clear, specific message.
+      let objectType: string;
+      try {
+        objectType = await runGit(repo, [
+          'cat-file',
+          '-t',
+          binding.repositorySha,
+        ]);
+      } catch (error) {
+        if (error instanceof LocalGitError)
+          throw new Error(
+            'source snapshot pinned SHA not found in repository',
+          );
+        throw error;
+      }
+      if (objectType !== 'commit')
+        throw new Error('source snapshot pinned SHA is not a commit');
+
+      // `git rev-parse <full-sha>` does not itself verify the object
+      // exists -- it just normalizes/echoes a well-formed revision
+      // expression -- so this is a secondary self-consistency check, not
+      // an existence check (that's what `cat-file -t` above is for).
       const resolvedSha = await runGit(repo, [
         'rev-parse',
         binding.repositorySha,
@@ -112,13 +134,6 @@ export function createLocalSourceSnapshotIngestor(
         throw new Error(
           'source snapshot pinned SHA does not resolve to itself',
         );
-      const objectType = await runGit(repo, [
-        'cat-file',
-        '-t',
-        binding.repositorySha,
-      ]);
-      if (objectType !== 'commit')
-        throw new Error('source snapshot pinned SHA is not a commit');
 
       const treeSha = await runGit(repo, [
         'rev-parse',
@@ -159,15 +174,14 @@ export function createLocalSourceSnapshotIngestor(
         if (seen.has(entry.path))
           throw new Error('source snapshot contains duplicate paths');
         seen.add(entry.path);
-        // `runGit` decodes stdout as utf8 and trimEnd()s the whole
-        // buffer, so a file's trailing whitespace/newlines are lost here
-        // -- this ingestor is therefore not a byte-exact mirror of `git
-        // cat-file blob` (the GitHub ingestor's TextDecoder-based path
-        // preserves exact blob bytes). The bundle this ingestor produces
-        // is internally consistent, though: every consumer that reads a
-        // file's content reads it back through this same normalization,
-        // so round-trips through this ingestor compare equal.
-        const content = await runGit(repo, ['cat-file', 'blob', entry.sha]);
+        // `raw: true` disables runGit's default trimEnd(), so this
+        // content is byte-exact (matching the GitHub ingestor's
+        // exact-byte blob reads) -- required because the materialize
+        // script later writes this content verbatim into the
+        // verification sandbox.
+        const content = await runGit(repo, ['cat-file', 'blob', entry.sha], {
+          raw: true,
+        });
         if (content.includes('\0'))
           throw new Error('source snapshot contains a binary file');
         const size = new TextEncoder().encode(content).byteLength;
