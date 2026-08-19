@@ -1280,6 +1280,52 @@ describe('bounded normalization, replay, output, and usage', () => {
     });
   });
 
+  it('normalizes streamed usage events that omit active_seconds', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    // The live API emits span.model_request_end usage without active_seconds;
+    // the stream must keep flowing and report zero runtime for that event.
+    client.streamBatches.set(handle.id, [
+      [
+        {
+          id: 'usage-1',
+          type: 'span.model_request_end',
+          processed_at: NOW.toISOString(),
+          model_usage: {
+            input_tokens: 589,
+            output_tokens: 4,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+        {
+          id: 'terminated-1',
+          type: 'session.status_terminated',
+          processed_at: NOW.toISOString(),
+        },
+      ],
+    ]);
+
+    const events = [];
+    for await (const event of provider.events(handle)) events.push(event);
+
+    expect(events.map((event) => [event.id, event.type])).toEqual([
+      ['usage-1', 'usage'],
+      ['terminated-1', 'terminated'],
+    ]);
+    expect(events[0]!.payload).toMatchObject({
+      inputTokens: 589,
+      outputTokens: 4,
+      runtimeMs: 0,
+    });
+  });
+
   it('re-lists persisted history before every reconnect and captures gap events', async () => {
     const { client, provider } = await syncedProvider(undefined, {
       limits: { maxStreamReconnects: 1 },

@@ -86,7 +86,14 @@ export function resolveFeatureRolesFromSnapshot(
             id: step.agent,
             model: model.model,
             instructions: agent.prompt,
-            tools: [...agent.tools],
+            // Managed Agents rejects sessions whose file resources cannot be
+            // read, and every workflow session mounts the source bundle. The
+            // config invariant stays Bash-only for verification; the resolved
+            // runtime toolset additionally enables the read tool.
+            tools:
+              role === 'verification'
+                ? [...new Set([...agent.tools, 'read'])]
+                : [...agent.tools],
             mcps:
               role === 'verification'
                 ? []

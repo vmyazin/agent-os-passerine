@@ -184,12 +184,18 @@ function policy(config: AgentOsConfig) {
   });
 }
 
+// The inputs directory is passed as argv[2]: Managed Agents currently mounts
+// file resources under /mnt/session/uploads/<mount_path> rather than at the
+// absolute mount path itself, so the trusted command resolves the real
+// location at run time and hands it to this script.
 const MATERIALIZE_SCRIPT = `import { readFile, mkdir, writeFile, rm, chmod } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
+const inputs = process.argv[2];
+if (typeof inputs !== 'string' || inputs.length === 0) throw new Error('inputs directory argument is required');
 const root = '/workspace/repo';
 const safe = (p) => { if (typeof p !== 'string' || p.startsWith('/') || p.includes('\\\\') || p.includes('\\0')) throw new Error('unsafe path'); const t=resolve(root,p); if(t!==root&&!t.startsWith(root+sep)) throw new Error('escape'); return t; };
-const source=JSON.parse(await readFile('/workspace/inputs/source-bundle.json','utf8'));
-const changes=JSON.parse(await readFile('/workspace/inputs/changes.json','utf8'));
+const source=JSON.parse(await readFile(inputs+'/source-bundle.json','utf8'));
+const changes=JSON.parse(await readFile(inputs+'/changes.json','utf8'));
 for (const f of source.files) { const t=safe(f.path); await mkdir(dirname(t),{recursive:true}); await writeFile(t,f.content,{mode:f.mode==='100755'?0o755:0o644}); }
 for (const c of changes.changes) { const t=safe(c.path); if(c.operation==='delete') await rm(t,{force:true}); else { await mkdir(dirname(t),{recursive:true}); await writeFile(t,c.content,{mode:c.mode==='100755'?0o755:0o644}); await chmod(t,c.mode==='100755'?0o755:0o644); } }
 `;
@@ -207,7 +213,7 @@ export function exactTrustedCommand(definition: {
   const invocation = [definition.executable, ...definition.arguments]
     .map(shellQuote)
     .join(' ');
-  return `set +e; rm -rf /workspace/repo; mkdir -p /workspace/repo; node /workspace/inputs/materialize.mjs && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
+  return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
 }
 
 function priceUsage(
@@ -499,12 +505,7 @@ export async function createProductionFeatureWorkflowFromEnv(
         Record<string, { executable: string; arguments: string[] }>
       >(environment, 'AGENTOS_TRUSTED_TEST_COMMANDS_JSON');
       const verifier = createTrustedWorkflowVerifier({
-        policy: {
-          protectedPaths: config.policies.protectedPaths,
-          maxFiles: 100,
-          maxFileBytes: config.policies.maxFileBytes,
-          maxTotalBytes: 5_000_000,
-        },
+        policy: policy(config),
         artifacts,
         attest: (evidence) => {
           const evidenceDigest = createHash('sha256')

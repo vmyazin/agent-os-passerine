@@ -275,10 +275,12 @@ describe('Artifact MCP handler', () => {
     );
     await expect(client.ping()).resolves.toEqual({});
     const listed = await client.listTools();
+    // Advertised names use underscores (Managed Agents rejects dots); the
+    // dotted spellings remain accepted on tools/call.
     expect(listed.tools.map((tool) => tool.name)).toEqual([
-      'artifact.get',
-      'artifact.put',
-      'artifact.list',
+      'artifact_get',
+      'artifact_put',
+      'artifact_list',
     ]);
     const stored = await client.callTool({
       name: 'artifact.put',

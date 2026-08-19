@@ -746,13 +746,12 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   async collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput> {
     const events = await this.#listEvents(handle, this.#limits.maxOutputBytes);
     const messages = events.filter((event) => event.type === 'message');
-    const text = messages
-      .map((event) =>
-        isRecord(event.payload) && typeof event.payload.text === 'string'
-          ? event.payload.text
-          : '',
-      )
-      .join('\n');
+    const texts = messages.map((event) =>
+      isRecord(event.payload) && typeof event.payload.text === 'string'
+        ? event.payload.text
+        : '',
+    );
+    const text = texts.join('\n');
     const files = await this.#wrap(async () =>
       collectBounded(
         await this.#client.beta.files.list({
@@ -762,7 +761,11 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         this.#limits.maxRemoteResources,
       ),
     );
-    const data = parseStructuredOutput(text);
+    // The final message is the deliverable. Agents that emit an interim
+    // status message would otherwise poison the concatenated parse, so the
+    // last message wins and the joined text is only a fallback.
+    const data =
+      parseStructuredOutput(texts.at(-1) ?? '') ?? parseStructuredOutput(text);
     return {
       ...(text.length === 0 ? {} : { text }),
       ...(data === undefined ? {} : { data }),

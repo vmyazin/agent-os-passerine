@@ -418,6 +418,11 @@ async function consumeEvents(
     ) {
       throw new WorkflowPermanentError('runtime emitted a malformed event');
     }
+    // Managed sessions do not self-terminate when the agent finishes: they
+    // park in idle awaiting further input. Idle/terminated is the completion
+    // signal for a single-shot step; waiting for the stream itself to close
+    // would burn the entire session deadline on an already-finished agent.
+    if (event.type === 'idle' || event.type === 'terminated') return;
   }
 }
 
@@ -940,10 +945,18 @@ async function runAgentStep<T>(
           ? runtimeOutput.data
           : await finalizeOutput(handle, runtimeOutput);
       const parsed = schema.safeParse(candidate);
-      if (!parsed.success)
+      if (!parsed.success) {
+        // Carry the schema issues (paths and codes only, no values) so a
+        // failed run explains which field of the output contract broke.
+        const issues = parsed.error.issues
+          .slice(0, 8)
+          .map((issue) => `${issue.path.join('.')}: ${issue.code}`)
+          .join('; ')
+          .slice(0, 700);
         throw new WorkflowPermanentError(
-          `runtime output for ${stepKey} is invalid`,
+          `runtime output for ${stepKey} is invalid (${candidate === undefined ? 'no structured output' : issues})`,
         );
+      }
       await dependencies.checkpoints.completeEffect(
         claim.lease,
         asJson(parsed.data),

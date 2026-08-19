@@ -326,9 +326,12 @@ function base64Bytes(value: string, maxBytes: number): Uint8Array {
   return bytes;
 }
 
+// Managed Agents rejects MCP tool names containing '.', so the advertised
+// names use underscores. tools/call accepts both spellings; capability
+// claims keep the historical dotted method names.
 const TOOLS = Object.freeze([
   {
-    name: 'artifact.get',
+    name: 'artifact_get',
     description: 'Read one immutable artifact within the granted scope.',
     inputSchema: {
       type: 'object',
@@ -338,7 +341,7 @@ const TOOLS = Object.freeze([
     },
   },
   {
-    name: 'artifact.put',
+    name: 'artifact_put',
     description:
       'Write one immutable content-addressed artifact within the granted scope.',
     inputSchema: {
@@ -358,7 +361,7 @@ const TOOLS = Object.freeze([
     },
   },
   {
-    name: 'artifact.list',
+    name: 'artifact_list',
     description: 'List immutable artifact metadata within the granted scope.',
     inputSchema: {
       type: 'object',
@@ -432,7 +435,13 @@ async function callTool(
   rpc: JsonRpcRequest,
   maxResponseBytes: number,
 ): Promise<Record<string, unknown>> {
-  const call = toolArguments(rpc);
+  const rawCall = toolArguments(rpc);
+  // Accept both the advertised underscore names and the historical dotted
+  // names; internal capability methods stay dotted.
+  const call = {
+    ...rawCall,
+    name: rawCall.name.replace(/^artifact_/, 'artifact.'),
+  };
   if (!['artifact.get', 'artifact.put', 'artifact.list'].includes(call.name))
     throw new JsonRpcCallError(-32601, 'tool not found');
   if (call.name === 'artifact.get') {

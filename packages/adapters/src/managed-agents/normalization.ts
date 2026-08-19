@@ -282,7 +282,13 @@ function normalizedUsage(value: unknown): Record<string, number> {
     cacheCreation1hInputTokens:
       cache1h +
       (cache5m === 0 && cache1h === 0 ? undifferentiatedCacheCreation : 0),
-    runtimeMs: normalizeRuntimeMilliseconds(value.active_seconds),
+    // Streamed usage events may omit active_seconds entirely; runtime billing
+    // comes from the session-level usage() call, so absence here is not an
+    // error and must not abort the event stream.
+    runtimeMs:
+      value.active_seconds === undefined
+        ? 0
+        : normalizeRuntimeMilliseconds(value.active_seconds),
   };
 }
 
