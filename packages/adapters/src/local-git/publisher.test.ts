@@ -15,7 +15,12 @@ import {
   type PublicationManifestBody,
 } from '@agentos/core';
 
+import {
+  createPostgresPublicationStoreForTest,
+  type PublicationSqlExecutor,
+} from '../github/postgres-store.js';
 import { InMemoryPublicationStore } from '../github/store.js';
+import type { PublicationStore } from '../github/types.js';
 import { createLocalGitPublisher } from './publisher.js';
 import { cleanupFixtures, fixtureRoot, seedRepo } from './test-support.js';
 
@@ -131,11 +136,10 @@ function authorize(
   });
 }
 
-async function fixture() {
+async function fixture(store: PublicationStore = new InMemoryPublicationStore()) {
   const root = await fixtureRoot();
   const repo = await seedNestedRepo(root, 'exp-repo');
   const base = await git(repo, ['rev-parse', 'HEAD']);
-  const store = new InMemoryPublicationStore();
   const publisher = createLocalGitPublisher({
     workspacesRoot: root,
     localPath: repo,
@@ -144,6 +148,35 @@ async function fixture() {
     now: NOW,
   });
   return { root, repo, base, store, publisher };
+}
+
+/** Captures the exact input passed to `store.claim`, delegating everything
+ * else to a real `InMemoryPublicationStore` so the publisher's full
+ * behavior is otherwise unaffected. */
+class CapturingStore implements PublicationStore {
+  claimedInput: Parameters<PublicationStore['claim']>[0] | undefined;
+  readonly #inner = new InMemoryPublicationStore();
+
+  async claim(
+    input: Parameters<PublicationStore['claim']>[0],
+  ): ReturnType<PublicationStore['claim']> {
+    this.claimedInput = input;
+    return this.#inner.claim(input);
+  }
+
+  async save(
+    ...args: Parameters<PublicationStore['save']>
+  ): ReturnType<PublicationStore['save']> {
+    return this.#inner.save(...args);
+  }
+
+  async get(key: string): ReturnType<PublicationStore['get']> {
+    return this.#inner.get(key);
+  }
+
+  async listEvents(): ReturnType<PublicationStore['listEvents']> {
+    return this.#inner.listEvents();
+  }
 }
 
 describe('local git publisher', () => {
@@ -317,5 +350,175 @@ describe('local git publisher', () => {
     await expect(
       publisher.publish({ manifest, authorization }),
     ).rejects.toThrow('Publication branch already exists');
+  });
+
+  describe('durable store compatibility (repositoryId sentinel)', () => {
+    it('claims local records with a positive repositoryId sentinel, not 0', async () => {
+      // The durable Postgres store's `publication_records` table enforces
+      // `repository_id > 0` and its row-mapping layer independently rejects
+      // any non-positive value -- `repositoryId: 0` would make every local
+      // publication unusable against that store.
+      const store = new CapturingStore();
+      const { repo, base, publisher } = await fixture(store);
+      const manifest = manifestBody(repo, base);
+
+      await publisher.publish({ manifest, authorization: authorize(manifest) });
+
+      expect(store.claimedInput?.repositoryId).toBe(1);
+    });
+
+    it('claims and saves a local publication record through PostgresPublicationStore', async () => {
+      // Exercises the same TypeScript row-mapping/validation layer the
+      // durable store uses (`mapRecord`/`safeInteger` in
+      // packages/adapters/src/github/postgres-store.ts) against a
+      // local-shaped record (repositoryId: 1), via the executor-mocking
+      // test harness that already exists for it (see
+      // packages/adapters/src/github/postgres-store.test.ts) -- no real
+      // database is required, so this isn't gated behind TEST_DATABASE_URL.
+      const rows = new Map<string, Record<string, unknown>>();
+      const execute: PublicationSqlExecutor['execute'] = async (sql, params) => {
+        if (sql.includes('agentos_claim_publication')) {
+          const [
+            recordKey,
+            bindingKey,
+            projectId,
+            runId,
+            repositoryId,
+            manifestDigest,
+            policyDigest,
+            baseSha,
+            branch,
+            now,
+          ] = params as [
+            string,
+            string,
+            string,
+            string,
+            number,
+            string,
+            string,
+            string,
+            string,
+            string,
+          ];
+          const row = {
+            key: recordKey,
+            bindingKey,
+            projectId,
+            runId,
+            repositoryId: String(repositoryId),
+            manifestDigest,
+            policyDigest,
+            baseSha,
+            branch,
+            phase: 'claimed',
+            blobShas: null,
+            treeSha: null,
+            commitSha: null,
+            pullRequestNumber: null,
+            pullRequestUrl: null,
+            draft: null,
+            errorCode: null,
+            revision: '1',
+            createdAt: now,
+            updatedAt: now,
+          };
+          rows.set(recordKey, row);
+          return [row];
+        }
+        throw new Error(`unexpected SQL in test: ${sql}`);
+      };
+      const store = createPostgresPublicationStoreForTest({ execute });
+
+      const record = await store.claim({
+        key: 'local-publication-key',
+        bindingKey: 'local-binding-key',
+        projectId: 'project-1',
+        runId: 'run-1',
+        repositoryId: 1,
+        manifestDigest: 'a'.repeat(64),
+        policyDigest: 'b'.repeat(64),
+        baseSha: 'c'.repeat(40),
+        branch: 'agentos/run-1-12345678',
+        now: '2026-08-17T12:00:00.000Z',
+      });
+
+      expect(record).toMatchObject({
+        repositoryId: 1,
+        phase: 'claimed',
+        revision: 1,
+      });
+    });
+  });
+
+  describe('tree-shape collisions against the base tree', () => {
+    it('rejects adding a blob where the base tree still has files under that path', async () => {
+      const { repo, base, publisher } = await fixture();
+      // Base tree has src/a.txt and src/lib/b.txt -- adding a blob at
+      // 'src' would make 'src' both a blob and (via the still-present
+      // 'src/a.txt') a directory in the same tree.
+      const manifest = manifestBody(repo, base, {
+        changes: [
+          { operation: 'add', path: 'src', mode: '100644', content: 'oops\n' },
+        ],
+      });
+
+      await expect(
+        publisher.publish({ manifest, authorization: authorize(manifest) }),
+      ).rejects.toThrow(/collides with existing tree shape/);
+    });
+
+    it('rejects adding a blob under a path that is already a file', async () => {
+      const { repo, base, publisher } = await fixture();
+      // Base tree has file.txt as a blob -- adding 'file.txt/evil.txt'
+      // would require 'file.txt' to simultaneously be a blob and a
+      // directory.
+      const manifest = manifestBody(repo, base, {
+        changes: [
+          {
+            operation: 'add',
+            path: 'file.txt/evil.txt',
+            mode: '100644',
+            content: 'oops\n',
+          },
+        ],
+      });
+
+      await expect(
+        publisher.publish({ manifest, authorization: authorize(manifest) }),
+      ).rejects.toThrow(/collides with existing tree shape/);
+    });
+
+    it('allows replacing a directory with a blob when every file under it is deleted in the same change set', async () => {
+      const { repo, base, publisher } = await fixture();
+      // Delete every file under src/ first, then add a blob at 'src' --
+      // legal, since nothing remains under that prefix once the deletes
+      // are applied.
+      const manifest = manifestBody(repo, base, {
+        changes: [
+          { operation: 'delete', path: 'src/a.txt' },
+          { operation: 'delete', path: 'src/lib/b.txt' },
+          { operation: 'add', path: 'src', mode: '100644', content: 'now a file\n' },
+        ],
+      });
+
+      const result = await publisher.publish({
+        manifest,
+        authorization: authorize(manifest),
+      });
+
+      const tree = await git(repo, ['ls-tree', '-r', result.commitSha]);
+      const paths = tree
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => line.split('\t')[1]);
+      expect(paths.sort()).toEqual(['file.txt', 'src', 'top.txt'].sort());
+
+      // The resulting tree must be structurally sound -- no duplicate or
+      // overlapping entries anywhere reachable from refs.
+      const fsck = await exec('git', ['-C', repo, 'fsck', '--full', '--strict']);
+      expect(fsck.stdout.trim()).toBe('');
+      expect(fsck.stderr.trim()).toBe('');
+    });
   });
 });

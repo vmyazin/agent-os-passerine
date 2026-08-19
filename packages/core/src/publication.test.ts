@@ -167,6 +167,51 @@ describe('publication manifest', () => {
     }
   });
 
+  it('rejects any .git path segment, not just a root-anchored glob match', () => {
+    // The default protected-path glob '.git/**' is root-anchored, so it
+    // never matches a nested .git directory -- this must be caught by an
+    // unconditional segment check instead, independent of policy config.
+    expect(() =>
+      evaluatePublicationPolicy(
+        [{ operation: 'delete', path: 'src/.git/config' }],
+        DEFAULT_PUBLICATION_POLICY,
+      ),
+    ).toThrow(/\.git/);
+
+    // Case-insensitive: '.GIT' must be caught the same way as '.git'.
+    expect(() =>
+      evaluatePublicationPolicy(
+        [{ operation: 'delete', path: 'src/.GIT/config' }],
+        DEFAULT_PUBLICATION_POLICY,
+      ),
+    ).toThrow(/\.git/i);
+
+    // '.github' is a different, unrelated path segment and must not be
+    // caught by the exact-segment '.git' check.
+    expect(() =>
+      evaluatePublicationPolicy(
+        [
+          {
+            operation: 'add',
+            path: 'src/.github/x',
+            mode: '100644',
+            content: 'ok\n',
+          },
+        ],
+        DEFAULT_PUBLICATION_POLICY,
+      ),
+    ).not.toThrow();
+
+    // Existing root '.git' behavior (caught by the default protected-path
+    // glob already) is unchanged.
+    expect(() =>
+      evaluatePublicationPolicy(
+        [{ operation: 'delete', path: '.git' }],
+        DEFAULT_PUBLICATION_POLICY,
+      ),
+    ).toThrow();
+  });
+
   it('parses a strict full-file change set and hashes it canonically', () => {
     const input = body();
     const parsed = parsePublicationManifest({

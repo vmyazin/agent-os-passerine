@@ -279,6 +279,23 @@ export function canonicalPublicationPolicyDigest(input: unknown): string {
     .digest('hex');
 }
 
+/**
+ * `.git/**` (and similarly-shaped default protected-path globs) are
+ * root-anchored, so they only ever match a `.git` directory at the
+ * repository root -- a change to `src/.git/config` sails through the glob
+ * matcher below untouched. Since a `.git` directory anywhere in a tree can
+ * be used to smuggle in git configuration/hooks, this is checked
+ * unconditionally (independent of the caller's `protectedPaths` policy) so
+ * neither publisher can be reconfigured to allow it. Only an exact `.git`
+ * path *segment* is blocked (case-insensitively) -- `.github` is a
+ * different, unrelated segment and must not be caught by this.
+ */
+function containsGitSegment(path: string): boolean {
+  return path
+    .split('/')
+    .some((segment) => segment.toLocaleLowerCase('en-US') === '.git');
+}
+
 export function evaluatePublicationPolicy(
   changes: readonly PublicationChange[],
   input: unknown,
@@ -290,6 +307,8 @@ export function evaluatePublicationPolicy(
   let totalBytes = 0;
   for (const change of changes) {
     const path = normalizeRepositoryPathSyntax(change.path);
+    if (containsGitSegment(path))
+      throw new Error(`Publication policy denied path: ${path}`);
     if (matchers.some((matcher) => matcher.test(path)))
       throw new Error(`Publication policy denied path: ${path}`);
     if (change.operation === 'delete') {
@@ -408,18 +427,35 @@ export function parsePublicationManifest(
     .strict()
     .parse(input);
   let aggregateBytes = 0;
+  // `caseFoldedPaths` catches any path (of any operation) reused twice in
+  // the same manifest. `writeFoldedPaths` is the narrower set used for the
+  // file/directory shape check below: only add/modify paths persist in the
+  // resulting tree, so only they can actually collide with each other. A
+  // delete never "occupies" a path in the final tree -- it vacates it --
+  // so `delete src/a.txt` followed by `add src` in the same change set is
+  // not a shape collision (the descendant is gone before the ancestor
+  // becomes a blob); excluding deletes from both sides of this check is
+  // what makes that legal. (A write's collision against whatever is left
+  // in the *base* tree after this change set's deletes are applied is a
+  // separate check, done by each publisher against the live tree -- see
+  // `assertNoTreeShapeCollision` in packages/adapters/src/local-git/
+  // publisher.ts.)
   const caseFoldedPaths = new Set<string>();
+  const writeFoldedPaths = new Set<string>();
   for (const change of envelope.manifest.changes) {
     const path = normalizeRepositoryPath(change.path);
     const folded = path.toLocaleLowerCase('en-US');
     if (caseFoldedPaths.has(folded))
       throw new Error(`Case-insensitive path collision: ${path}`);
-    for (const existing of caseFoldedPaths) {
-      if (
-        folded.startsWith(`${existing}/`) ||
-        existing.startsWith(`${folded}/`)
-      )
-        throw new Error(`File and directory shape collision: ${path}`);
+    if (change.operation !== 'delete') {
+      for (const existing of writeFoldedPaths) {
+        if (
+          folded.startsWith(`${existing}/`) ||
+          existing.startsWith(`${folded}/`)
+        )
+          throw new Error(`File and directory shape collision: ${path}`);
+      }
+      writeFoldedPaths.add(folded);
     }
     caseFoldedPaths.add(folded);
     if (change.operation !== 'delete') {

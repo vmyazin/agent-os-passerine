@@ -172,19 +172,54 @@ function parseTreeEntries(raw: string): Map<string, TreeEntry> {
   return entries;
 }
 
+/**
+ * `parsePublicationManifest` (packages/core/src/publication.ts) already
+ * rejects file/directory shape collisions *among the manifest's own change
+ * paths* (case-folded prefix checks). It has no visibility into the base
+ * tree, though, so a manifest that only touches paths not otherwise
+ * colliding with each other can still collide with paths that already
+ * exist in the *base* repository -- e.g. adding a blob at `src` when the
+ * base tree already has `src/a.txt`, or adding `file.txt/evil.txt` when
+ * `file.txt` already exists as a blob. Both would silently corrupt the
+ * tree built by `mktree` (duplicate/overlapping entries) if unchecked.
+ * Checked against `remaining` -- the base entries *after* this change
+ * set's deletes are applied -- so a manifest that deletes every path under
+ * `src/` and then adds a blob at `src` in the same change set is legal.
+ */
+function assertNoTreeShapeCollision(
+  remaining: ReadonlyMap<string, TreeEntry>,
+  path: string,
+): void {
+  const directoryPrefix = `${path}/`;
+  for (const existingPath of remaining.keys()) {
+    if (existingPath.startsWith(directoryPrefix))
+      rejected(`change set collides with existing tree shape: ${path}`);
+  }
+  const parts = path.split('/');
+  for (let index = 1; index < parts.length; index += 1) {
+    const ancestor = parts.slice(0, index).join('/');
+    if (remaining.has(ancestor))
+      rejected(`change set collides with existing tree shape: ${path}`);
+  }
+}
+
 function applyChanges(
   entries: Map<string, TreeEntry>,
   changes: readonly PublicationChange[],
   blobShas: Readonly<Record<string, string>>,
 ): Map<string, TreeEntry> {
-  const next = new Map(entries);
+  const remaining = new Map(entries);
   for (const change of changes) {
-    if (change.operation === 'delete') {
-      if (!next.has(change.path))
-        rejected(`Change target does not exist: ${change.path}`);
-      next.delete(change.path);
-      continue;
-    }
+    if (change.operation !== 'delete') continue;
+    if (!remaining.has(change.path))
+      rejected(`Change target does not exist: ${change.path}`);
+    remaining.delete(change.path);
+  }
+
+  const next = new Map(remaining);
+  for (const change of changes) {
+    if (change.operation === 'delete') continue;
+    assertNoTreeShapeCollision(remaining, change.path);
     if (change.operation === 'add') {
       if (next.has(change.path))
         rejected(`Add target already exists: ${change.path}`);
@@ -292,9 +327,21 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
       bindingKey: bindingKey(manifest),
       projectId: manifest.projectId,
       runId: manifest.runId,
-      // Local repositories have no numeric id; 0 is a stable sentinel that
-      // never collides with a real (positive) GitHub repositoryId.
-      repositoryId: 0,
+      // Local repositories have no numeric id. `1` is a stable sentinel --
+      // NOT `0`: the durable Postgres store's `publication_records` table
+      // enforces `repository_id > 0` (packages/adapters/src/persistence/
+      // schema.ts) and its row-mapping layer's `safeInteger` (packages/
+      // adapters/src/github/postgres-store.ts) independently rejects any
+      // non-positive value as a malformed record, so `0` would make every
+      // local publication unusable against that store. Reusing the same
+      // positive sentinel for every local publication never collides with
+      // a *different* local publication or with a GitHub one: `key` and
+      // `bindingKey` (see `publicationKey`/`bindingKey` above) are each a
+      // 6- and 3-segment tagged hash respectively that include the
+      // `'local-git-publisher'` tag and the repository *name*, so they are
+      // what actually distinguishes records -- `repositoryId` here is
+      // inert bookkeeping, never part of any uniqueness/lookup key.
+      repositoryId: 1,
       manifestDigest: parsed.manifestDigest,
       policyDigest: manifest.policyDigest,
       baseSha: manifest.expectedBase.sha,
