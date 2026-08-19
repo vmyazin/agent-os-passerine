@@ -109,6 +109,41 @@ function trustedReaderConfiguration() {
   };
 }
 
+/**
+ * Head resolution for the setup wizard: the same trusted-reader wiring the
+ * workflow dispatch path uses, exposed so the wizard can refresh the bound
+ * repository's default-branch SHA before starting a run.
+ */
+export function repositoryHeadResolverFromEnv(): {
+  resolve(config: ReturnType<typeof parseAgentOsConfig>): Promise<{
+    readonly repository: string;
+    readonly branch: string;
+    readonly repositorySha: string;
+  }>;
+} {
+  const reader = trustedReaderConfiguration();
+  const resolver = createTrustedRepositoryHeadResolver({
+    githubApp: reader.githubApp,
+  });
+  const selected = reader.selectedRepositories[0]!;
+  return {
+    async resolve(config) {
+      if (config.project.repository === undefined)
+        throw new Error('GitHub repository URL is required');
+      const repositorySha = await resolver.resolve({
+        repository: selected,
+        repositoryUrl: config.project.repository,
+        defaultBranch: config.project.defaultBranch,
+      });
+      return {
+        repository: `${selected.owner}/${selected.name}`,
+        branch: config.project.defaultBranch,
+        repositorySha,
+      };
+    },
+  };
+}
+
 function verificationRegistryHosts(): readonly string[] {
   const hosts = parsedRuntimeJson<unknown>(
     'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',

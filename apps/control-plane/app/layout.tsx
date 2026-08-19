@@ -26,6 +26,7 @@ export default function RootLayout({
             <a href="/runs">Runs</a>
             <a href="/inbox">Inbox</a>
             <a href="/configuration">Configuration</a>
+            <a href="/setup">Setup</a>
           </nav>
         </header>
         <main id="main-content">{children}</main>
