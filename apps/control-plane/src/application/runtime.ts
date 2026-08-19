@@ -537,24 +537,19 @@ export function workflowDispatchFromEnv() {
 export function controlPlaneService(): ControlPlaneService {
   if (service === undefined) {
     const dispatch = workflowDispatchFromEnv();
+    // Provenance head resolution during configuration apply goes through the
+    // same mode-aware resolver the setup wizard uses, so local experiment
+    // configs resolve against their local repository instead of requiring a
+    // GitHub reader.
     const repositoryHead =
       dispatch === undefined
         ? undefined
         : (() => {
-            const reader = trustedReaderConfiguration();
-            const resolver = createTrustedRepositoryHeadResolver({
-              githubApp: reader.githubApp,
-            });
+            const resolver = repositoryHeadResolverFromEnv();
             return {
-              resolve: (config: ReturnType<typeof parseAgentOsConfig>) => {
-                if (config.project.repository === undefined)
-                  throw new Error('GitHub repository URL is required');
-                return resolver.resolve({
-                  repository: reader.selectedRepositories[0]!,
-                  repositoryUrl: config.project.repository,
-                  defaultBranch: config.project.defaultBranch,
-                });
-              },
+              resolve: async (
+                config: ReturnType<typeof parseAgentOsConfig>,
+              ) => (await resolver.resolve(config)).repositorySha,
             };
           })();
     service = new ControlPlaneService(
