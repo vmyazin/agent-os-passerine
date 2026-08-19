@@ -559,7 +559,11 @@ export async function createProductionFeatureWorkflowFromEnv(
             changes: changeSetSchema.parse(changeSet).changes,
           };
           const manifestDigest = canonicalPublicationManifestDigest(manifest);
-          const issuedAt = new Date(snapshot.createdAt);
+          // Issue at authorization time: the publisher enforces a validity
+          // window of at most PUBLICATION_AUTHORIZATION_MAX_TTL_MS, and a
+          // window anchored to run creation would already be spent by the
+          // time a real pipeline reaches publication.
+          const issuedAt = new Date();
           return {
             manifest,
             authorization: issuer.issue({
@@ -582,7 +586,7 @@ export async function createProductionFeatureWorkflowFromEnv(
                 manifestDigest,
                 nonce: `publish-${workflow.runId}`,
                 expiresAt: new Date(
-                  issuedAt.getTime() + 60 * 60_000,
+                  issuedAt.getTime() + 10 * 60_000,
                 ).toISOString(),
               },
             }),

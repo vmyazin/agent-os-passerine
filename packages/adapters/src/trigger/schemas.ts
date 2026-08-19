@@ -96,6 +96,11 @@ export const draftPublicationResultSchema = z
     status: z.literal('succeeded'),
     draft: z.literal(true),
     pullRequestUrl: z.url().max(2_048),
+    // The trusted publisher also reports where the draft landed; the
+    // workflow records these but only the three fields above are binding.
+    branch: z.string().min(1).max(512).optional(),
+    commitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    pullRequestNumber: z.number().int().positive().optional(),
   })
   .strict();
 
