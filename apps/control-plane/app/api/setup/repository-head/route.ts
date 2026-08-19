@@ -14,9 +14,13 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 /**
- * Resolves the bound repository's current default-branch head with the
- * trusted read-only GitHub App. The wizard refreshes this before starting a
- * run so a stale SHA cannot produce a base mismatch at publication.
+ * Resolves the bound repository's current default-branch head: with the
+ * trusted read-only GitHub App for a GitHub-bound project, or by running
+ * `git rev-parse` against the containment-checked working tree for a local
+ * experiment project (`repositoryHeadResolverFromEnv()` branches
+ * internally on `config.project.localPath`). The wizard refreshes this
+ * before starting a run so a stale SHA cannot produce a base mismatch at
+ * publication.
  */
 export function GET(request: Request): Promise<Response> {
   return handleApi(

@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
+import { basename } from 'node:path';
 
 import {
+  assertContainedRepository,
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
   createKimiLocalAccessStore,
   createKimiRuntimeProviderFromEnv,
+  createLocalSourceSnapshotIngestor,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createRepositoryRuntimeHandleVault,
@@ -16,7 +19,9 @@ import {
   createTrustedRepositoryHeadResolver,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
+  runGit,
   kimiFromEnv,
+  type TrustedSourceSnapshotIngestor,
 } from '@agentos/adapters';
 import {
   isoTimestamp,
@@ -52,6 +57,17 @@ function trustedGoalCommandsFromEnv(): ReadonlySet<string> | undefined {
     return undefined;
   const keys = Object.keys(parsed).filter((key) => key.trim().length > 0);
   return keys.length > 0 ? new Set(keys) : undefined;
+}
+
+/**
+ * The absolute directory that holds local experiment repositories, or
+ * `undefined` when local experiments are not configured for this
+ * deployment. Blank/whitespace-only values are treated as absent, matching
+ * every other optional environment reader in this module.
+ */
+export function localWorkspacesRootFromEnv(): string | undefined {
+  const trimmed = process.env.AGENTOS_LOCAL_WORKSPACES_ROOT?.trim();
+  return trimmed === undefined || trimmed === '' ? undefined : trimmed;
 }
 
 function requiredRuntime(name: string): string {
@@ -112,7 +128,11 @@ function trustedReaderConfiguration() {
 /**
  * Head resolution for the setup wizard: the same trusted-reader wiring the
  * workflow dispatch path uses, exposed so the wizard can refresh the bound
- * repository's default-branch SHA before starting a run.
+ * repository's default-branch SHA before starting a run. Also resolves
+ * local experiment repositories (`config.project.localPath`) by running
+ * `git rev-parse` directly against the containment-checked working tree --
+ * no GitHub reader involved on that path, and the GitHub reader is built
+ * lazily (and only once) so a local-only deployment never needs its env.
  */
 export function repositoryHeadResolverFromEnv(): {
   resolve(config: ReturnType<typeof parseAgentOsConfig>): Promise<{
@@ -121,15 +141,49 @@ export function repositoryHeadResolverFromEnv(): {
     readonly repositorySha: string;
   }>;
 } {
-  const reader = trustedReaderConfiguration();
-  const resolver = createTrustedRepositoryHeadResolver({
-    githubApp: reader.githubApp,
-  });
-  const selected = reader.selectedRepositories[0]!;
+  let github:
+    | {
+        readonly resolver: ReturnType<typeof createTrustedRepositoryHeadResolver>;
+        readonly selected: GitHubPublicationRepository;
+      }
+    | undefined;
+  const getGithub = () => {
+    if (github === undefined) {
+      const reader = trustedReaderConfiguration();
+      github = {
+        resolver: createTrustedRepositoryHeadResolver({
+          githubApp: reader.githubApp,
+        }),
+        selected: reader.selectedRepositories[0]!,
+      };
+    }
+    return github;
+  };
   return {
     async resolve(config) {
+      if (config.project.localPath !== undefined) {
+        const workspacesRoot = localWorkspacesRootFromEnv();
+        if (workspacesRoot === undefined)
+          throw new Error(
+            'AGENTOS_LOCAL_WORKSPACES_ROOT is required to resolve a local repository head',
+          );
+        const repo = await assertContainedRepository(
+          config.project.localPath,
+          workspacesRoot,
+        );
+        const repositorySha = await runGit(repo, [
+          'rev-parse',
+          config.project.defaultBranch,
+        ]);
+        return {
+          repository: `local/${basename(config.project.localPath)}`,
+          branch: config.project.defaultBranch,
+          repositorySha,
+        };
+      }
       if (config.project.repository === undefined)
         throw new Error('GitHub repository URL is required');
+      const { resolver, selected } = getGithub();
       const repositorySha = await resolver.resolve({
         repository: selected,
         repositoryUrl: config.project.repository,
@@ -304,7 +358,19 @@ export function workflowDispatchFromEnv() {
     );
   }
   const repository = repositoryFromEnv();
-  const reader = trustedReaderConfiguration();
+  // A deployment that has not opted into local experiments (no
+  // AGENTOS_LOCAL_WORKSPACES_ROOT) is a classic GitHub-only deployment:
+  // validate its trusted reader configuration eagerly, at this exact point,
+  // byte-identical to the pre-local-experiments behavior -- misconfiguration
+  // (e.g. reusing the publisher App identity) fails dispatch construction
+  // immediately, before the R2/artifact checks below. A deployment that HAS
+  // opted in might be local-only and must not be required to configure a
+  // GitHub reader it will never use, so its reader construction is deferred
+  // into the GitHub ingestor's lazy branch further down.
+  const eagerReader =
+    localWorkspacesRootFromEnv() === undefined
+      ? trustedReaderConfiguration()
+      : undefined;
   const artifacts = createR2ArtifactStore({
     accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
     bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
@@ -314,43 +380,100 @@ export function workflowDispatchFromEnv() {
     ),
     manifest: createDomainArtifactManifestStore(repository),
   });
-  const sourceSnapshot = createTrustedSourceSnapshotIngestor({
-    githubApp: {
-      ...reader.githubApp,
-    },
-    artifacts,
-    resolveBinding: async (runId) => {
-      const run = await repository.getRun(persistenceId('run', runId));
-      if (
-        run === undefined ||
-        (run.pipeline !== 'feature' && run.pipeline !== 'goal')
-      )
-        throw new Error('source snapshot workflow run does not exist');
-      const snapshots = await repository.listConfigSnapshots(run.id, {
-        limit: 2,
+
+  /**
+   * Loads the run + its (unique) config snapshot and validates the
+   * SHA-binding invariant every source-ingestion path depends on. Shared by
+   * both the GitHub and local resolveBinding closures below so the
+   * binding-integrity checks (SHA regex, snapshot repositorySha equality)
+   * live in exactly one place.
+   */
+  const resolveSourceSnapshotRun = async (runId: string) => {
+    const run = await repository.getRun(persistenceId('run', runId));
+    if (
+      run === undefined ||
+      (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+    )
+      throw new Error('source snapshot workflow run does not exist');
+    const snapshots = await repository.listConfigSnapshots(run.id, {
+      limit: 2,
+    });
+    if (snapshots.length !== 1)
+      throw new Error('source snapshot config binding is unavailable');
+    const config = parseAgentOsConfig(snapshots[0]!.config);
+    const provenance = run.input as {
+      provenance?: { repositorySha?: unknown };
+    };
+    const repositorySha = provenance.provenance?.repositorySha;
+    if (
+      typeof repositorySha !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(repositorySha) ||
+      repositorySha !== snapshots[0]!.repositorySha
+    )
+      throw new Error('source snapshot repository SHA binding is invalid');
+    return { run, config, repositorySha };
+  };
+
+  // Built lazily, one per process: the GitHub ingestor needs the trusted
+  // reader env (GITHUB_READER_*), which a local-only deployment must not be
+  // required to set. Each is constructed only the first time a run actually
+  // needs that path.
+  let githubIngestor: TrustedSourceSnapshotIngestor | undefined;
+  const getGithubIngestor = (): TrustedSourceSnapshotIngestor =>
+    (githubIngestor ??= (() => {
+      const reader = eagerReader ?? trustedReaderConfiguration();
+      return createTrustedSourceSnapshotIngestor({
+        githubApp: { ...reader.githubApp },
+        artifacts,
+        resolveBinding: async (runId) => {
+          const resolved = await resolveSourceSnapshotRun(runId);
+          return {
+            projectId: resolved.run.projectId,
+            runId: resolved.run.id,
+            repositorySha: resolved.repositorySha,
+            baseBranch: resolved.config.project.defaultBranch,
+            repository: reader.selectedRepositories[0]!,
+          };
+        },
       });
-      if (snapshots.length !== 1)
-        throw new Error('source snapshot config binding is unavailable');
-      const config = parseAgentOsConfig(snapshots[0]!.config);
-      const provenance = run.input as {
-        provenance?: { repositorySha?: unknown };
-      };
-      const repositorySha = provenance.provenance?.repositorySha;
-      if (
-        typeof repositorySha !== 'string' ||
-        !/^[0-9a-f]{40}$/.test(repositorySha) ||
-        repositorySha !== snapshots[0]!.repositorySha
-      )
-        throw new Error('source snapshot repository SHA binding is invalid');
-      return {
-        projectId: run.projectId,
-        runId: run.id,
-        repositorySha,
-        baseBranch: config.project.defaultBranch,
-        repository: reader.selectedRepositories[0]!,
-      };
+    })());
+
+  let localIngestor: TrustedSourceSnapshotIngestor | undefined;
+  const getLocalIngestor = (): TrustedSourceSnapshotIngestor =>
+    (localIngestor ??= createLocalSourceSnapshotIngestor({
+      artifacts,
+      workspacesRoot:
+        localWorkspacesRootFromEnv() ??
+        (() => {
+          throw new Error(
+            'AGENTOS_LOCAL_WORKSPACES_ROOT is required to ingest local experiment source snapshots',
+          );
+        })(),
+      resolveBinding: async (runId) => {
+        const resolved = await resolveSourceSnapshotRun(runId);
+        const localPath = resolved.config.project.localPath;
+        if (localPath === undefined)
+          throw new Error(
+            'source snapshot binding is not a local experiment run',
+          );
+        return {
+          projectId: resolved.run.projectId,
+          runId: resolved.run.id,
+          localPath,
+          baseBranch: resolved.config.project.defaultBranch,
+          repositorySha: resolved.repositorySha,
+        };
+      },
+    }));
+
+  const sourceSnapshot: TrustedSourceSnapshotIngestor = {
+    async ensure(runId) {
+      const resolved = await resolveSourceSnapshotRun(runId);
+      return resolved.config.project.localPath !== undefined
+        ? getLocalIngestor().ensure(runId)
+        : getGithubIngestor().ensure(runId);
     },
-  });
+  };
   let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;
   const runtimeHandles = () =>
     (vault ??= createRepositoryRuntimeHandleVault({

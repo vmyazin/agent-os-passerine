@@ -1,10 +1,43 @@
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GET as getReadiness } from '../../app/api/setup/readiness/route';
 import { POST as setupApply } from '../../app/api/setup/apply/route';
+import {
+  GET as getLocalRepositoryDisallowed,
+  POST as createLocalRepository,
+} from '../../app/api/setup/local-repository/route';
 import { setupReadiness } from '../application/setup-readiness';
 import { resetControlPlaneServiceForTests } from '../application/runtime';
 import { resetRepositoryForTests } from '../persistence/repository-factory';
+
+/**
+ * Every readiness-item environment variable except the ones in the
+ * `github` and `local` groups, all present -- so `readiness.ready` (which
+ * excludes those two groups) is true and only `readyForGitHub` /
+ * `readyForLocal` vary with the github/local-specific values a test adds.
+ */
+const GREEN_NON_GITHUB_LOCAL_ENV = {
+  DATABASE_URL: 'postgresql://user:pass@host/db',
+  AGENTOS_REPOSITORY: 'neon',
+  TRIGGER_SECRET_KEY: 'trigger-secret',
+  TRIGGER_PROJECT_REF: 'proj_ref',
+  ANTHROPIC_API_KEY: 'anthropic-key',
+  CLOUDFLARE_R2_ACCOUNT_ID: 'account',
+  CLOUDFLARE_R2_ARTIFACT_BUCKET: 'bucket',
+  CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID: 'access-key',
+  CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY: 'secret-key',
+  AGENTOS_ARTIFACT_MCP_URL: 'https://mcp.example',
+  ARTIFACT_MCP_ALLOWED_ORIGINS: 'https://control.example',
+  ARTIFACT_CAPABILITY_KEYS_JSON: '{"k1":"v1"}',
+  AGENTOS_RUNTIME_OWNERSHIP_SECRET: 'ownership-secret',
+  AGENTOS_RUNTIME_HANDLE_KEY: 'handle-key',
+  AGENTOS_TEST_REPORT_KEYS_JSON: '{"k1":"v1"}',
+  GITHUB_PUBLICATION_KEYS_JSON: '{"k1":"v1"}',
+  AGENTOS_TRUSTED_TEST_COMMANDS_JSON: '{"pnpm test":true}',
+};
 
 const VALID_YAML = `
 version: 1
@@ -64,6 +97,35 @@ describe('setup readiness model', () => {
     expect(
       setupReadiness({ GITHUB_SELECTED_REPOSITORIES_JSON: '[]' }).repository,
     ).toBeUndefined();
+  });
+
+  it('relabels the GitHub group and reports readyForLocal once local workspaces are configured', () => {
+    const readiness = setupReadiness({
+      ...GREEN_NON_GITHUB_LOCAL_ENV,
+      AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces/experiments',
+    });
+    const github = readiness.groups.find((entry) => entry.id === 'github');
+    expect(github?.title).toBe('GitHub Apps (GitHub projects)');
+    expect(github?.ready).toBe(false);
+    const local = readiness.groups.find((entry) => entry.id === 'local');
+    expect(local?.title).toBe('Local workspaces (experiments)');
+    expect(local?.ready).toBe(true);
+
+    expect(readiness.ready).toBe(true);
+    expect(readiness.readyForLocal).toBe(true);
+    expect(readiness.readyForGitHub).toBe(false);
+  });
+
+  it('treats a blank local workspaces root as not ready', () => {
+    const readiness = setupReadiness({
+      ...GREEN_NON_GITHUB_LOCAL_ENV,
+      AGENTOS_LOCAL_WORKSPACES_ROOT: '   ',
+    });
+    const local = readiness.groups.find((entry) => entry.id === 'local');
+    expect(local?.ready).toBe(false);
+    expect(readiness.readyForLocal).toBe(false);
+    // Overall readiness still excludes the local/github groups.
+    expect(readiness.ready).toBe(true);
   });
 });
 
@@ -149,5 +211,101 @@ describe('setup API routes', () => {
       error: { code: string };
     };
     expect(body.error.code).toBe('invalid_configuration');
+  });
+
+  describe('local-repository route', () => {
+    let workspacesRoot: string | undefined;
+
+    afterEach(async () => {
+      if (workspacesRoot !== undefined) {
+        await rm(workspacesRoot, { recursive: true, force: true });
+        workspacesRoot = undefined;
+      }
+    });
+
+    it('requires authentication', async () => {
+      const response = await createLocalRepository(
+        new Request('https://control.example/api/setup/local-repository', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'exp-one' }),
+        }),
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it('rejects GET with 405', () => {
+      const response = getLocalRepositoryDisallowed();
+      expect(response.status).toBe(405);
+    });
+
+    it('reports 409 when the local workspaces root is not configured', async () => {
+      const response = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ name: 'exp-one' }),
+        }),
+      );
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('local_workspaces_unconfigured');
+    });
+
+    it('rejects names outside the allowed schema', async () => {
+      workspacesRoot = await mkdtemp(join(tmpdir(), 'agentos-setup-local-'));
+      vi.stubEnv('AGENTOS_LOCAL_WORKSPACES_ROOT', workspacesRoot);
+
+      for (const name of ['..', 'UPPER', '']) {
+        const response = await createLocalRepository(
+          request('/api/setup/local-repository', {
+            method: 'POST',
+            body: JSON.stringify({ name }),
+          }),
+        );
+        expect(response.status).toBe(422);
+      }
+    });
+
+    it('creates a seeded repository and rejects a duplicate name', async () => {
+      workspacesRoot = await mkdtemp(join(tmpdir(), 'agentos-setup-local-'));
+      vi.stubEnv('AGENTOS_LOCAL_WORKSPACES_ROOT', workspacesRoot);
+
+      const created = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ name: 'exp-one' }),
+        }),
+      );
+      expect([200, 201]).toContain(created.status);
+      const body = (await created.json()) as {
+        localPath: string;
+        branch: string;
+        headSha: string;
+      };
+      expect(body.branch).toBe('main');
+      expect(body.headSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(body.localPath).toBe(join(workspacesRoot, 'exp-one'));
+
+      const gitDir = await stat(join(body.localPath, '.git'));
+      expect(gitDir.isDirectory()).toBe(true);
+      const packageJson = await stat(join(body.localPath, 'package.json'));
+      expect(packageJson.isFile()).toBe(true);
+      const smokeTest = await stat(
+        join(body.localPath, 'test', 'smoke.test.mjs'),
+      );
+      expect(smokeTest.isFile()).toBe(true);
+
+      const duplicate = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ name: 'exp-one' }),
+        }),
+      );
+      expect(duplicate.status).toBe(409);
+      const duplicateBody = (await duplicate.json()) as {
+        error: { code: string };
+      };
+      expect(duplicateBody.error.code).toBe('already_exists');
+    });
   });
 });

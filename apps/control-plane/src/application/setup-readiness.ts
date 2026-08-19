@@ -14,6 +14,8 @@ export interface SetupReadinessGroup {
 
 export interface SetupReadiness {
   readonly ready: boolean;
+  readonly readyForGitHub: boolean;
+  readonly readyForLocal: boolean;
   readonly repository?: string;
   readonly groups: readonly SetupReadinessGroup[];
 }
@@ -126,7 +128,7 @@ export function setupReadiness(environment: Environment): SetupReadiness {
         'Bucket-scoped secret access key.',
       ),
     ]),
-    group('github', 'GitHub Apps', [
+    group('github', 'GitHub Apps (GitHub projects)', [
       item(
         environment,
         'GITHUB_READER_APP_ID',
@@ -162,6 +164,14 @@ export function setupReadiness(environment: Environment): SetupReadiness {
         'GITHUB_SELECTED_REPOSITORIES_JSON',
         'Publisher repository binding',
         'Exactly one bound repository for the publisher.',
+      ),
+    ]),
+    group('local', 'Local workspaces (experiments)', [
+      item(
+        environment,
+        'AGENTOS_LOCAL_WORKSPACES_ROOT',
+        'Local workspaces root',
+        'Absolute directory that contains local experiment repositories.',
       ),
     ]),
     group('artifactMcp', 'Artifact MCP endpoint', [
@@ -218,8 +228,15 @@ export function setupReadiness(environment: Environment): SetupReadiness {
     ]),
   ];
   const repository = boundRepository(environment);
+  const github = groups.find((entry) => entry.id === 'github');
+  const local = groups.find((entry) => entry.id === 'local');
+  const ready = groups
+    .filter((entry) => entry.id !== 'github' && entry.id !== 'local')
+    .every((entry) => entry.ready);
   return {
-    ready: groups.every((entry) => entry.ready),
+    ready,
+    readyForGitHub: ready && (github?.ready ?? false),
+    readyForLocal: ready && (local?.ready ?? false),
     ...(repository === undefined ? {} : { repository }),
     groups,
   };
