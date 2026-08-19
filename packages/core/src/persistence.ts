@@ -207,6 +207,12 @@ export interface RunListFilter {
   readonly status?: RunStatus;
   readonly limit?: number;
   readonly after?: TimestampListCursor<WorkflowRunId>;
+  /**
+   * Listing order by creation time. Defaults to 'asc', which reconciliation
+   * cursor pagination depends on; 'desc' serves newest-first UI listings and
+   * cannot be combined with a cursor.
+   */
+  readonly order?: 'asc' | 'desc';
 }
 
 export interface TimestampListCursor<Id extends string> {

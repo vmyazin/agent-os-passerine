@@ -95,6 +95,32 @@ describe('InMemoryDomainRepository', () => {
     expect(updated.status).toBe('running');
   });
 
+  it('lists runs newest first when order is desc and refuses desc cursors', async () => {
+    const repository = await seededRepository();
+    const later = {
+      ...run,
+      id: persistenceId('run', 'run_order_later'),
+      createdAt: isoTimestamp('2026-08-16T12:05:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-16T12:05:00.000Z'),
+    };
+    await repository.createRun(later);
+
+    const ascending = await repository.listRuns({});
+    expect(ascending.map((entry) => entry.id)).toEqual([run.id, later.id]);
+    const descending = await repository.listRuns({ order: 'desc' });
+    expect(descending.map((entry) => entry.id)).toEqual([later.id, run.id]);
+    // A descending window of one returns the newest run, not the oldest.
+    const newest = await repository.listRuns({ order: 'desc', limit: 1 });
+    expect(newest.map((entry) => entry.id)).toEqual([later.id]);
+
+    await expect(
+      repository.listRuns({
+        order: 'desc',
+        after: { at: run.createdAt, id: run.id },
+      }),
+    ).rejects.toThrow('descending run listing does not support cursors');
+  });
+
   it('rejects invalid timestamps even if a caller bypasses the type brand', async () => {
     const repository = new InMemoryDomainRepository();
     await expect(

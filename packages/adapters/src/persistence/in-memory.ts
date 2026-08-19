@@ -523,6 +523,8 @@ export class InMemoryDomainRepository implements DomainRepository {
   }
 
   async listRuns(filter: RunListFilter = {}): Promise<readonly WorkflowRun[]> {
+    if (filter.order === 'desc' && filter.after !== undefined)
+      throw new TypeError('descending run listing does not support cursors');
     return copy(
       [...this.#runs.values()]
         .filter(
@@ -532,14 +534,15 @@ export class InMemoryDomainRepository implements DomainRepository {
             (filter.status === undefined || run.status === filter.status) &&
             isAfterTimestamp(run.createdAt, run.id, filter.after),
         )
-        .sort((left, right) =>
-          compareTimestamped(
+        .sort((left, right) => {
+          const ordered = compareTimestamped(
             left.createdAt,
             left.id,
             right.createdAt,
             right.id,
-          ),
-        )
+          );
+          return filter.order === 'desc' ? -ordered : ordered;
+        })
         .slice(0, boundedListLimit(filter.limit)),
     );
   }

@@ -808,7 +808,10 @@ export class ControlPlaneService {
   }
 
   async listRuns(limit = 50): Promise<readonly RunProjection[]> {
-    const runs = await this.repository.listRuns({ limit });
+    // Newest first: run listings serve the UI and the CLI, where the latest
+    // activity matters most. Reconciliation paginates the repository
+    // directly with the ascending cursor order and is unaffected.
+    const runs = await this.repository.listRuns({ limit, order: 'desc' });
     return Promise.all(runs.map((run) => this.project(run)));
   }
 

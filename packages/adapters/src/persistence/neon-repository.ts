@@ -664,6 +664,8 @@ export class NeonDomainRepository implements DomainRepository {
   }
 
   async listRuns(filter: RunListFilter = {}): Promise<readonly WorkflowRun[]> {
+    if (filter.order === 'desc' && filter.after !== undefined)
+      throw new TypeError('descending run listing does not support cursors');
     return mappedRows(
       await this.database
         .select(workflowRunSelection)
@@ -684,8 +686,15 @@ export class NeonDomainRepository implements DomainRepository {
           ),
         )
         .orderBy(
-          asc(workflowRuns.createdAt),
-          asc(bytewiseText(workflowRuns.id)),
+          ...(filter.order === 'desc'
+            ? [
+                desc(workflowRuns.createdAt),
+                desc(bytewiseText(workflowRuns.id)),
+              ]
+            : [
+                asc(workflowRuns.createdAt),
+                asc(bytewiseText(workflowRuns.id)),
+              ]),
         )
         .limit(boundedListLimit(filter.limit)),
       mapWorkflowRunRow,
