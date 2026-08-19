@@ -136,7 +136,9 @@ export function SetupWizard() {
     setMode(nextMode);
   };
 
-  const createLocalRepository = async () => {
+  const createRepository = async (
+    body: { name: string } | { namePrefix: string },
+  ) => {
     if (creatingLocalRepository) return;
     setCreatingLocalRepository(true);
     setLocalRepositoryError('');
@@ -147,10 +149,11 @@ export function SetupWizard() {
           'Content-Type': 'application/json',
           'Idempotency-Key': crypto.randomUUID(),
         },
-        body: JSON.stringify({ name: localName }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(await readError(response));
       const result = (await response.json()) as {
+        name: string;
         localPath: string;
         branch: string;
         headSha: string;
@@ -160,17 +163,37 @@ export function SetupWizard() {
         headSha: result.headSha,
       });
       setYaml((current) =>
-        current.replace(/^(\s*localPath:).*$/m, `$1 ${result.localPath}`),
+        current
+          .replace(/^(\s*localPath:).*$/m, `$1 ${result.localPath}`)
+          .replace(/^(\s*name:).*$/m, `$1 ${result.name}`),
       );
+      return result;
     } catch (error) {
       setLocalRepositoryError(
         error instanceof Error
           ? error.message
           : 'local repository creation failed',
       );
+      return undefined;
     } finally {
       setCreatingLocalRepository(false);
     }
+  };
+
+  const createLocalRepository = () => createRepository({ name: localName });
+
+  // One click sets up everything a fresh end-to-end walkthrough needs: a new
+  // auto-numbered test repository (test-proj-01, -02, ...), the matching
+  // project name and path in the YAML, and a small canned feature in step 4.
+  // Apply, head resolution, and run start stay explicit so the flow is
+  // still visible step by step.
+  const fillTestProject = async () => {
+    const created = await createRepository({ namePrefix: 'test-proj' });
+    if (created === undefined) return;
+    setTitle('Add greet module');
+    setDescription(
+      'Add src/greet.mjs exporting greet(name) returning the string Hello, <name>! and test/greet.test.mjs covering it with node:test, matching the existing test style.',
+    );
   };
 
   const apply = async () => {
@@ -383,7 +406,25 @@ export function SetupWizard() {
               >
                 {creatingLocalRepository ? 'Creating…' : 'Create local repository'}
               </button>
+              <button
+                className="secondary"
+                disabled={creatingLocalRepository}
+                onClick={() => void fillTestProject()}
+                type="button"
+              >
+                {creatingLocalRepository
+                  ? 'Creating…'
+                  : 'Fill e2e test project'}
+              </button>
             </div>
+            <p>
+              <small>
+                Fill e2e test project creates the next test-proj-NN
+                repository and pre-fills the configuration and a small
+                first feature; you still apply, resolve the head, and start
+                the run.
+              </small>
+            </p>
             {localRepositoryError !== '' ? (
               <p role="alert">{localRepositoryError}</p>
             ) : null}

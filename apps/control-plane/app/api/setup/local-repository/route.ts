@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { NextResponse } from 'next/server';
@@ -17,9 +17,36 @@ import { requireApiAuthentication } from '../../../../src/http/authenticated';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const localRepositorySchema = z
-  .object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/) })
-  .strict();
+const localRepositorySchema = z.union([
+  z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/) }).strict(),
+  // Auto-incrementing mode: the server picks the next free
+  // `<namePrefix>-NN` directory so repeated e2e walkthroughs never collide.
+  z
+    .object({
+      namePrefix: z.string().regex(/^[a-z0-9][a-z0-9-]{0,58}$/),
+    })
+    .strict(),
+]);
+
+/** First free `<prefix>-NN` name under the root, starting at 01. */
+async function nextAvailableName(
+  root: string,
+  prefix: string,
+): Promise<string> {
+  let existing: readonly string[];
+  try {
+    existing = await readdir(root);
+  } catch {
+    existing = [];
+  }
+  const pattern = new RegExp(`^${prefix}-(\\d{2,})$`);
+  let highest = 0;
+  for (const entry of existing) {
+    const match = pattern.exec(entry);
+    if (match !== null) highest = Math.max(highest, Number(match[1]));
+  }
+  return `${prefix}-${String(highest + 1).padStart(2, '0')}`;
+}
 
 /**
  * Reads the monorepo root package.json's `packageManager` field so a newly
@@ -74,12 +101,25 @@ export function POST(request: Request): Promise<Response> {
           409,
         );
       const packageManagerLine = await packageManagerLineFromMonorepoRoot();
-      try {
-        return await initializeLocalRepository({
+      const create = async (name: string) => ({
+        name,
+        ...(await initializeLocalRepository({
           workspacesRoot: root,
-          name: body.name,
+          name,
           ...(packageManagerLine === undefined ? {} : { packageManagerLine }),
-        });
+        })),
+      });
+      try {
+        if ('name' in body) return await create(body.name);
+        // Two attempts absorb a same-instant race on the incremented name;
+        // beyond that the collision is real and surfaces as 409.
+        try {
+          return await create(await nextAvailableName(root, body.namePrefix));
+        } catch (error) {
+          if (!(error instanceof LocalRepositoryAlreadyExistsError))
+            throw error;
+          return await create(await nextAvailableName(root, body.namePrefix));
+        }
       } catch (error) {
         if (error instanceof LocalRepositoryAlreadyExistsError)
           throw new ServiceError('already_exists', error.message, 409);

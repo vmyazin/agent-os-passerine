@@ -266,6 +266,44 @@ describe('setup API routes', () => {
       }
     });
 
+    it('auto-increments repository names from a prefix', async () => {
+      workspacesRoot = await mkdtemp(join(tmpdir(), 'agentos-setup-local-'));
+      vi.stubEnv('AGENTOS_LOCAL_WORKSPACES_ROOT', workspacesRoot);
+
+      const first = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ namePrefix: 'test-proj' }),
+        }),
+      );
+      expect([200, 201]).toContain(first.status);
+      const firstBody = (await first.json()) as {
+        name: string;
+        localPath: string;
+      };
+      expect(firstBody.name).toBe('test-proj-01');
+      expect(firstBody.localPath).toBe(join(workspacesRoot, 'test-proj-01'));
+
+      const second = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ namePrefix: 'test-proj' }),
+        }),
+      );
+      expect([200, 201]).toContain(second.status);
+      expect(((await second.json()) as { name: string }).name).toBe(
+        'test-proj-02',
+      );
+
+      const invalidPrefix = await createLocalRepository(
+        request('/api/setup/local-repository', {
+          method: 'POST',
+          body: JSON.stringify({ namePrefix: 'Bad_Prefix' }),
+        }),
+      );
+      expect(invalidPrefix.status).toBe(422);
+    });
+
     it('creates a seeded repository and rejects a duplicate name', async () => {
       workspacesRoot = await mkdtemp(join(tmpdir(), 'agentos-setup-local-'));
       vi.stubEnv('AGENTOS_LOCAL_WORKSPACES_ROOT', workspacesRoot);
