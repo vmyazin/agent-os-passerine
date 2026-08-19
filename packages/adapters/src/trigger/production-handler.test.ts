@@ -189,9 +189,20 @@ describe('production feature workflow composition', () => {
       'createR2ArtifactStore',
       'createManagedAgentsRuntimeProvider',
       'createTrustedWorkflowVerifier',
-      'createTrustedGitHubPublisherService',
+      'composePublicationTarget',
     ]) {
       expect(productionSource).toContain(factory);
+    }
+    // The GitHub- and local-git-backed publisher constructions live in
+    // composePublicationTarget (production-composition.ts) so a local-only
+    // deployment's per-snapshot selection never needs GitHub env at
+    // module-init time; verify both concrete factories are still wired
+    // there rather than swapped for a fake.
+    for (const factory of [
+      'createTrustedGitHubPublisherService',
+      'createLocalGitPublisher',
+    ]) {
+      expect(compositionSource).toContain(factory);
     }
     expect(productionSource).not.toContain(
       'AGENTOS_PRODUCTION_COMPOSITION_MODULE',

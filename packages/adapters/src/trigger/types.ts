@@ -88,6 +88,8 @@ export interface FeatureWorkflowResult {
     | 'budget_exhausted'
     | 'failed';
   readonly draftPullRequestUrl?: string;
+  readonly localBranch?: string;
+  readonly localRepositoryUrl?: string;
   readonly reason?: string;
 }
 
@@ -219,11 +221,13 @@ export interface WorkflowPublicationAuthority {
 }
 
 export interface WorkflowPublisher {
-  publish(input: unknown): Promise<{
-    readonly status: 'succeeded';
-    readonly draft: true;
-    readonly pullRequestUrl: string;
-  }>;
+  // The GitHub-backed publisher resolves a draft-PR result; the local-git
+  // publisher (packages/adapters/src/local-git/publisher.ts) resolves a
+  // structurally different `{ local: true, ... }` shape. workflow.ts
+  // re-validates whatever comes back against `publicationResultSchema`
+  // (the union of both) before trusting any field on it, so the type here
+  // stays loose and the schema is the actual contract.
+  publish(input: unknown): Promise<unknown>;
 }
 
 export type WorkflowEffectStatus =

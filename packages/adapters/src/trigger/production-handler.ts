@@ -18,7 +18,6 @@ import {
   type ArtifactCapabilityKey,
   type ArtifactMetadata,
   type ConfigSnapshot,
-  type GitHubPublicationRepository,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
   type RuntimeAgent,
@@ -28,7 +27,7 @@ import { z } from 'zod';
 
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createR2ArtifactStore } from '../artifacts/r2.js';
-import { createTrustedGitHubPublisherService } from '../github/service.js';
+import type { TrustedPublicationPolicyResolver } from '../github/service.js';
 import { createKimiLocalAccessStore } from '../kimi/access.js';
 import {
   createKimiRuntimeProviderFromEnv,
@@ -43,7 +42,10 @@ import { createGoalWorkflowTaskHandler } from './goal-task-handler.js';
 import { createTrustedGoalCommandVerifier } from './goal-verifier.js';
 import { createDurableGoalWorkflow } from './goal-workflow.js';
 import { createNeonWorkflowCheckpointStore } from './postgres-checkpoint-store.js';
-import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
+import {
+  composePublicationTarget,
+  resolveFeatureRolesFromSnapshot,
+} from './production-composition.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
 import { createFeatureWorkflowTaskHandler } from './task-handler.js';
 import { createTriggerApprovalWaiter } from './trigger-adapter.js';
@@ -130,6 +132,8 @@ const featureWorkflowResultSchema = z
       'failed',
     ]),
     draftPullRequestUrl: z.url().max(2_048).optional(),
+    localBranch: z.string().max(512).optional(),
+    localRepositoryUrl: z.url().max(2_048).optional(),
     reason: z.string().max(1_000).optional(),
   })
   .strict();
@@ -406,47 +410,40 @@ export async function createProductionFeatureWorkflowFromEnv(
     secret: testReportKey.secret,
     kind: 'trusted-test-report',
   });
-  const selectedRepositories = parsedJson<GitHubPublicationRepository[]>(
-    environment,
-    'GITHUB_SELECTED_REPOSITORIES_JSON',
-  );
-  if (selectedRepositories.length !== 1)
-    throw new Error('the POC requires exactly one selected repository');
   const issuer = createHmacAttestationIssuer<PublicationAuthorizationClaims>({
     keyId: activeKey.keyId,
     secret: activeKey.secret,
     kind: 'github-publication',
   });
-  const publisher = createTrustedGitHubPublisherService({
-    githubApp: {
-      appId: Number(required(environment, 'GITHUB_APP_ID')),
-      privateKey: required(environment, 'GITHUB_APP_PRIVATE_KEY'),
+  // Shared between the GitHub and local-git publication paths: both verify
+  // authorization claims signed by the same key material, distinguished at
+  // verification time by the claims' `audience` field (not by which keys
+  // signed them). Only the GitHub branch additionally requires GITHUB_APP_ID
+  // / GITHUB_APP_PRIVATE_KEY / GITHUB_SELECTED_REPOSITORIES_JSON, and those
+  // are read lazily per-snapshot in workflowForSnapshot (via
+  // composePublicationTarget) so a local-only deployment never needs them.
+  const authorizationVerifier =
+    createHmacAttestationVerifier<PublicationAuthorizationClaims>({
+      kind: 'github-publication',
+      keys: publicationKeys,
+    });
+  const publicationPolicyResolver: TrustedPublicationPolicyResolver = {
+    resolve: async ({ runId, policyDigest }) => {
+      const snapshots = await repository.listConfigSnapshots(
+        persistenceId('run', runId),
+        { limit: 2 },
+      );
+      if (snapshots.length !== 1)
+        throw new Error('publication config snapshot is unavailable');
+      const result = policy(parseAgentOsConfig(snapshots[0]!.config));
+      if (canonicalPublicationPolicyDigest(result) !== policyDigest)
+        throw new Error('publication policy digest mismatch');
+      return result;
     },
-    databaseEnvironment: environment,
-    authorizationVerifier:
-      createHmacAttestationVerifier<PublicationAuthorizationClaims>({
-        kind: 'github-publication',
-        keys: publicationKeys,
-      }),
-    selectedRepositories,
-    policyResolver: {
-      resolve: async ({ runId, policyDigest }) => {
-        const snapshots = await repository.listConfigSnapshots(
-          persistenceId('run', runId),
-          { limit: 2 },
-        );
-        if (snapshots.length !== 1)
-          throw new Error('publication config snapshot is unavailable');
-        const result = policy(parseAgentOsConfig(snapshots[0]!.config));
-        if (canonicalPublicationPolicyDigest(result) !== policyDigest)
-          throw new Error('publication policy digest mismatch');
-        return result;
-      },
-    },
-    isCancelled: async (_projectId, runId) =>
-      (await repository.getRun(persistenceId('run', runId)))?.status ===
-      'cancelled',
-  });
+  };
+  const publicationIsCancelled = async (_projectId: string, runId: string) =>
+    (await repository.getRun(persistenceId('run', runId)))?.status ===
+    'cancelled';
   const sourceBundles = new Map<
     string,
     {
@@ -494,12 +491,28 @@ export async function createProductionFeatureWorkflowFromEnv(
     },
     workflowForSnapshot: async (snapshot: ConfigSnapshot, execution) => {
       const config = parseAgentOsConfig(snapshot.config);
+      // Per-snapshot selection between the GitHub-backed and local-git
+      // publication paths (see composePublicationTarget). Neither branch
+      // performs a live network call at construction time.
+      const target = composePublicationTarget(config, {
+        environment,
+        authorizationVerifier,
+        policy: policy(config),
+        policyResolver: publicationPolicyResolver,
+        isCancelled: publicationIsCancelled,
+      });
       if (config.project.repository !== undefined) {
         const configuredRepository = new URL(config.project.repository);
         const configuredPath = configuredRepository.pathname
           .replace(/^\//, '')
           .replace(/\.git$/, '');
-        const selectedRepository = selectedRepositories[0]!;
+        // `target.repository` is the GitHub shape whenever
+        // config.project.repository is set -- composePublicationTarget's
+        // GitHub branch is exactly the branch taken here.
+        const selectedRepository = target.repository as {
+          readonly owner: string;
+          readonly name: string;
+        };
         if (
           configuredRepository.hostname !== 'github.com' ||
           configuredPath !==
@@ -555,7 +568,7 @@ export async function createProductionFeatureWorkflowFromEnv(
             projectId: workflow.projectId,
             runId: workflow.runId,
             stepId: 'publication',
-            repository: selectedRepositories[0]!,
+            repository: target.repository,
             expectedBase: {
               branch: config.project.defaultBranch,
               sha: workflow.source.repositorySha,
@@ -582,7 +595,7 @@ export async function createProductionFeatureWorkflowFromEnv(
               issuedAt: issuedAt.toISOString(),
               claims: {
                 purpose: 'publish-draft-pr',
-                audience: 'github-publisher',
+                audience: target.audience,
                 projectId: workflow.projectId,
                 runId: workflow.runId,
                 stepId: manifest.stepId,
@@ -788,7 +801,7 @@ export async function createProductionFeatureWorkflowFromEnv(
           return exactTrustedCommand(definition);
         },
         publicationAuthority,
-        publisher: { publish: async (input) => publisher.publish(input) },
+        publisher: target.publisher,
         execution:
           execution ??
           ({

@@ -1,7 +1,25 @@
-import { parseAgentOsConfig, type ConfigSnapshot } from '@agentos/core';
+import { basename } from 'node:path';
 
+import {
+  parseAgentOsConfig,
+  type AgentOsConfig,
+  type AttestationVerifier,
+  type ConfigSnapshot,
+  type GitHubPublicationRepository,
+  type PublicationAuthorizationClaims,
+  type PublicationManifestBody,
+} from '@agentos/core';
+
+import { createNeonPublicationStore } from '../github/postgres-store.js';
+import {
+  createTrustedGitHubPublisherService,
+  type TrustedPublicationPolicyResolver,
+} from '../github/service.js';
+import { createLocalGitPublisher } from '../local-git/index.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
 import type { FeatureRole, FeatureWorkflowRoles } from './types.js';
+
+type Environment = Readonly<Record<string, string | undefined>>;
 
 let initialized: Promise<FeatureWorkflowTaskHandler> | undefined;
 
@@ -145,6 +163,110 @@ export function resolveFeatureRolesFromSnapshot(
       'feature roles must use separate least-privilege environments',
     );
   return resolved;
+}
+
+function required(environment: Environment, name: string): string {
+  const value = environment[name];
+  if (value === undefined || value.trim() === '')
+    throw new Error(`${name} is required for the production feature workflow`);
+  return value;
+}
+
+function parsedJson<T>(environment: Environment, name: string): T {
+  try {
+    return JSON.parse(required(environment, name)) as T;
+  } catch {
+    throw new Error(`${name} must contain valid JSON`);
+  }
+}
+
+export interface PublicationTarget {
+  readonly publisher: { publish(input: unknown): Promise<unknown> };
+  readonly repository: PublicationManifestBody['repository'];
+  readonly audience: 'github-publisher' | 'local-git-publisher';
+}
+
+/**
+ * Per-snapshot selection between the two publication paths a project's
+ * stored config can declare: a GitHub `repository` URL, or a local-
+ * experiment `localPath`. `AgentOsConfigSchema` already enforces these are
+ * mutually exclusive at parse time (packages/core/src/config.ts); the check
+ * here is defense-in-depth against that invariant ever regressing.
+ *
+ * GitHub-only environment requirements (`GITHUB_SELECTED_REPOSITORIES_JSON`,
+ * `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`) are read lazily inside the
+ * GitHub branch so a local-only deployment never needs to set them. Neither
+ * branch performs a live network call at construction time: the GitHub
+ * publisher service and the local-git publisher's Postgres-backed store both
+ * defer to the underlying serverless Neon driver, which connects lazily on
+ * first query.
+ */
+export function composePublicationTarget(
+  config: AgentOsConfig,
+  options: {
+    readonly environment: Environment;
+    readonly authorizationVerifier: AttestationVerifier<PublicationAuthorizationClaims>;
+    readonly policy: unknown;
+    readonly policyResolver: TrustedPublicationPolicyResolver;
+    readonly isCancelled?: (
+      projectId: string,
+      runId: string,
+    ) => Promise<boolean>;
+  },
+): PublicationTarget {
+  const { repository: repositoryUrl, localPath } = config.project;
+  if ((repositoryUrl === undefined) === (localPath === undefined))
+    throw new Error(
+      'project must configure exactly one of repository or localPath',
+    );
+
+  if (repositoryUrl !== undefined) {
+    const selectedRepositories = parsedJson<GitHubPublicationRepository[]>(
+      options.environment,
+      'GITHUB_SELECTED_REPOSITORIES_JSON',
+    );
+    if (selectedRepositories.length !== 1)
+      throw new Error('the POC requires exactly one selected repository');
+    const publisher = createTrustedGitHubPublisherService({
+      githubApp: {
+        appId: Number(required(options.environment, 'GITHUB_APP_ID')),
+        privateKey: required(options.environment, 'GITHUB_APP_PRIVATE_KEY'),
+      },
+      databaseEnvironment: options.environment,
+      authorizationVerifier: options.authorizationVerifier,
+      selectedRepositories,
+      policyResolver: options.policyResolver,
+      ...(options.isCancelled === undefined
+        ? {}
+        : { isCancelled: options.isCancelled }),
+    });
+    return {
+      publisher: { publish: async (input) => publisher.publish(input) },
+      repository: selectedRepositories[0]!,
+      audience: 'github-publisher',
+    };
+  }
+
+  const workspacesRoot = required(
+    options.environment,
+    'AGENTOS_LOCAL_WORKSPACES_ROOT',
+  );
+  const publisher = createLocalGitPublisher({
+    workspacesRoot,
+    localPath: localPath!,
+    verifier: options.authorizationVerifier,
+    policy: options.policy,
+    store: createNeonPublicationStore(options.environment),
+  });
+  return {
+    publisher: { publish: async (input) => publisher.publish(input) },
+    repository: {
+      kind: 'local',
+      owner: 'local',
+      name: basename(localPath!),
+    },
+    audience: 'local-git-publisher',
+  };
 }
 
 /**

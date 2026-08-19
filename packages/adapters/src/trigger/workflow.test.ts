@@ -549,6 +549,79 @@ describe('durable feature workflow', () => {
     });
   });
 
+  it('records localBranch/localRepositoryUrl (and no draftPullRequestUrl) when the publisher resolves a local-git result', async () => {
+    const f = await fixture();
+    const workflow = createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          local: true,
+          branch: 'agentos/run-1-abcdef01',
+          commitSha: 'a'.repeat(40),
+          repositoryUrl: 'file:///workspaces/exp',
+        }),
+      },
+    });
+
+    const result = await workflow.run(input);
+    expect(result).toEqual({
+      status: 'succeeded',
+      localBranch: 'agentos/run-1-abcdef01',
+      localRepositoryUrl: 'file:///workspaces/exp',
+    });
+    expect(result).not.toHaveProperty('draftPullRequestUrl');
+  });
+
+  it('rejects a publisher result matching neither the draft-PR nor the local-git shape', async () => {
+    const f = await fixture();
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const workflow = createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints,
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({ status: 'succeeded' }),
+      },
+    });
+
+    const result = await workflow.run(input);
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'publisher returned an invalid result',
+    });
+  });
+
   it('stops after authoritative rejection even when the waitpoint wakes', async () => {
     const f = await fixture('reject');
     const workflow = createDurableFeatureWorkflow({

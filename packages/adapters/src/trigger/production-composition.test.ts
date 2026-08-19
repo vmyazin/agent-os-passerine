@@ -1,11 +1,19 @@
+import { generateKeyPairSync } from 'node:crypto';
+
 import {
+  createHmacAttestationIssuer,
+  createHmacAttestationVerifier,
   loadAgentOsConfig,
   type AgentOsConfig,
   type ConfigSnapshot,
+  type PublicationAuthorizationClaims,
 } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
-import { resolveFeatureRolesFromSnapshot } from './production-composition.js';
+import {
+  composePublicationTarget,
+  resolveFeatureRolesFromSnapshot,
+} from './production-composition.js';
 import {
   kimiFromEnv,
   resolveRoleRuntimeKeys,
@@ -369,5 +377,220 @@ describe('resolveRoleRuntimeKeys', () => {
         false,
       ),
     ).toThrow(/unknown runtime 'local' routed for agent/);
+  });
+});
+
+function projectConfig(projectYaml: string): AgentOsConfig {
+  return loadAgentOsConfig(`
+version: 1
+project: ${projectYaml}
+models:
+  standard: { provider: anthropic, model: sonnet }
+agents:
+  specification: { model: standard }
+environments: {}
+pipelines:
+  feature:
+    steps:
+      - { id: specification, agent: specification }
+policies: {}
+budgets: { workflowMicrodollars: 2000000, dailyMicrodollars: 5000000, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 3600000 }
+runtime: { provider: managed }
+`);
+}
+
+describe('composePublicationTarget', () => {
+  const secret = 's'.repeat(32);
+  const authorizationVerifier =
+    createHmacAttestationVerifier<PublicationAuthorizationClaims>({
+      kind: 'github-publication',
+      keys: [{ keyId: 'publisher-1', secret }],
+    });
+  const issuer = createHmacAttestationIssuer<PublicationAuthorizationClaims>({
+    keyId: 'publisher-1',
+    secret,
+    kind: 'github-publication',
+  });
+  const policyResolver = { resolve: async () => ({}) };
+
+  function environment(
+    overrides: Record<string, string | undefined> = {},
+  ): Record<string, string | undefined> {
+    return {
+      DATABASE_URL: 'postgresql://agentos:agentos@localhost:5432/agentos',
+      ...overrides,
+    };
+  }
+
+  const localConfig = projectConfig(
+    '{ name: exp, localPath: /workspaces/exp }',
+  );
+  const githubConfig = projectConfig(
+    '{ name: exp, repository: https://github.com/team-zork/sandbox }',
+  );
+  const neitherConfig = projectConfig('{ name: exp }');
+
+  it('composes a local-git publisher target without any GITHUB_* env, given AGENTOS_LOCAL_WORKSPACES_ROOT', () => {
+    const target = composePublicationTarget(localConfig, {
+      environment: environment({
+        AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces',
+      }),
+      authorizationVerifier,
+      policy: {},
+      policyResolver,
+    });
+    expect(target.audience).toBe('local-git-publisher');
+    expect(target.repository).toEqual({
+      kind: 'local',
+      owner: 'local',
+      name: 'exp',
+    });
+    expect(typeof target.publisher.publish).toBe('function');
+  });
+
+  it('requires AGENTOS_LOCAL_WORKSPACES_ROOT for a localPath project', () => {
+    expect(() =>
+      composePublicationTarget(localConfig, {
+        environment: environment(),
+        authorizationVerifier,
+        policy: {},
+        policyResolver,
+      }),
+    ).toThrow(/AGENTOS_LOCAL_WORKSPACES_ROOT/);
+  });
+
+  it('requires GitHub env for a repository project and stamps audience github-publisher', () => {
+    expect(() =>
+      composePublicationTarget(githubConfig, {
+        environment: environment(),
+        authorizationVerifier,
+        policy: {},
+        policyResolver,
+      }),
+    ).toThrow(/GITHUB_SELECTED_REPOSITORIES_JSON/);
+
+    const privateKey = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    }).privateKey;
+    const target = composePublicationTarget(githubConfig, {
+      environment: environment({
+        GITHUB_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+          {
+            owner: 'team-zork',
+            name: 'sandbox',
+            installationId: 1,
+            repositoryId: 2,
+          },
+        ]),
+        GITHUB_APP_ID: '1',
+        GITHUB_APP_PRIVATE_KEY: privateKey,
+      }),
+      authorizationVerifier,
+      policy: {},
+      policyResolver,
+    });
+    expect(target.audience).toBe('github-publisher');
+    expect(target.repository).toEqual({
+      owner: 'team-zork',
+      name: 'sandbox',
+      installationId: 1,
+      repositoryId: 2,
+    });
+  });
+
+  it('throws when the project configures neither repository nor localPath', () => {
+    expect(() =>
+      composePublicationTarget(neitherConfig, {
+        environment: environment({
+          AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces',
+        }),
+        authorizationVerifier,
+        policy: {},
+        policyResolver,
+      }),
+    ).toThrow('project must configure exactly one of repository or localPath');
+  });
+
+  it('throws when the project configures both repository and localPath (defense-in-depth; the config schema already blocks this)', () => {
+    const both: AgentOsConfig = {
+      ...githubConfig,
+      project: { ...githubConfig.project, localPath: '/workspaces/exp' },
+    };
+    expect(() =>
+      composePublicationTarget(both, {
+        environment: environment({
+          AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces',
+        }),
+        authorizationVerifier,
+        policy: {},
+        policyResolver,
+      }),
+    ).toThrow('project must configure exactly one of repository or localPath');
+  });
+
+  it('the local branch selects an audience the shared verifier accepts as local-git-publisher and not as github-publisher', () => {
+    const target = composePublicationTarget(localConfig, {
+      environment: environment({
+        AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces',
+      }),
+      authorizationVerifier,
+      policy: {},
+      policyResolver,
+    });
+    expect(target.audience).toBe('local-git-publisher');
+    const claims: PublicationAuthorizationClaims = {
+      purpose: 'publish-draft-pr',
+      audience: target.audience,
+      projectId: 'proj-1',
+      runId: 'run-1',
+      stepId: 'publication',
+      repository: target.repository,
+      expectedBase: { branch: 'main', sha: '0'.repeat(40) },
+      configDigest: '0'.repeat(64),
+      policyDigest: '0'.repeat(64),
+      sourceSnapshotDigest: '0'.repeat(64),
+      testEvidenceDigest: '0'.repeat(64),
+      manifestDigest: '0'.repeat(64),
+      nonce: 'publish-run-1',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const signed = issuer.issue({
+      subject: `proj-1:run-1:${'0'.repeat(64)}`,
+      issuedAt: new Date().toISOString(),
+      claims,
+    });
+    const verified = authorizationVerifier.verify(signed, {
+      subject: signed.subject,
+    });
+    expect(verified?.audience).toBe('local-git-publisher');
+  });
+
+  it('the github branch selects audience github-publisher', () => {
+    const privateKey = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    }).privateKey;
+    const target = composePublicationTarget(githubConfig, {
+      environment: environment({
+        GITHUB_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+          {
+            owner: 'team-zork',
+            name: 'sandbox',
+            installationId: 1,
+            repositoryId: 2,
+          },
+        ]),
+        GITHUB_APP_ID: '1',
+        GITHUB_APP_PRIVATE_KEY: privateKey,
+      }),
+      authorizationVerifier,
+      policy: {},
+      policyResolver,
+    });
+    expect(target.audience).toBe('github-publisher');
   });
 });

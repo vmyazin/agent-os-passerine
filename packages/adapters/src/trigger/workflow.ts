@@ -22,17 +22,18 @@ import type { ZodType } from 'zod';
 import {
   changeSetSchema,
   definitionOfDoneSchema,
-  draftPublicationResultSchema,
   featureSpecificationSchema,
   featureWorkflowInputSchema,
   implementationOutputSchema,
   implementationPlanSchema,
   planOutputSchema,
+  publicationResultSchema,
   reviewArtifactSchema,
   reviewOutputSchema,
   specificationOutputSchema,
   testEvidenceSchema,
   trustedCommandObservationSchema,
+  type WorkflowPublicationResult,
 } from './schemas.js';
 import { createAesWorkflowHandleSealer } from './handle-sealer.js';
 import {
@@ -1593,13 +1594,9 @@ export function createDurableFeatureWorkflow(
           2 * 60_000,
         );
         const publicationEffect = publicationClaim.effect;
-        let publication: {
-          status: 'succeeded';
-          draft: true;
-          pullRequestUrl: string;
-        };
+        let publication: WorkflowPublicationResult;
         if (publicationEffect.status === 'succeeded') {
-          const replay = draftPublicationResultSchema.safeParse(
+          const replay = publicationResultSchema.safeParse(
             publicationEffect.output,
           );
           if (!replay.success)
@@ -1634,7 +1631,7 @@ export function createDurableFeatureWorkflow(
             throw new WorkflowPermanentError(safeError(error));
           }
           const parsedPublication =
-            draftPublicationResultSchema.safeParse(rawPublication);
+            publicationResultSchema.safeParse(rawPublication);
           if (!parsedPublication.success) {
             await dependencies.checkpoints.failEffect(
               publicationClaim.lease,
@@ -1653,10 +1650,17 @@ export function createDurableFeatureWorkflow(
             dependencies.clock(),
           );
         }
-        const result: FeatureWorkflowResult = {
-          status: 'succeeded',
-          draftPullRequestUrl: publication.pullRequestUrl,
-        };
+        const result: FeatureWorkflowResult =
+          'local' in publication
+            ? {
+                status: 'succeeded',
+                localBranch: publication.branch,
+                localRepositoryUrl: publication.repositoryUrl,
+              }
+            : {
+                status: 'succeeded',
+                draftPullRequestUrl: publication.pullRequestUrl,
+              };
         if (
           (await transitionCurrentRun(dependencies, runId, ['running'], {
             status: 'succeeded',

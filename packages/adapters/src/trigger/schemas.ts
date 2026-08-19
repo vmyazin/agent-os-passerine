@@ -99,10 +99,29 @@ export const draftPublicationResultSchema = z
     // The trusted publisher also reports where the draft landed; the
     // workflow records these but only the three fields above are binding.
     branch: z.string().min(1).max(512).optional(),
-    commitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    commitSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
     pullRequestNumber: z.number().int().positive().optional(),
   })
   .strict();
+
+export const localPublicationResultSchema = z
+  .object({
+    status: z.literal('succeeded'),
+    local: z.literal(true),
+    branch: z.string().min(1).max(512),
+    commitSha: z.string().regex(/^[0-9a-f]{40}$/),
+    repositoryUrl: z.url().max(2_048).startsWith('file://'),
+  })
+  .strict();
+
+export const publicationResultSchema = z.union([
+  draftPublicationResultSchema,
+  localPublicationResultSchema,
+]);
+export type WorkflowPublicationResult = z.infer<typeof publicationResultSchema>;
 
 export const featureSpecificationSchema = z
   .object({
