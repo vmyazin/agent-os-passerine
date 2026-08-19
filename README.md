@@ -47,6 +47,12 @@ chain at boot. Every variable is documented in `.env.example`. Verify
 credentials with the live smokes
 (`AGENTOS_LIVE_TESTS=1 node packages/adapters/scripts/<r2|kimi|managed-agents>-smoke.mjs`).
 
+Local experiment projects: set `AGENTOS_LOCAL_WORKSPACES_ROOT`, choose
+"Local experiment" in the setup wizard at `/setup`, and runs end as
+`agentos/<run>` branches in a local git repository instead of draft PRs —
+no GitHub Apps required (agent sessions still execute in the Managed
+Agents cloud and artifacts are stored in R2).
+
 The no-cost test path uses in-memory/fake providers. Production uses Neon,
 Trigger.dev, Managed Agents, R2, and the selected-repository GitHub Apps
 through the same stable contracts.

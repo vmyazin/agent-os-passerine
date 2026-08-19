@@ -120,5 +120,11 @@ through the startup options parameter so Neon's proxy honors it.
 - Signed diagnostic/repair triggers, recurring business tasks, PWA push
   notifications, and mobile approval/reply flows.
 
+Local experiment projects are implemented: the feature pipeline can run
+against a local git repository (`project.localPath` +
+`AGENTOS_LOCAL_WORKSPACES_ROOT`) with local source ingestion and
+local-branch publication behind the existing seams, a guided setup-wizard
+mode, and no GitHub Apps required.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

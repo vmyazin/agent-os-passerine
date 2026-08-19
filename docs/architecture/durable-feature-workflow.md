@@ -43,6 +43,20 @@ No runtime request contains GitHub App, branch-push, merge, or publication
 credentials. Agent outputs are bounded JSON results containing artifact
 manifests; raw reasoning and secrets are not persisted as domain events.
 
+Local experiment projects (`project.localPath` instead of
+`project.repository`) swap only the two edges of the pipeline: source
+bundles are built from a local git repository inside
+`AGENTOS_LOCAL_WORKSPACES_ROOT` (containment-checked, plumbing-only git),
+and publication becomes a commit on a new `agentos/<run>` branch in that
+repository, created with `hash-object`/`mktree`/`commit-tree`/`update-ref`
+so hooks never run and the operator's working tree is never touched. The
+publication authorization carries the distinct audience
+`local-git-publisher`, and the local repository identity is a separate
+schema variant with no installation or repository IDs, so local manifests
+are structurally incapable of reaching the GitHub publisher (and vice
+versa). Everything between the edges — sessions, artifact MCP, budgets,
+approvals, sealed verification — is byte-identical to the GitHub path.
+
 ## Replay and failure model
 
 `workflow_effects` records a fingerprint before every Trigger, runtime,
