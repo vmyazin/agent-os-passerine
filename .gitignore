@@ -13,3 +13,4 @@ test-results/
 !.env.example
 *.tsbuildinfo
 .DS_Store
+.playwright-mcp/
