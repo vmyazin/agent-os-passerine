@@ -331,9 +331,36 @@ h1 {
   line-height: 1.6;
 }
 
-.logout-form {
+.rail-sign-out {
   display: block;
-  margin-top: 1rem;
+  margin: 0;
+  margin-top: auto;
+}
+
+.rail-sign-out button {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 0.55rem;
+  background: transparent;
+  color: var(--ink-secondary);
+  padding-inline: 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 400;
+  text-align: left;
+}
+
+.rail-sign-out button:hover {
+  background: var(--surface-inset);
+  color: var(--ink-command);
+}
+
+.rail-sign-out button:active {
+  transform: none;
 }
 
 .metric-grid {
@@ -992,7 +1019,8 @@ div.inbox-message-copy {
     padding: 1rem 0.55rem;
   }
 
-  .app-rail nav a {
+  .app-rail nav a,
+  .rail-sign-out button {
     min-height: 40px;
     font-size: 0.82rem;
     padding-inline: 0.55rem;

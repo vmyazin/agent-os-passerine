@@ -13,7 +13,9 @@ export default async function HomePage() {
   const projects = new Set(runs.map((run) => run.projectId));
   const waitingCount = countWaitingRuns(runs);
   const activeProjectsLabel =
-    projects.size === 1 ? '1 active project' : `${projects.size} active projects`;
+    projects.size === 1
+      ? '1 active project'
+      : `${projects.size} active projects`;
   const waitingLabel =
     waitingCount === 1 ? '1 run waiting' : `${waitingCount} runs waiting`;
 
@@ -21,15 +23,12 @@ export default async function HomePage() {
     <div className="page-stack">
       <section aria-labelledby="page-title" className="page-heading">
         <p className="eyebrow">Overview</p>
-        <h1 id="page-title">{timeOfDayGreeting()}, {session.login}.</h1>
+        <h1 id="page-title">
+          {timeOfDayGreeting()}, {session.login}.
+        </h1>
         <p>
           Monitor active work and answer the questions that need your judgment.
         </p>
-        <form action="/auth/logout" className="logout-form" method="post">
-          <button className="secondary" type="submit">
-            Sign out {session.login}
-          </button>
-        </form>
       </section>
       <section aria-label="Workspace summary" className="metric-grid">
         <article>

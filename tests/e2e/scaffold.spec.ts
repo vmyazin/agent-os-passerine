@@ -49,6 +49,11 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
     page.getByRole('navigation', { name: 'Primary navigation' }),
   ).toBeVisible();
   await expect(
+    page
+      .getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Sign Out' }),
+  ).toBeVisible();
+  await expect(
     page.getByRole('link', {
       name: `Projects, ${PLACEHOLDER_PROJECTS.length}`,
     }),
@@ -129,6 +134,9 @@ test('operator can sign in via the localhost "Get In" bypass CTA', async ({
 
   const getInButton = page.getByRole('link', { name: 'Get In' });
   await expect(getInButton).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Sign Out' }),
+  ).toHaveCount(0);
   await getInButton.click();
 
   await expect(page).toHaveURL('http://127.0.0.1:3107/');
@@ -137,5 +145,10 @@ test('operator can sign in via the localhost "Get In" bypass CTA', async ({
       level: 1,
       name: `${timeOfDayGreeting()}, test-operator.`,
     }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: 'Sign Out' }),
   ).toBeVisible();
 });

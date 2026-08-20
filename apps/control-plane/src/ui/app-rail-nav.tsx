@@ -1,6 +1,7 @@
 // src/ui/app-rail-nav.tsx
 'use client';
 
+import type { ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
 
 import { PLACEHOLDER_PROJECTS } from './projects-placeholder';
@@ -27,8 +28,10 @@ function isNavItemActive(pathname: string, href: string): boolean {
 }
 
 export function AppRailNav({
+  children,
   inboxCount = 0,
 }: {
+  readonly children?: ReactNode;
   readonly inboxCount?: number;
 }) {
   const pathname = usePathname();
@@ -61,6 +64,7 @@ export function AppRailNav({
           </a>
         );
       })}
+      {children}
     </nav>
   );
 }
