@@ -288,11 +288,15 @@ export class PostgresWorkflowCheckpointStore implements WorkflowCheckpointStore 
       );
   }
 
-  async releaseSession(runId: string, stepKey: string): Promise<void> {
+  async releaseSession(
+    projectId: string,
+    runId: string,
+    stepKey: string,
+  ): Promise<void> {
     await this.sql.execute(
       `delete from "workflow_session_leases"
-       where "lease_key" = 'global-agent-session' and "run_id" = $1 and "step_key" = $2`,
-      [runId, stepKey],
+       where "lease_key" = $3 and "run_id" = $1 and "step_key" = $2`,
+      [runId, stepKey, `agent-session:${projectId}`],
     );
   }
 

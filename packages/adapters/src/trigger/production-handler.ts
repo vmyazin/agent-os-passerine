@@ -453,6 +453,22 @@ export async function createProductionFeatureWorkflowFromEnv(
       readonly body: z.infer<typeof sourceBundleSchema>;
     }
   >();
+  const SOURCE_BUNDLE_CACHE_MAX = 32;
+  const rememberSourceBundle = (
+    runId: string,
+    result: {
+      readonly metadata: ArtifactMetadata;
+      readonly body: z.infer<typeof sourceBundleSchema>;
+    },
+  ) => {
+    sourceBundles.delete(runId);
+    sourceBundles.set(runId, result);
+    while (sourceBundles.size > SOURCE_BUNDLE_CACHE_MAX) {
+      const oldest = sourceBundles.keys().next().value;
+      if (oldest === undefined) break;
+      sourceBundles.delete(oldest);
+    }
+  };
   const loadSource = async (
     projectId: string,
     runId: string,
@@ -479,7 +495,7 @@ export async function createProductionFeatureWorkflowFromEnv(
       throw new Error('source bundle repository binding mismatch');
     }
     const result = { metadata, body };
-    sourceBundles.set(runId, result);
+    rememberSourceBundle(runId, result);
     return result;
   };
   return createFeatureWorkflowTaskHandler({
@@ -631,6 +647,9 @@ export async function createProductionFeatureWorkflowFromEnv(
         builtRuntimeKeys,
         kimiConfigured: kimiProvider !== undefined,
       });
+      const run = await repository.getRun(snapshot.runId);
+      if (run === undefined) throw new Error('workflow run is unavailable');
+      const projectManagedProvider = managedProvider.forProject(run.projectId);
       // Only wrap the managed provider in the routing facade when this run's
       // config actually routes at least one role to kimi -- the facade
       // prefixes every handle id (`managed <id>` / `kimi <id>`), and that
@@ -642,13 +661,13 @@ export async function createProductionFeatureWorkflowFromEnv(
       const workflowRuntime: RuntimeProvider = requiresKimi
         ? createRoutingRuntimeProvider({
             providers: {
-              managed: managedProvider,
+              managed: projectManagedProvider,
               kimi: kimiProvider!,
             },
             defaultProvider: config.runtime.provider,
             route: (agent: RuntimeAgent) => resolveRuntimeKey(config, agent),
           })
-        : managedProvider;
+        : projectManagedProvider;
       const runtimeAccess = {
         prepare: async (request: {
           workflow: {
@@ -743,7 +762,7 @@ export async function createProductionFeatureWorkflowFromEnv(
                       ? []
                       : [{ token: input.bearerToken }],
                 })
-              : managedProvider.provisionSessionAccess({
+              : projectManagedProvider.provisionSessionAccess({
                   idempotencyKey: request.idempotencyKey,
                   ...input,
                 });

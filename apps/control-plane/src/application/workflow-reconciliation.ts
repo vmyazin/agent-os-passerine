@@ -13,6 +13,7 @@ import {
   type ApprovalId,
   type DomainRepository,
   type JsonValue,
+  type ProjectId,
   type TimestampListCursor,
   type WorkflowRun,
   type WorkflowRunId,
@@ -157,6 +158,7 @@ export async function reconcileWorkflowOutbox(
   outbox: WorkflowDispatchOutbox,
   clock: () => string = () => new Date().toISOString(),
   cursorStore?: WorkflowReconciliationCursorStore,
+  options?: { readonly projectId?: ProjectId },
 ): Promise<{ scannedRuns: number; delivered: number; failed: number }> {
   let scannedRuns = 0;
   let delivered = 0;
@@ -169,6 +171,9 @@ export async function reconcileWorkflowOutbox(
     const runs = await repository.listRuns({
       limit: 100,
       ...(after === undefined ? {} : { after }),
+      ...(options?.projectId === undefined
+        ? {}
+        : { projectId: options.projectId }),
     });
     if (runs.length === 0) {
       completedCycle = true;

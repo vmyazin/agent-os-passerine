@@ -7,10 +7,22 @@ export async function runConfiguredWorkflowReconciliation(): Promise<unknown> {
   const outbox = workflowDispatchFromEnv();
   if (outbox === undefined)
     throw new Error('Trigger workflow dispatch is not configured');
-  return reconcileWorkflowOutbox(
-    repositoryFromEnv(),
-    outbox,
-    undefined,
-    createNeonWorkflowReconciliationCursorStore(process.env),
-  );
+  const repository = repositoryFromEnv();
+  const projects = await repository.listProjects({ limit: 1_000 });
+  let scannedRuns = 0;
+  let delivered = 0;
+  let failed = 0;
+  for (const project of projects) {
+    const result = await reconcileWorkflowOutbox(
+      repository,
+      outbox,
+      undefined,
+      createNeonWorkflowReconciliationCursorStore(process.env, project.id),
+      { projectId: project.id },
+    );
+    scannedRuns += result.scannedRuns;
+    delivered += result.delivered;
+    failed += result.failed;
+  }
+  return { scannedRuns, delivered, failed };
 }

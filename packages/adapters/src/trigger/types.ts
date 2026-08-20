@@ -340,7 +340,11 @@ export interface WorkflowCheckpointStore {
         readonly reason: 'workflow_budget' | 'daily_budget' | 'concurrency';
       }
   >;
-  releaseSession(runId: string, stepKey: string): Promise<void>;
+  releaseSession(
+    projectId: string,
+    runId: string,
+    stepKey: string,
+  ): Promise<void>;
   settleSession(request: WorkflowSessionSettlement): Promise<
     | { readonly settled: true }
     | {

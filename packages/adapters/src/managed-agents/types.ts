@@ -116,6 +116,7 @@ export interface ManagedAgentsStatus {
 }
 
 export interface ManagedAgentsProvider extends RuntimeProvider {
+  forProject(projectId: string): ManagedAgentsProvider;
   provisionSessionAccess(input: {
     readonly idempotencyKey: string;
     readonly mcpUrl?: string;

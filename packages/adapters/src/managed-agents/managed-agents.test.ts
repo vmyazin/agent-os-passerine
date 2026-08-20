@@ -355,7 +355,7 @@ function remoteAgent(
   return {
     id: 'agent_1',
     type: 'agent',
-    name: 'agentos:writer',
+    name: 'agentos:default:writer',
     model: { id: 'claude-sonnet-4-6' },
     system: null,
     tools: [],
@@ -373,7 +373,7 @@ function remoteEnvironment(
   return {
     id: 'env_1',
     type: 'environment',
-    name: 'agentos:node',
+    name: 'agentos:default:node',
     description: '',
     metadata: {},
     config: {
@@ -505,7 +505,7 @@ describe('declarative resource sync', () => {
 
     expect(client.agentCreates).toEqual([
       expect.objectContaining({
-        name: 'agentos:writer',
+        name: 'agentos:default:writer',
         tools: expect.arrayContaining([
           expect.objectContaining({
             type: 'mcp_toolset',
@@ -516,20 +516,20 @@ describe('declarative resource sync', () => {
           }),
         ]),
         metadata: expect.objectContaining({
-          'agentos.local_id': 'writer',
+          'agentos.local_id': 'default:writer',
           'agentos.config_digest': expect.stringMatching(/^sha256:/),
         }),
       }),
     ]);
     expect(client.environmentCreates).toEqual([
       expect.objectContaining({
-        name: 'agentos:node',
+        name: 'agentos:default:node',
         config: expect.objectContaining({
           type: 'cloud',
           networking: expect.objectContaining({ type: 'limited' }),
         }),
         metadata: expect.objectContaining({
-          'agentos.local_id': 'node',
+          'agentos.local_id': 'default:node',
           'agentos.config_digest': expect.stringMatching(/^sha256:/),
         }),
       }),
@@ -576,10 +576,10 @@ describe('declarative resource sync', () => {
   it('detects duplicate remote resources and conflicting config ownership', async () => {
     const duplicateClient = new FakeManagedAgentsClient();
     duplicateClient.agents.push(
-      remoteAgent({ metadata: { 'agentos.local_id': 'writer' } }),
+      remoteAgent({ metadata: { 'agentos.local_id': 'default:writer' } }),
       remoteAgent({
         id: 'agent_2',
-        metadata: { 'agentos.local_id': 'writer' },
+        metadata: { 'agentos.local_id': 'default:writer' },
       }),
     );
     const duplicateProvider = await createManagedAgentsRuntimeProvider({
@@ -595,7 +595,7 @@ describe('declarative resource sync', () => {
       remoteAgent({
         name: 'owned-elsewhere',
         metadata: {
-          'agentos.local_id': 'writer',
+          'agentos.local_id': 'default:writer',
           'agentos.owner': 'another-system',
         },
       }),
@@ -614,7 +614,7 @@ describe('declarative resource sync', () => {
     client.agents.push(
       remoteAgent({
         metadata: {
-          'agentos.local_id': 'writer',
+          'agentos.local_id': 'default:writer',
           'agentos.config_digest': 'sha256:stale',
           'agentos.owner': 'agentos-managed-agents-runtime',
         },
@@ -641,7 +641,7 @@ describe('declarative resource sync', () => {
     client.agents.push(
       remoteAgent({
         metadata: {
-          'agentos.local_id': 'writer',
+          'agentos.local_id': 'default:writer',
           'agentos.config_digest': 'sha256:legacy',
         },
       }),
@@ -778,14 +778,14 @@ describe('declarative resource sync', () => {
     const client = new FakeManagedAgentsClient();
     client.agentCreateConflictRemote = remoteAgent({
       metadata: {
-        'agentos.local_id': 'writer',
+        'agentos.local_id': 'default:writer',
         'agentos.config_digest': 'sha256:competing',
         'agentos.owner': 'agentos-managed-agents-runtime',
       },
     });
     client.environmentCreateConflictRemote = remoteEnvironment({
       metadata: {
-        'agentos.local_id': 'node',
+        'agentos.local_id': 'default:node',
         'agentos.config_digest': 'sha256:competing',
         'agentos.owner': 'agentos-managed-agents-runtime',
       },

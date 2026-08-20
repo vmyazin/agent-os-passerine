@@ -36,7 +36,7 @@ describe('Trigger SDK boundary', () => {
   it('starts the versioned task with a stable global idempotency key', async () => {
     const { sdk, calls } = fakeSdk();
     const dispatcher = createTriggerWorkflowDispatcher(sdk);
-    await expect(dispatcher.startFeature('run-1')).resolves.toEqual({
+    await expect(dispatcher.startFeature('run-1', 'project-1')).resolves.toEqual({
       externalRunRef: 'trigger-run-safe-ref',
     });
     expect(calls).toEqual([
@@ -48,6 +48,7 @@ describe('Trigger SDK boundary', () => {
           expect.objectContaining({
             idempotencyKey: 'feature-workflow:run-1:v1',
             idempotencyKeyTTL: '30d',
+            queue: 'agentos-feature-project-1',
           }),
         ],
       },
@@ -58,7 +59,7 @@ describe('Trigger SDK boundary', () => {
     const { sdk, calls } = fakeSdk();
     const dispatcher = createTriggerWorkflowDispatcher(sdk);
 
-    await expect(dispatcher.startGoal('goal-1')).resolves.toEqual({
+    await expect(dispatcher.startGoal('goal-1', 'project-2')).resolves.toEqual({
       externalRunRef: 'trigger-run-safe-ref',
     });
     expect(calls).toEqual([
@@ -70,6 +71,7 @@ describe('Trigger SDK boundary', () => {
           expect.objectContaining({
             idempotencyKey: 'goal-workflow:goal-1:v1',
             idempotencyKeyTTL: '30d',
+            queue: 'agentos-goal-project-2',
           }),
         ],
       },

@@ -282,10 +282,16 @@ export function createDurableTriggerOutbox(
       const effect = claim.effect;
       if (effect.status === 'succeeded') return;
       await options.checkpoints.markEffectStarted(claim.lease, options.clock());
+      if (options.repository === undefined)
+        throw new Error('repository is required before workflow dispatch');
+      const run = await options.repository.getRun(
+        persistenceId('run', request.runId),
+      );
+      if (run === undefined) throw new Error('workflow run not found');
       // Trigger task idempotency makes retry after an ambiguous response safe.
       const result = await (request.pipeline === 'goal'
-        ? options.trigger.startGoal(request.runId)
-        : options.trigger.startFeature(request.runId));
+        ? options.trigger.startGoal(request.runId, run.projectId)
+        : options.trigger.startFeature(request.runId, run.projectId));
       await options.checkpoints.attachExternalRef(
         claim.lease,
         result.externalRunRef,
@@ -552,6 +558,7 @@ export function createDurableTriggerOutbox(
           now,
         });
         await options.checkpoints.releaseSession(
+          reservation.projectId,
           reservation.runId,
           reservation.stepKey,
         );
@@ -780,6 +787,7 @@ export function createDurableTriggerOutbox(
           now,
         });
         await options.checkpoints.releaseSession(
+          reservation.projectId,
           reservation.runId,
           reservation.stepKey,
         );

@@ -5,10 +5,15 @@ import {
   GOAL_WORKFLOW_TASK_ID,
   type WorkflowApprovalWaiter,
 } from './types.js';
+import {
+  featureWorkflowQueueName,
+  goalWorkflowQueueName,
+} from './queue-names.js';
 
 export interface TriggerTaskOptions {
   readonly idempotencyKey: string;
   readonly idempotencyKeyTTL: string;
+  readonly queue?: string;
 }
 
 /** Stable local seam; no Trigger.dev SDK types cross this boundary. */
@@ -73,8 +78,14 @@ export function createTriggerSdkBoundary(): TriggerSdkBoundary {
 }
 
 export interface TriggerWorkflowDispatcher {
-  startFeature(runId: string): Promise<{ readonly externalRunRef: string }>;
-  startGoal(runId: string): Promise<{ readonly externalRunRef: string }>;
+  startFeature(
+    runId: string,
+    projectId: string,
+  ): Promise<{ readonly externalRunRef: string }>;
+  startGoal(
+    runId: string,
+    projectId: string,
+  ): Promise<{ readonly externalRunRef: string }>;
   cancel(externalRunRef: string): Promise<void>;
 }
 
@@ -82,24 +93,26 @@ export function createTriggerWorkflowDispatcher(
   sdk: TriggerSdkBoundary = createTriggerSdkBoundary(),
 ): TriggerWorkflowDispatcher {
   return Object.freeze({
-    async startFeature(runId: string) {
+    async startFeature(runId: string, projectId: string) {
       const result = await sdk.triggerTask(
         FEATURE_WORKFLOW_TASK_ID,
         { version: 'feature-task-payload-v1', runId },
         {
           idempotencyKey: `feature-workflow:${runId}:v1`,
           idempotencyKeyTTL: '30d',
+          queue: featureWorkflowQueueName(projectId),
         },
       );
       return { externalRunRef: result.id };
     },
-    async startGoal(runId: string) {
+    async startGoal(runId: string, projectId: string) {
       const result = await sdk.triggerTask(
         GOAL_WORKFLOW_TASK_ID,
         { version: 'goal-task-payload-v1', runId },
         {
           idempotencyKey: `goal-workflow:${runId}:v1`,
           idempotencyKeyTTL: '30d',
+          queue: goalWorkflowQueueName(projectId),
         },
       );
       return { externalRunRef: result.id };

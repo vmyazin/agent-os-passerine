@@ -34,7 +34,7 @@ describe('workflow checkpoint store', () => {
     ).rejects.toBeInstanceOf(WorkflowCheckpointConflictError);
   });
 
-  it('stops admission at 80 percent and enforces one global live session', async () => {
+  it('stops admission at 80 percent and enforces one live session per project', async () => {
     const store = new InMemoryWorkflowCheckpointStore();
     const request = {
       reservationKey: 'reservation:run-1:specification',
@@ -61,7 +61,7 @@ describe('workflow checkpoint store', () => {
         runId: 'run-2',
       }),
     ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
-    await store.releaseSession('run-1', 'specification');
+    await store.releaseSession('project-1', 'run-1', 'specification');
     await expect(
       store.admitSession({
         ...request,
@@ -80,7 +80,7 @@ describe('workflow checkpoint store', () => {
     ).resolves.toEqual({ admitted: false, reason: 'daily_budget' });
   });
 
-  it('does not let an expired reservation release the global session lease', async () => {
+  it('does not let an expired reservation release another project session lease', async () => {
     const store = new InMemoryWorkflowCheckpointStore();
     const original = {
       reservationKey: 'reservation:run-1:specification',
@@ -109,7 +109,7 @@ describe('workflow checkpoint store', () => {
         leaseExpiresAt: '2026-08-17T12:22:00.000Z',
       }),
     ).resolves.toEqual({ admitted: false, reason: 'concurrency' });
-    await store.releaseSession('run-1', 'specification');
+    await store.releaseSession('project-1', 'run-1', 'specification');
     await expect(
       store.admitSession({
         ...original,
@@ -117,6 +117,39 @@ describe('workflow checkpoint store', () => {
         runId: 'run-2',
         now: '2026-08-17T12:02:01.000Z',
         leaseExpiresAt: '2026-08-17T12:22:01.000Z',
+      }),
+    ).resolves.toEqual({ admitted: true });
+  });
+
+  it('admits concurrent sessions for different projects', async () => {
+    const store = new InMemoryWorkflowCheckpointStore();
+    const base = {
+      estimatedMicrodollars: 100_000,
+      workflowSpentMicrodollars: 0,
+      dailySpentMicrodollars: 0,
+      workflowLimitMicrodollars: 2_000_000,
+      dailyLimitMicrodollars: 5_000_000,
+      admissionNumerator: 80,
+      admissionDenominator: 100,
+      now,
+      leaseExpiresAt: '2026-08-17T12:21:00.000Z',
+    } as const;
+    await expect(
+      store.admitSession({
+        ...base,
+        reservationKey: 'reservation:run-1:specification',
+        projectId: 'project-1',
+        runId: 'run-1',
+        stepKey: 'specification',
+      }),
+    ).resolves.toEqual({ admitted: true });
+    await expect(
+      store.admitSession({
+        ...base,
+        reservationKey: 'reservation:run-2:specification',
+        projectId: 'project-2',
+        runId: 'run-2',
+        stepKey: 'specification',
       }),
     ).resolves.toEqual({ admitted: true });
   });

@@ -19,7 +19,10 @@ import {
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createPostgresPublicationStoreForTest } from '../github/postgres-store.js';
 import { createPostgresWorkflowCheckpointStoreForTest } from '../trigger/postgres-checkpoint-store.js';
-import { PostgresWorkflowReconciliationCursorStore } from '../trigger/reconciliation-cursor-store.js';
+import {
+  PostgresWorkflowReconciliationCursorStore,
+  reconciliationCursorKey,
+} from '../trigger/reconciliation-cursor-store.js';
 import { NeonDomainRepository } from './neon-repository.js';
 import { repositoryParityContract } from './repository-parity-contract.js';
 import * as schema from './schema.js';
@@ -102,14 +105,17 @@ describePostgres('PostgreSQL persistence integration', () => {
           Record<string, unknown>
         >[],
     });
-    const cursorStore = new PostgresWorkflowReconciliationCursorStore({
-      execute: async (query, parameters) =>
-        (await client.unsafe(query, [
-          ...parameters,
-        ] as never[])) as unknown as readonly Readonly<
-          Record<string, unknown>
-        >[],
-    });
+    const cursorStore = new PostgresWorkflowReconciliationCursorStore(
+      {
+        execute: async (query, parameters) =>
+          (await client.unsafe(query, [
+            ...parameters,
+          ] as never[])) as unknown as readonly Readonly<
+            Record<string, unknown>
+          >[],
+      },
+      reconciliationCursorKey(projectId),
+    );
     await cursorStore.save({ at, id: runId });
     const loadedCursor = await cursorStore.load();
     expect(loadedCursor?.id).toBe(runId);
@@ -223,7 +229,7 @@ describePostgres('PostgreSQL persistence integration', () => {
       dailyLimitMicrodollars: 5_000_000,
       now: isoTimestamp('2026-08-17T12:02:00.000Z'),
     });
-    await store.releaseSession(runId, 'implementation');
+    await store.releaseSession(projectId, runId, 'implementation');
 
     const fencedDraft = {
       ...effect,

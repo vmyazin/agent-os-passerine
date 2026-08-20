@@ -20,8 +20,10 @@ export class WorkflowCheckpointConflictError extends Error {
 
 export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore {
   readonly #effects = new Map<string, WorkflowEffect>();
-  #session:
-    { runId: string; stepKey: string; leaseExpiresAt: string } | undefined;
+  readonly #sessions = new Map<
+    string,
+    { runId: string; stepKey: string; leaseExpiresAt: string }
+  >();
   readonly #reservations = new Map<
     string,
     {
@@ -198,17 +200,17 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
         );
       }
       if (
-        this.#session !== undefined &&
-        (this.#session.runId !== request.runId ||
-          this.#session.stepKey !== request.stepKey)
+        this.#sessions.get(request.projectId) !== undefined &&
+        (this.#sessions.get(request.projectId)!.runId !== request.runId ||
+          this.#sessions.get(request.projectId)!.stepKey !== request.stepKey)
       ) {
         return { admitted: false, reason: 'concurrency' };
       }
-      this.#session = {
+      this.#sessions.set(request.projectId, {
         runId: request.runId,
         stepKey: request.stepKey,
         leaseExpiresAt: request.leaseExpiresAt,
-      };
+      });
       return { admitted: true };
     }
     const workflowReserved = [...this.#reservations.values()]
@@ -248,17 +250,17 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
     )
       return { admitted: false, reason: 'daily_budget' };
     if (
-      this.#session !== undefined &&
-      (this.#session.runId !== request.runId ||
-        this.#session.stepKey !== request.stepKey)
+      this.#sessions.get(request.projectId) !== undefined &&
+      (this.#sessions.get(request.projectId)!.runId !== request.runId ||
+        this.#sessions.get(request.projectId)!.stepKey !== request.stepKey)
     ) {
       return { admitted: false, reason: 'concurrency' };
     }
-    this.#session = {
+    this.#sessions.set(request.projectId, {
       runId: request.runId,
       stepKey: request.stepKey,
       leaseExpiresAt: request.leaseExpiresAt,
-    };
+    });
     this.#reservations.set(request.reservationKey, {
       runId: request.runId,
       projectId: request.projectId,
@@ -296,9 +298,18 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
     return { settled: true };
   }
 
-  async releaseSession(runId: string, stepKey: string): Promise<void> {
-    if (this.#session?.runId === runId && this.#session.stepKey === stepKey) {
-      this.#session = undefined;
+  async releaseSession(
+    projectId: string,
+    runId: string,
+    stepKey: string,
+  ): Promise<void> {
+    const session = this.#sessions.get(projectId);
+    if (
+      session !== undefined &&
+      session.runId === runId &&
+      session.stepKey === stepKey
+    ) {
+      this.#sessions.delete(projectId);
     }
   }
 

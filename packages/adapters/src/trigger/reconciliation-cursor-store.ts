@@ -1,7 +1,9 @@
+// packages/adapters/src/trigger/reconciliation-cursor-store.ts
 import { neon } from '@neondatabase/serverless';
 import {
   isoTimestamp,
   persistenceId,
+  type ProjectId,
   type TimestampListCursor,
   type WorkflowRunId,
 } from '@agentos/core';
@@ -9,7 +11,9 @@ import {
 import { databaseUrlFromEnv } from '../persistence/database-config.js';
 import type { WorkflowCheckpointSqlExecutor } from './postgres-checkpoint-store.js';
 
-const CURSOR_KEY = 'feature-workflow-outbox-v1';
+export function reconciliationCursorKey(projectId: ProjectId): string {
+  return `feature-workflow-outbox-v1:${projectId}`;
+}
 
 export interface DurableWorkflowReconciliationCursorStore {
   load(): Promise<TimestampListCursor<WorkflowRunId> | undefined>;
@@ -17,7 +21,10 @@ export interface DurableWorkflowReconciliationCursorStore {
 }
 
 export class PostgresWorkflowReconciliationCursorStore implements DurableWorkflowReconciliationCursorStore {
-  constructor(private readonly sql: WorkflowCheckpointSqlExecutor) {}
+  constructor(
+    private readonly sql: WorkflowCheckpointSqlExecutor,
+    private readonly cursorKey: string,
+  ) {}
 
   async load(): Promise<TimestampListCursor<WorkflowRunId> | undefined> {
     const rows = await this.sql.execute(
@@ -26,7 +33,7 @@ export class PostgresWorkflowReconciliationCursorStore implements DurableWorkflo
          "cursor_id" as "cursorId"
        from "workflow_reconciliation_cursors"
        where "cursor_key" = $1`,
-      [CURSOR_KEY],
+      [this.cursorKey],
     );
     const row = rows[0];
     if (row === undefined) return undefined;
@@ -43,7 +50,7 @@ export class PostgresWorkflowReconciliationCursorStore implements DurableWorkflo
       await this.sql.execute(
         `delete from "workflow_reconciliation_cursors"
          where "cursor_key" = $1`,
-        [CURSOR_KEY],
+        [this.cursorKey],
       );
       return;
     }
@@ -58,22 +65,26 @@ export class PostgresWorkflowReconciliationCursorStore implements DurableWorkflo
        where (excluded."cursor_at", excluded."cursor_id" collate "C") >
          ("workflow_reconciliation_cursors"."cursor_at",
           "workflow_reconciliation_cursors"."cursor_id" collate "C")`,
-      [CURSOR_KEY, cursor.at, cursor.id],
+      [this.cursorKey, cursor.at, cursor.id],
     );
   }
 }
 
 export function createNeonWorkflowReconciliationCursorStore(
   environment: Readonly<Record<string, string | undefined>>,
+  projectId: ProjectId,
 ): DurableWorkflowReconciliationCursorStore {
   const sql = neon(databaseUrlFromEnv(environment), {
     arrayMode: false,
     fullResults: false,
   });
-  return new PostgresWorkflowReconciliationCursorStore({
-    execute: async (query, parameters) =>
-      (await sql.query(query, [...parameters])) as readonly Readonly<
-        Record<string, unknown>
-      >[],
-  });
+  return new PostgresWorkflowReconciliationCursorStore(
+    {
+      execute: async (query, parameters) =>
+        (await sql.query(query, [...parameters])) as readonly Readonly<
+          Record<string, unknown>
+        >[],
+    },
+    reconciliationCursorKey(projectId),
+  );
 }

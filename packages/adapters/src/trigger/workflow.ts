@@ -1065,7 +1065,11 @@ async function runAgentStep<T>(
           dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
           now: dependencies.clock(),
         });
-        await dependencies.checkpoints.releaseSession(workflow.runId, stepKey);
+        await dependencies.checkpoints.releaseSession(
+          workflow.projectId,
+          workflow.runId,
+          stepKey,
+        );
         if (!settlement.settled)
           settlementFailure = new WorkflowBudgetExhaustedError(
             settlement.reason,

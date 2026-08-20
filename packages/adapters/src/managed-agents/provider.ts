@@ -11,6 +11,7 @@ import type {
   RuntimeEvent,
   RuntimeHandle,
   RuntimeOutput,
+  RuntimeProvider,
   RuntimeUsage,
 } from '@agentos/core';
 
@@ -63,6 +64,19 @@ const BUILT_IN_TOOLS = new Set([
   'web_fetch',
   'web_search',
 ]);
+const DEFAULT_PROJECT_SCOPE = 'default';
+
+function scopedLocalId(projectId: string, localId: string): string {
+  return `${projectId}:${localId}`;
+}
+
+function remoteResourceName(projectId: string, localId: string): string {
+  return `agentos:${projectId}:${localId}`;
+}
+
+function scopedCacheKey(projectId: string, localId: string): string {
+  return scopedLocalId(projectId, localId);
+}
 
 interface ResolvedAgent {
   id: string;
@@ -127,10 +141,86 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   }
 
   async syncAgent(agent: RuntimeAgent): Promise<void> {
+    return this.syncAgentForProject(DEFAULT_PROJECT_SCOPE, agent);
+  }
+
+  syncAgentForProject(
+    projectId: string,
+    agent: RuntimeAgent,
+  ): Promise<void> {
     validateLocalId(agent.id, 'agent.id');
-    return this.#serializeSync(this.#agentSyncs, agent.id, () =>
-      this.#syncAgent(agent),
+    validateLocalId(projectId, 'projectId');
+    const cacheKey = scopedCacheKey(projectId, agent.id);
+    return this.#serializeSync(this.#agentSyncs, cacheKey, () =>
+      this.#syncAgent(agent, projectId),
     );
+  }
+
+  async #syncAgent(agent: RuntimeAgent, projectId: string): Promise<void> {
+    const usesBuiltInWebEgress = agent.tools.some((tool) =>
+      WEB_EGRESS_TOOLS.has(tool),
+    );
+    if (usesBuiltInWebEgress && !this.#allowBuiltInWebEgress) {
+      throw new ManagedAgentsConfigurationError(
+        'built-in web egress is disabled by policy',
+      );
+    }
+    const localId = scopedLocalId(projectId, agent.id);
+    const remoteName = remoteResourceName(projectId, agent.id);
+    const cacheKey = scopedCacheKey(projectId, agent.id);
+    const definition = agentDefinition(agent, projectId);
+    const digest = configDigest(definition);
+    await this.#wrap(async () => {
+      const remotes = await collectBounded(
+        await this.#client.beta.agents.list({ include_archived: false }),
+        this.#limits.maxRemoteResources,
+      );
+      let remote = findOwnedResource(remotes, localId, remoteName);
+      if (remote === undefined) {
+        try {
+          const created = await this.#client.beta.agents.create({
+            ...definition,
+            metadata: metadataFor(localId, digest),
+          });
+          this.#agents.set(cacheKey, {
+            id: created.id,
+            version: created.version,
+            digest,
+            usesBuiltInWebEgress,
+          });
+          return;
+        } catch (error) {
+          if (!isConflictResponse(error)) throw error;
+          const reconciled = await collectBounded(
+            await this.#client.beta.agents.list({ include_archived: false }),
+            this.#limits.maxRemoteResources,
+          );
+          remote = findOwnedResource(reconciled, localId, remoteName);
+          if (remote === undefined) throw error;
+        }
+      }
+      assertOwnership(remote.metadata);
+      if (remote.metadata[CONFIG_DIGEST] === digest) {
+        this.#agents.set(cacheKey, {
+          id: remote.id,
+          version: remote.version,
+          digest,
+          usesBuiltInWebEgress,
+        });
+        return;
+      }
+      const updated = await this.#client.beta.agents.update(remote.id, {
+        ...definition,
+        metadata: metadataFor(localId, digest),
+        version: remote.version,
+      });
+      this.#agents.set(cacheKey, {
+        id: updated.id,
+        version: updated.version,
+        digest,
+        usesBuiltInWebEgress,
+      });
+    }, true);
   }
 
   async provisionSessionAccess(input: {
@@ -269,85 +359,27 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     return { resources, credentialRefs: [vault.id] };
   }
 
-  async #syncAgent(agent: RuntimeAgent): Promise<void> {
-    const usesBuiltInWebEgress = agent.tools.some((tool) =>
-      WEB_EGRESS_TOOLS.has(tool),
-    );
-    if (usesBuiltInWebEgress && !this.#allowBuiltInWebEgress) {
-      throw new ManagedAgentsConfigurationError(
-        'built-in web egress is disabled by policy',
-      );
-    }
-    const definition = agentDefinition(agent);
-    const digest = configDigest(definition);
-    await this.#wrap(async () => {
-      const remotes = await collectBounded(
-        await this.#client.beta.agents.list({ include_archived: false }),
-        this.#limits.maxRemoteResources,
-      );
-      let remote = findOwnedResource(remotes, agent.id, `agentos:${agent.id}`);
-      if (remote === undefined) {
-        try {
-          const created = await this.#client.beta.agents.create({
-            ...definition,
-            metadata: metadataFor(agent.id, digest),
-          });
-          this.#agents.set(agent.id, {
-            id: created.id,
-            version: created.version,
-            digest,
-            usesBuiltInWebEgress,
-          });
-          return;
-        } catch (error) {
-          if (!isConflictResponse(error)) throw error;
-          const reconciled = await collectBounded(
-            await this.#client.beta.agents.list({ include_archived: false }),
-            this.#limits.maxRemoteResources,
-          );
-          remote = findOwnedResource(
-            reconciled,
-            agent.id,
-            `agentos:${agent.id}`,
-          );
-          if (remote === undefined) throw error;
-        }
-      }
-      assertOwnership(remote.metadata);
-      if (remote.metadata[CONFIG_DIGEST] === digest) {
-        this.#agents.set(agent.id, {
-          id: remote.id,
-          version: remote.version,
-          digest,
-          usesBuiltInWebEgress,
-        });
-        return;
-      }
-      const updated = await this.#client.beta.agents.update(remote.id, {
-        ...definition,
-        metadata: metadataFor(agent.id, digest),
-        version: remote.version,
-      });
-      this.#agents.set(agent.id, {
-        id: updated.id,
-        version: updated.version,
-        digest,
-        usesBuiltInWebEgress,
-      });
-    }, true);
-  }
-
   async syncEnvironment(
     environment: ManagedAgentsRuntimeEnvironment,
   ): Promise<void> {
+    return this.syncEnvironmentForProject(DEFAULT_PROJECT_SCOPE, environment);
+  }
+
+  syncEnvironmentForProject(
+    projectId: string,
+    environment: ManagedAgentsRuntimeEnvironment,
+  ): Promise<void> {
     validateLocalId(environment.id, 'environment.id');
-    return this.#serializeSync(this.#environmentSyncs, environment.id, () =>
-      this.#syncEnvironment(environment),
+    validateLocalId(projectId, 'projectId');
+    const cacheKey = scopedCacheKey(projectId, environment.id);
+    return this.#serializeSync(this.#environmentSyncs, cacheKey, () =>
+      this.#syncEnvironment(environment, projectId),
     );
   }
 
   async #syncEnvironment(
     environment: ManagedAgentsRuntimeEnvironment,
+    projectId: string,
   ): Promise<void> {
     const managed = environment;
     validateEnvironmentFields(managed);
@@ -366,25 +398,24 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       image: environment.image,
       variables: environment.variables,
     });
+    const localId = scopedLocalId(projectId, environment.id);
+    const remoteName = remoteResourceName(projectId, environment.id);
+    const cacheKey = scopedCacheKey(projectId, environment.id);
     await this.#wrap(async () => {
       const remotes = await collectBounded(
         await this.#client.beta.environments.list({ include_archived: false }),
         this.#limits.maxRemoteResources,
       );
-      let remote = findOwnedResource(
-        remotes,
-        environment.id,
-        `agentos:${environment.id}`,
-      );
+      let remote = findOwnedResource(remotes, localId, remoteName);
       if (remote === undefined) {
         try {
           const created = await this.#client.beta.environments.create({
-            name: `agentos:${environment.id}`,
+            name: remoteName,
             description: `AgentOS environment ${environment.id}`,
             config: definition,
-            metadata: metadataFor(environment.id, digest),
+            metadata: metadataFor(localId, digest),
           });
-          this.#environments.set(environment.id, {
+          this.#environments.set(cacheKey, {
             id: created.id,
             digest,
             unrestrictedNetworking: isUnrestricted(environment),
@@ -398,17 +429,13 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
             }),
             this.#limits.maxRemoteResources,
           );
-          remote = findOwnedResource(
-            reconciled,
-            environment.id,
-            `agentos:${environment.id}`,
-          );
+          remote = findOwnedResource(reconciled, localId, remoteName);
           if (remote === undefined) throw error;
         }
       }
       assertOwnership(remote.metadata);
       if (remote.metadata[CONFIG_DIGEST] === digest) {
-        this.#environments.set(environment.id, {
+        this.#environments.set(cacheKey, {
           id: remote.id,
           digest,
           unrestrictedNetworking: isUnrestricted(environment),
@@ -416,12 +443,12 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         return;
       }
       const updated = await this.#client.beta.environments.update(remote.id, {
-        name: `agentos:${environment.id}`,
+        name: remoteName,
         description: `AgentOS environment ${environment.id}`,
         config: definition,
-        metadata: metadataFor(environment.id, digest),
+        metadata: metadataFor(localId, digest),
       });
-      this.#environments.set(environment.id, {
+      this.#environments.set(cacheKey, {
         id: updated.id,
         digest,
         unrestrictedNetworking: isUnrestricted(environment),
@@ -429,12 +456,20 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     }, true);
   }
 
-  async start(
+  forProject(projectId: string): ManagedAgentsProvider {
+    validateLocalId(projectId, 'projectId');
+    return new ProjectScopedManagedAgentsProvider(this, projectId);
+  }
+
+  async startForProject(
+    projectId: string,
     request: ManagedAgentsStartRequest,
   ): Promise<ManagedAgentsRuntimeHandle> {
     const managed = request;
-    const agent = this.#agents.get(request.agentId);
-    const environment = this.#environments.get(request.environmentId);
+    const agent = this.#agents.get(scopedCacheKey(projectId, request.agentId));
+    const environment = this.#environments.get(
+      scopedCacheKey(projectId, request.environmentId),
+    );
     if (agent === undefined) {
       throw new ManagedAgentsConfigurationError(
         'agent must be synced before start',
@@ -515,6 +550,12 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
         ? {}
         : { uploadedFileIds: resources.map((resource) => resource.file_id) }),
     };
+  }
+
+  async start(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle> {
+    return this.startForProject(DEFAULT_PROJECT_SCOPE, request);
   }
 
   async reconcileStart(
@@ -984,6 +1025,97 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
   }
 }
 
+class ProjectScopedManagedAgentsProvider implements ManagedAgentsProvider {
+  constructor(
+    private readonly inner: ManagedAgentsRuntimeProvider,
+    private readonly projectId: string,
+  ) {}
+
+  forProject(projectId: string): ManagedAgentsProvider {
+    if (projectId !== this.projectId) {
+      return this.inner.forProject(projectId);
+    }
+    return this;
+  }
+
+  syncAgent(agent: RuntimeAgent): Promise<void> {
+    return this.inner.syncAgentForProject(this.projectId, agent);
+  }
+
+  syncEnvironment(
+    environment: ManagedAgentsRuntimeEnvironment,
+  ): Promise<void> {
+    return this.inner.syncEnvironmentForProject(this.projectId, environment);
+  }
+
+  start(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle> {
+    return this.inner.startForProject(this.projectId, request);
+  }
+
+  reconcileStart(
+    request: ManagedAgentsStartRequest,
+  ): Promise<ManagedAgentsRuntimeHandle | undefined> {
+    return this.inner.reconcileStart(request);
+  }
+
+  provisionSessionAccess(
+    input: Parameters<ManagedAgentsProvider['provisionSessionAccess']>[0],
+  ): Promise<ManagedAgentsSessionAccess> {
+    return this.inner.provisionSessionAccess(input);
+  }
+
+  events(handle: RuntimeHandle): AsyncIterable<RuntimeEvent> {
+    return this.inner.events(handle);
+  }
+
+  send(handle: RuntimeHandle, message: unknown): Promise<void> {
+    return this.inner.send(handle, message);
+  }
+
+  resume(handle: RuntimeHandle, input?: unknown): Promise<void> {
+    return this.inner.resume(handle, input);
+  }
+
+  cancel(handle: RuntimeHandle, reason?: string): Promise<void> {
+    return this.inner.cancel(handle, reason);
+  }
+
+  collectOutput(handle: RuntimeHandle): Promise<RuntimeOutput> {
+    return this.inner.collectOutput(handle);
+  }
+
+  usage(handle: RuntimeHandle): Promise<RuntimeUsage> {
+    return this.inner.usage(handle);
+  }
+
+  cleanup(handle: RuntimeHandle): Promise<void> {
+    return this.inner.cleanup(handle);
+  }
+
+  cleanupAccess?(
+    input: Parameters<NonNullable<RuntimeProvider['cleanupAccess']>>[0],
+  ): Promise<void> {
+    return this.inner.cleanupAccess!(input);
+  }
+
+  listEvents(handle: RuntimeHandle): Promise<readonly RuntimeEvent[]> {
+    return this.inner.listEvents(handle);
+  }
+
+  status(handle: RuntimeHandle): Promise<ManagedAgentsStatus> {
+    return this.inner.status(handle);
+  }
+
+  observeCommand(
+    handle: RuntimeHandle,
+    expectedCommand: string,
+  ): Promise<import('@agentos/core').RuntimeObservedCommand> {
+    return this.inner.observeCommand!(handle, expectedCommand);
+  }
+}
+
 export async function createManagedAgentsRuntimeProvider(
   options: ManagedAgentsRuntimeProviderOptions,
 ): Promise<ManagedAgentsProvider> {
@@ -1105,7 +1237,10 @@ function validateLimits(limits: ManagedAgentsLimits): RequiredLimits {
   return result;
 }
 
-function agentDefinition(agent: RuntimeAgent): Record<string, unknown> {
+function agentDefinition(
+  agent: RuntimeAgent,
+  projectId: string,
+): Record<string, unknown> {
   const builtIns = agent.tools.filter((tool) => BUILT_IN_TOOLS.has(tool));
   const custom = agent.tools.filter((tool) => !BUILT_IN_TOOLS.has(tool));
   const mcpServers = agent.mcps.map((url, index) => ({
@@ -1114,7 +1249,7 @@ function agentDefinition(agent: RuntimeAgent): Record<string, unknown> {
     url,
   }));
   return {
-    name: `agentos:${agent.id}`,
+    name: remoteResourceName(projectId, agent.id),
     model: agent.model,
     system: agent.instructions ?? null,
     tools: [

@@ -15,6 +15,20 @@ import { createDurableTriggerOutbox } from './outbox.js';
 
 const now = '2026-08-17T12:00:00.000Z';
 
+function repositoryWithRun(runId: string, projectId = 'project-1') {
+  const id = persistenceId('run', runId);
+  const scopedProjectId = persistenceId('project', projectId);
+  return {
+    getRun: vi.fn(async (requestedId: string) =>
+      requestedId === id
+        ? ({ id, projectId: scopedProjectId } as Awaited<
+            ReturnType<DomainRepository['getRun']>
+          >)
+        : undefined,
+    ),
+  } as unknown as DomainRepository;
+}
+
 async function startedEffect(
   store: InMemoryWorkflowCheckpointStore,
   input: { key: string; kind: string; externalRef?: string },
@@ -191,6 +205,7 @@ describe('durable Trigger outbox start', () => {
       trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
+      repository: repositoryWithRun('run-1'),
       clock: () => now,
     });
     const request = {
@@ -236,6 +251,7 @@ describe('durable Trigger outbox start', () => {
           sizeBytes: 123,
         })),
       },
+      repository: repositoryWithRun('goal-1', 'goal-project'),
       clock: () => now,
     });
     const request = {
@@ -246,7 +262,7 @@ describe('durable Trigger outbox start', () => {
 
     await outbox.requestStart(request);
 
-    expect(startGoal).toHaveBeenCalledWith('goal-1');
+    expect(startGoal).toHaveBeenCalledWith('goal-1', 'goal-project');
     expect(startFeature).not.toHaveBeenCalled();
     await expect(
       outbox.requestStart({ ...request, pipeline: 'feature' }),
@@ -278,6 +294,7 @@ describe('durable Trigger outbox start', () => {
       trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
+      repository: repositoryWithRun('run-1'),
       clock: () => now,
     });
     const request = {
