@@ -254,6 +254,76 @@ export interface ApprovalProjection {
   readonly summary?: ApprovalSummary;
 }
 
+/** An approval enriched for the inbox: resolved ones carry their decision. */
+export interface InboxApprovalItem extends ApprovalProjection {
+  readonly decision?: 'approved' | 'rejected';
+  readonly projectName?: string;
+}
+
+/**
+ * A system notification synthesized from a terminal run row — the inbox's
+ * "Run complete / Run failed" entries. Derived at read time from durable run
+ * records rather than emitted by the worker, so history is retroactive.
+ */
+export interface RunNotificationProjection {
+  readonly runId: string;
+  readonly pipeline: string;
+  readonly title?: string;
+  readonly runStatus: 'succeeded' | 'failed' | 'cancelled';
+  /** Workflow result status: succeeded/rejected/expired/budget_exhausted/failed. */
+  readonly resultStatus?: string;
+  readonly reason?: string;
+  readonly outcome?: RunProjection['outcome'];
+  readonly totalCostUsd?: number;
+  readonly projectName?: string;
+  readonly completedAt: IsoTimestamp;
+}
+
+export interface InboxDigest {
+  readonly approvals: readonly InboxApprovalItem[];
+  readonly messages: readonly (InboxProjection & {
+    readonly projectName?: string;
+  })[];
+  readonly notifications: readonly RunNotificationProjection[];
+}
+
+const TERMINAL_RUN_STATUSES = new Set<string>([
+  'succeeded',
+  'failed',
+  'cancelled',
+]);
+/** Spend lookups are the digest's only per-run usage queries; cap them. */
+const NOTIFICATION_SPEND_LOOKUPS = 20;
+
+/**
+ * The Neon HTTP driver opens a server backend per in-flight query and the
+ * compute allows ~112 connections; an unbounded Promise.all across 50 runs
+ * has taken the inbox down. Every digest fan-out goes through this bound.
+ */
+const DIGEST_QUERY_CONCURRENCY = 8;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, items.length) },
+      async (): Promise<void> => {
+        while (next < items.length) {
+          const index = next;
+          next += 1;
+          results[index] = await worker(items[index]!);
+        }
+      },
+    ),
+  );
+  return results;
+}
+
 function projectApproval(approval: Approval): ApprovalProjection {
   return {
     id: approval.id,
@@ -1056,6 +1126,127 @@ export class ControlPlaneService {
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(projectInboxMessage);
+  }
+
+  /**
+   * Everything the inbox page renders, from a single run listing: approvals
+   * of every status (resolved ones keep their decision so the inbox is a
+   * permanent record, not a queue that swallows history), question threads,
+   * and system notifications synthesized from terminal run rows. Synthesis
+   * beats durable emission here: it needs no migration or worker change and
+   * covers every run that ever finished, not just future ones.
+   */
+  async inboxDigest(limit = 50): Promise<InboxDigest> {
+    const runs = await this.repository.listRuns({ limit, order: 'desc' });
+    const pages = await mapWithConcurrency(
+      runs,
+      DIGEST_QUERY_CONCURRENCY,
+      async (run) => {
+        const [messages, approvals] = await Promise.all([
+          this.repository.listInboxMessages(run.id, undefined, { limit }),
+          this.repository.listApprovals(run.id, { limit }),
+        ]);
+        return { approvals, messages, run };
+      },
+    );
+
+    const projectNames = new Map<string, string>();
+    await mapWithConcurrency(
+      [...new Set(runs.map((run) => run.projectId))],
+      DIGEST_QUERY_CONCURRENCY,
+      async (projectId) => {
+        try {
+          const project = await this.repository.getProject(projectId);
+          if (project !== undefined)
+            projectNames.set(projectId, redactText(project.name).slice(0, 120));
+        } catch {
+          // Attribution is decoration; it is never worth an inbox error.
+        }
+      },
+    );
+
+    const terminal = pages.filter(({ run }) =>
+      TERMINAL_RUN_STATUSES.has(run.status),
+    );
+    const spendByRun = new Map<string, number>();
+    await mapWithConcurrency(
+      terminal.slice(0, NOTIFICATION_SPEND_LOOKUPS),
+      DIGEST_QUERY_CONCURRENCY,
+      async ({ run }) => {
+        const usage = await this.repository
+          .listUsage(run.id, { limit: 1_000 })
+          .catch(() => []);
+        if (usage.length > 0)
+          spendByRun.set(
+            run.id,
+            usage.reduce((total, entry) => total + entry.microdollars, 0),
+          );
+      },
+    );
+
+    const approvals = await mapWithConcurrency(
+      pages.flatMap(({ approvals: records, run }) =>
+        records.map((approval) => ({ approval, run })),
+      ),
+      DIGEST_QUERY_CONCURRENCY,
+      async ({ approval, run }): Promise<InboxApprovalItem> => {
+        const projected = projectApproval(approval);
+        const projectName = projectNames.get(run.projectId);
+        const base =
+          projectName === undefined ? projected : { ...projected, projectName };
+        if (approval.status === 'consumed') {
+          const rejected =
+            safeString(record(run.output), 'status') === 'rejected';
+          return { ...base, decision: rejected ? 'rejected' : 'approved' };
+        }
+        if (approval.status === 'pending')
+          return { ...base, ...(await this.approvalSummary(projected)) };
+        return base;
+      },
+    );
+
+    const notifications = terminal.map(({ run }): RunNotificationProjection => {
+      const output = record(run.output);
+      const title = projectRunInput(run.input)?.title;
+      const resultStatus = safeString(output, 'status');
+      const reason = safeString(output, 'reason')?.slice(0, 240);
+      const outcome = projectRunOutcome(run.output);
+      const spend = spendByRun.get(run.id);
+      const projectName = projectNames.get(run.projectId);
+      return {
+        runId: run.id,
+        pipeline: run.pipeline,
+        runStatus: run.status as RunNotificationProjection['runStatus'],
+        completedAt: run.completedAt ?? run.updatedAt,
+        ...(title === undefined ? {} : { title }),
+        ...(resultStatus === undefined ? {} : { resultStatus }),
+        ...(reason === undefined ? {} : { reason }),
+        ...(outcome === undefined ? {} : { outcome }),
+        ...(spend === undefined ? {} : { totalCostUsd: spend / 1_000_000 }),
+        ...(projectName === undefined ? {} : { projectName }),
+      };
+    });
+
+    const byNewest = (a: { createdAt: string }, b: { createdAt: string }) =>
+      b.createdAt.localeCompare(a.createdAt);
+    return {
+      approvals: [...approvals].sort(byNewest),
+      messages: pages
+        .flatMap(({ messages }) => messages)
+        .sort(byNewest)
+        .map((message) => {
+          const projected = projectInboxMessage(message);
+          const run = runs.find((candidate) => candidate.id === message.runId);
+          const projectName =
+            run === undefined ? undefined : projectNames.get(run.projectId);
+          return projectName === undefined
+            ? projected
+            : { ...projected, projectName };
+        }),
+      notifications: [...notifications].sort((a, b) =>
+        b.completedAt.localeCompare(a.completedAt),
+      ),
+    };
   }
 
   async listPendingApprovals(

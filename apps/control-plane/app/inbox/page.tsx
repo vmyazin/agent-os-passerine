@@ -10,12 +10,15 @@ export const dynamic = 'force-dynamic';
 export default async function InboxPage() {
   await requirePageSession();
   const service = controlPlaneService();
-  const [messages, approvals] = await Promise.all([
-    service.listInbox(),
-    service.listPendingApprovals(),
-  ]);
-  const pendingCount = countInboxAttention(approvals, messages);
-  const isEmpty = messages.length === 0 && approvals.length === 0;
+  const digest = await service.inboxDigest();
+  const pendingCount = countInboxAttention(
+    digest.approvals.filter((approval) => approval.status === 'pending'),
+    digest.messages,
+  );
+  const isEmpty =
+    digest.messages.length === 0 &&
+    digest.approvals.length === 0 &&
+    digest.notifications.length === 0;
 
   return (
     <div className="inbox-page">
@@ -25,7 +28,7 @@ export default async function InboxPage() {
             <span className="mailbox-count">{pendingCount} pending</span>
           ) : undefined
         }
-        description="Agent requests waiting for your decision."
+        description="Messages and updates from your agents."
         title="Inbox"
         titleId="inbox-title"
       />
@@ -34,7 +37,7 @@ export default async function InboxPage() {
           Nothing needs your attention right now.
         </EmptyState>
       ) : (
-        <InboxView approvals={approvals} messages={messages} />
+        <InboxView digest={digest} now={new Date().toISOString()} />
       )}
     </div>
   );

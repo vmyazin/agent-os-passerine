@@ -4,13 +4,18 @@ import { isoTimestamp } from '@agentos/core';
 import type {
   ApprovalProjection,
   InboxProjection,
+  RunNotificationProjection,
 } from '../application/control-plane-service';
 import {
   createInboxConversation,
   createInboxItems,
+  formatRelativeTime,
+  inboxItemChip,
+  inboxItemNeedsAttention,
   inboxItemPreview,
   inboxItemSubject,
   inboxMessageLines,
+  splitInboxItems,
 } from './inbox-view-model';
 
 const approval: ApprovalProjection = {
@@ -101,5 +106,125 @@ describe('inbox view model', () => {
         lines: ['Use Tuesday morning.'],
       },
     ]);
+  });
+
+  it('keeps a decided approval in the list as read-only history', () => {
+    const [item] = createInboxItems(
+      [
+        {
+          ...approval,
+          status: 'consumed',
+          decision: 'approved',
+          consumedAt: isoTimestamp('2026-08-17T13:00:00.000Z'),
+        },
+      ],
+      [],
+    );
+
+    expect(inboxItemNeedsAttention(item!)).toBe(false);
+    expect(inboxItemPreview(item!)).toBe(
+      'You approved this scope; the run continued.',
+    );
+    expect(inboxItemChip(item!)).toEqual({
+      label: 'Approved',
+      tone: 'positive',
+    });
+  });
+
+  it('renders a rejected approval with a negative chip', () => {
+    const [item] = createInboxItems(
+      [{ ...approval, status: 'consumed', decision: 'rejected' }],
+      [],
+    );
+
+    expect(inboxItemChip(item!)).toEqual({
+      label: 'Rejected',
+      tone: 'negative',
+    });
+  });
+
+  it('splits pending work from history without dropping anything', () => {
+    const items = createInboxItems(
+      [approval, { ...approval, id: 'approval_done', status: 'consumed' }],
+      [question],
+    );
+    const { attention, history } = splitInboxItems(items);
+
+    expect(attention.map((item) => item.key).sort()).toEqual([
+      'approval:approval_release',
+      'question:inbox_window',
+    ]);
+    expect(history.map((item) => item.key)).toEqual([
+      'approval:approval_done',
+    ]);
+    expect(attention.length + history.length).toBe(items.length);
+  });
+
+  it('summarizes a completed run notification with outcome and spend', () => {
+    const notification: RunNotificationProjection = {
+      runId: 'run_release',
+      pipeline: 'feature',
+      title: 'Add CSV export',
+      runStatus: 'succeeded',
+      resultStatus: 'succeeded',
+      outcome: { localBranch: 'agentos/run-release-1a2b3c4d' },
+      totalCostUsd: 5.95,
+      completedAt: isoTimestamp('2026-08-17T14:00:00.000Z'),
+    };
+    const [item] = createInboxItems([], [], [notification]);
+
+    expect(inboxItemSubject(item!)).toBe('Run complete: Add CSV export ✓');
+    expect(inboxItemPreview(item!)).toBe(
+      'Local branch agentos/run-release-1a2b3c4d. Total spend: $5.95.',
+    );
+    expect(inboxItemChip(item!)).toEqual({
+      label: 'Completed',
+      tone: 'positive',
+    });
+    expect(inboxItemNeedsAttention(item!)).toBe(false);
+  });
+
+  it('labels failed and rejected runs distinctly', () => {
+    const failed: RunNotificationProjection = {
+      runId: 'run_broken',
+      pipeline: 'feature',
+      runStatus: 'failed',
+      resultStatus: 'failed',
+      reason: 'verification step exceeded its budget',
+      completedAt: isoTimestamp('2026-08-17T15:00:00.000Z'),
+    };
+    const rejected: RunNotificationProjection = {
+      runId: 'run_vetoed',
+      pipeline: 'goal',
+      runStatus: 'failed',
+      resultStatus: 'rejected',
+      completedAt: isoTimestamp('2026-08-17T16:00:00.000Z'),
+    };
+    const [rejectedItem, failedItem] = createInboxItems(
+      [],
+      [],
+      [failed, rejected],
+    );
+
+    expect(inboxItemSubject(failedItem!)).toBe('Run failed');
+    expect(inboxItemPreview(failedItem!)).toBe(
+      'verification step exceeded its budget',
+    );
+    expect(inboxItemChip(failedItem!).tone).toBe('negative');
+    expect(inboxItemSubject(rejectedItem!)).toBe('Goal rejected');
+  });
+
+  it('formats relative timestamps against a fixed now', () => {
+    const now = '2026-08-17T12:00:00.000Z';
+
+    expect(formatRelativeTime(now, '2026-08-17T11:59:40.000Z')).toBe(
+      'just now',
+    );
+    expect(formatRelativeTime(now, '2026-08-17T11:36:00.000Z')).toBe(
+      '24m ago',
+    );
+    expect(formatRelativeTime(now, '2026-08-17T07:00:00.000Z')).toBe('5h ago');
+    expect(formatRelativeTime(now, '2026-08-14T12:00:00.000Z')).toBe('3d ago');
+    expect(formatRelativeTime(now, '2026-08-01T12:00:00.000Z')).toBe('Aug 1');
   });
 });

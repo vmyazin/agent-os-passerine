@@ -1263,4 +1263,121 @@ runtime: { provider: local }
       repository.getApproval(persistenceId('approval', 'stale-scope')),
     ).resolves.toMatchObject({ status: 'pending' });
   });
+
+  it('assembles an inbox digest that keeps decided approvals and reports terminal runs', async () => {
+    const repository = new InMemoryDomainRepository();
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const service = createService(repository);
+
+    const open = await service.createFeatureRun('digest-open', feature);
+    await repository.createApproval({
+      id: persistenceId('approval', 'digest-open-approval'),
+      runId: persistenceId('run', open.id),
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f'.repeat(64),
+      status: 'pending',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+
+    const done = await service.createFeatureRun('digest-done', {
+      ...feature,
+      title: 'Add CSV export',
+    });
+    const doneId = persistenceId('run', done.id);
+    await repository.createApproval({
+      id: persistenceId('approval', 'digest-done-approval'),
+      runId: doneId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'e'.repeat(64),
+      status: 'consumed',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+      consumedAt: isoTimestamp('2026-08-17T12:30:00.000Z'),
+    });
+    await repository.updateRun(doneId, {
+      status: 'succeeded',
+      output: {
+        status: 'succeeded',
+        localBranch: 'agentos/run-done-1a2b3c4d',
+        localRepositoryUrl: 'file:///workspaces/todo-app',
+      },
+      updatedAt: isoTimestamp('2026-08-17T13:00:00.000Z'),
+      completedAt: isoTimestamp('2026-08-17T13:00:00.000Z'),
+    });
+    await repository.appendUsage({
+      idempotencyId: persistenceId('usage', 'digest-usage'),
+      runId: doneId,
+      model: 'claude-sonnet-5',
+      pricingVersion: 'v1',
+      inputTokens: 1_000,
+      outputTokens: 500,
+      cacheReadInputTokens: 0,
+      cacheCreation5mInputTokens: 0,
+      cacheCreation1hInputTokens: 0,
+      runtimeMs: 60_000,
+      microdollars: 5_950_000,
+      recordedAt: now,
+    });
+
+    const rejected = await service.createFeatureRun('digest-rejected', {
+      ...feature,
+      title: 'Vetoed feature',
+    });
+    const rejectedId = persistenceId('run', rejected.id);
+    await repository.createApproval({
+      id: persistenceId('approval', 'digest-rejected-approval'),
+      runId: rejectedId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'd'.repeat(64),
+      status: 'consumed',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+      consumedAt: isoTimestamp('2026-08-17T12:45:00.000Z'),
+    });
+    await repository.updateRun(rejectedId, {
+      status: 'failed',
+      output: { status: 'rejected' },
+      updatedAt: isoTimestamp('2026-08-17T12:46:00.000Z'),
+      completedAt: isoTimestamp('2026-08-17T12:46:00.000Z'),
+    });
+
+    const digest = await service.inboxDigest();
+
+    expect(digest.approvals).toHaveLength(3);
+    expect(
+      digest.approvals.find((entry) => entry.id.endsWith('open-approval')),
+    ).toMatchObject({ status: 'pending', projectName: 'Passerine' });
+    expect(
+      digest.approvals.find((entry) => entry.id.endsWith('done-approval')),
+    ).toMatchObject({ status: 'consumed', decision: 'approved' });
+    expect(
+      digest.approvals.find((entry) => entry.id.endsWith('rejected-approval')),
+    ).toMatchObject({ status: 'consumed', decision: 'rejected' });
+
+    expect(digest.notifications).toHaveLength(2);
+    const completion = digest.notifications.find(
+      (entry) => entry.runId === done.id,
+    );
+    expect(completion).toMatchObject({
+      pipeline: 'feature',
+      title: 'Add CSV export',
+      runStatus: 'succeeded',
+      resultStatus: 'succeeded',
+      outcome: {
+        localBranch: 'agentos/run-done-1a2b3c4d',
+        localRepositoryUrl: 'file:///workspaces/todo-app',
+      },
+      totalCostUsd: 5.95,
+      projectName: 'Passerine',
+    });
+    expect(
+      digest.notifications.find((entry) => entry.runId === rejected.id),
+    ).toMatchObject({ runStatus: 'failed', resultStatus: 'rejected' });
+  });
 });

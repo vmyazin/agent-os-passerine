@@ -3,15 +3,25 @@
 import { useState } from 'react';
 
 import type {
-  ApprovalProjection,
+  InboxApprovalItem,
+  InboxDigest,
   InboxProjection,
+  RunNotificationProjection,
 } from '../application/control-plane-service';
 import {
   createInboxConversation,
   createInboxItems,
+  formatRelativeTime,
+  formatSpend,
   type InboxItem,
+  inboxItemChip,
   inboxItemPreview,
+  inboxItemProjectName,
+  inboxItemRunId,
+  inboxItemSender,
   inboxItemSubject,
+  notificationSucceeded,
+  splitInboxItems,
 } from './inbox-view-model';
 import { ApprovalActions, ReplyForm } from './mutation-forms';
 
@@ -25,19 +35,77 @@ function formatReceived(value: string): string {
   }).format(new Date(value));
 }
 
-function RequestMarker({ kind }: { readonly kind: InboxItem['kind'] }) {
+function RequestMarker({ item }: { readonly item: InboxItem }) {
+  const glyph =
+    item.kind === 'approval'
+      ? 'A'
+      : item.kind === 'question'
+        ? '?'
+        : notificationSucceeded(item.notification)
+          ? '✓'
+          : '!';
   return (
-    <span aria-hidden="true" className={`inbox-marker inbox-marker-${kind}`}>
-      {kind === 'approval' ? 'A' : '?'}
+    <span
+      aria-hidden="true"
+      className={`inbox-marker inbox-marker-${item.kind}`}
+    >
+      {glyph}
     </span>
   );
 }
 
-function ApprovalMessage({ approval }: { approval: ApprovalProjection }) {
+function StatusChip({ item }: { readonly item: InboxItem }) {
+  const chip = inboxItemChip(item);
+  return <span className={`inbox-chip inbox-chip-${chip.tone}`}>{chip.label}</span>;
+}
+
+function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
   const summary = approval.summary;
+  const decided = approval.status !== 'pending';
   return (
     <>
-      {summary === undefined ? (
+      {decided ? (
+        <div className="inbox-message-copy">
+          <p>
+            {approval.decision === 'approved' ? (
+              <>
+                You approved this scope
+                {approval.consumedAt === undefined ? (
+                  ''
+                ) : (
+                  <>
+                    {' '}
+                    on{' '}
+                    <time dateTime={approval.consumedAt}>
+                      {formatReceived(approval.consumedAt)} UTC
+                    </time>
+                  </>
+                )}
+                . The run continued into implementation.
+              </>
+            ) : approval.decision === 'rejected' ? (
+              <>
+                You rejected this scope
+                {approval.consumedAt === undefined ? (
+                  ''
+                ) : (
+                  <>
+                    {' '}
+                    on{' '}
+                    <time dateTime={approval.consumedAt}>
+                      {formatReceived(approval.consumedAt)} UTC
+                    </time>
+                  </>
+                )}
+                . The run ended without making changes.
+              </>
+            ) : (
+              'This request expired before a decision was made.'
+            )}
+          </p>
+          <p>{approval.scopePreview}</p>
+        </div>
+      ) : summary === undefined ? (
         <p className="inbox-message-copy">{approval.scopePreview}</p>
       ) : (
         <div className="inbox-message-copy">
@@ -98,10 +166,12 @@ function ApprovalMessage({ approval }: { approval: ApprovalProjection }) {
           </div>
         </dl>
       </details>
-      <ApprovalActions
-        approvalId={approval.id}
-        scopeHash={approval.scopeHash}
-      />
+      {decided ? null : (
+        <ApprovalActions
+          approvalId={approval.id}
+          scopeHash={approval.scopeHash}
+        />
+      )}
     </>
   );
 }
@@ -163,74 +233,166 @@ function QuestionMessage({ message }: { message: InboxProjection }) {
   );
 }
 
-export function InboxView({
-  approvals,
-  messages,
+function NotificationMessage({
+  notification,
 }: {
-  readonly approvals: readonly ApprovalProjection[];
-  readonly messages: readonly InboxProjection[];
+  readonly notification: RunNotificationProjection;
 }) {
-  const items = createInboxItems(approvals, messages);
-  const [selectedKey, setSelectedKey] = useState(items[0]?.key);
-  const selected = items.find((item) => item.key === selectedKey) ?? items[0]!;
-  const selectedRunId =
+  const succeeded = notificationSucceeded(notification);
+  const outcome = notification.outcome;
+  return (
+    <div className="inbox-message-copy">
+      <p>
+        {succeeded
+          ? 'The run finished successfully.'
+          : (notification.reason ?? 'The run reached a final state.')}
+      </p>
+      {outcome?.draftPullRequestUrl !== undefined ? (
+        <p>
+          Review the{' '}
+          <a
+            href={outcome.draftPullRequestUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            draft pull request
+          </a>
+          .
+        </p>
+      ) : null}
+      {outcome?.localBranch !== undefined ? (
+        <p>
+          The changes are on local branch <code>{outcome.localBranch}</code>
+          {outcome.localRepositoryUrl === undefined ? (
+            '.'
+          ) : (
+            <>
+              {' '}
+              in <code>{outcome.localRepositoryUrl}</code>.
+            </>
+          )}
+        </p>
+      ) : null}
+      {notification.totalCostUsd === undefined ? null : (
+        <p>Total spend: {formatSpend(notification.totalCostUsd)}.</p>
+      )}
+      <p>
+        <a href={`/runs/${notification.runId}`}>Open the full run</a> for
+        steps, timeline, and evidence.
+      </p>
+    </div>
+  );
+}
+
+function QueueSection({
+  items,
+  now,
+  onSelect,
+  selectedKey,
+  title,
+}: {
+  readonly items: readonly InboxItem[];
+  readonly now: string;
+  readonly onSelect: (key: string) => void;
+  readonly selectedKey: string;
+  readonly title: string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section aria-label={title} className="inbox-queue-section">
+      <h2 className="inbox-queue-heading">{title}</h2>
+      <ol>
+        {items.map((item) => {
+          const project = inboxItemProjectName(item);
+          return (
+            <li key={item.key}>
+              <button
+                aria-pressed={item.key === selectedKey}
+                className="inbox-row"
+                onClick={() => onSelect(item.key)}
+                type="button"
+              >
+                <RequestMarker item={item} />
+                <span className="inbox-row-content">
+                  <span className="inbox-row-meta">
+                    <span>{inboxItemSender(item)}</span>
+                    <time dateTime={item.createdAt}>
+                      {formatRelativeTime(now, item.createdAt)}
+                    </time>
+                  </span>
+                  <strong>{inboxItemSubject(item)}</strong>
+                  <span className="inbox-row-preview">
+                    {inboxItemPreview(item)}
+                  </span>
+                  <span className="inbox-row-run">
+                    <StatusChip item={item} />
+                    {project ?? `Run ${inboxItemRunId(item)}`}
+                  </span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+export function InboxView({
+  digest,
+  now,
+}: {
+  readonly digest: InboxDigest;
+  readonly now: string;
+}) {
+  const items = createInboxItems(
+    digest.approvals,
+    digest.messages,
+    digest.notifications,
+  );
+  const { attention, history } = splitInboxItems(items);
+  const [selectedKey, setSelectedKey] = useState(
+    (attention[0] ?? items[0])?.key,
+  );
+  const selected =
+    items.find((item) => item.key === selectedKey) ?? attention[0] ?? items[0]!;
+  const selectedKindLabel =
     selected.kind === 'approval'
-      ? selected.approval.runId
-      : selected.message.runId;
+      ? 'Approval'
+      : selected.kind === 'question'
+        ? 'Question'
+        : 'Notification';
 
   return (
     <section className="mailbox" aria-label="Inbox mailbox">
       <div className="mailbox-layout">
         <aside className="inbox-queue" aria-label="Agent requests">
-          <ol>
-            {items.map((item) => {
-              const isSelected = item.key === selected.key;
-              const runId =
-                item.kind === 'approval'
-                  ? item.approval.runId
-                  : item.message.runId;
-              return (
-                <li key={item.key}>
-                  <button
-                    aria-pressed={isSelected}
-                    className="inbox-row"
-                    onClick={() => setSelectedKey(item.key)}
-                    type="button"
-                  >
-                    <RequestMarker kind={item.kind} />
-                    <span className="inbox-row-content">
-                      <span className="inbox-row-meta">
-                        <span>
-                          {item.kind === 'approval' ? 'Approval' : 'Question'}
-                        </span>
-                        <time dateTime={item.createdAt}>
-                          {formatReceived(item.createdAt)}
-                        </time>
-                      </span>
-                      <strong>{inboxItemSubject(item)}</strong>
-                      <span className="inbox-row-preview">
-                        {inboxItemPreview(item)}
-                      </span>
-                      <span className="inbox-row-run">Run {runId}</span>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
+          <QueueSection
+            items={attention}
+            now={now}
+            onSelect={setSelectedKey}
+            selectedKey={selected.key}
+            title="Needs you"
+          />
+          <QueueSection
+            items={history}
+            now={now}
+            onSelect={setSelectedKey}
+            selectedKey={selected.key}
+            title={attention.length > 0 ? 'Everything else' : 'History'}
+          />
         </aside>
 
         <article className="inbox-reading-pane" aria-label="Selected request">
           <header className="inbox-message-header">
             <div className="inbox-correspondent">
-              <RequestMarker kind={selected.kind} />
+              <RequestMarker item={selected} />
               <div>
-                <span>
-                  {selected.kind === 'approval'
-                    ? 'Approval agent'
-                    : 'Agent question'}
-                </span>
-                <small>Run {selectedRunId}</small>
+                <span>{inboxItemSender(selected)}</span>
+                <small>
+                  {inboxItemProjectName(selected) ??
+                    `Run ${inboxItemRunId(selected)}`}
+                </small>
               </div>
             </div>
             <time dateTime={selected.createdAt}>
@@ -239,15 +401,18 @@ export function InboxView({
           </header>
           <div className="inbox-message-subject">
             <span>
-              {selected.kind === 'approval' ? 'Approval' : 'Question'}
+              {selectedKindLabel}
+              <StatusChip item={selected} />
             </span>
             <h2>{inboxItemSubject(selected)}</h2>
           </div>
           <div className="inbox-message-content">
             {selected.kind === 'approval' ? (
               <ApprovalMessage approval={selected.approval} />
-            ) : (
+            ) : selected.kind === 'question' ? (
               <QuestionMessage message={selected.message} />
+            ) : (
+              <NotificationMessage notification={selected.notification} />
             )}
           </div>
         </article>

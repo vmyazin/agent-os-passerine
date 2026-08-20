@@ -149,6 +149,8 @@ a:focus-visible {
   display: flex;
   min-height: 44px;
   align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
   border-radius: 0.55rem;
   color: var(--ink-secondary);
   font-size: 0.9rem;
@@ -171,6 +173,36 @@ a:focus-visible {
 
 .app-rail nav a[aria-current='page']:hover {
   background: color-mix(in srgb, var(--signal-violet) 14%, var(--surface-sheet));
+  color: var(--signal-violet-dark);
+}
+
+.rail-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-nav-count {
+  display: inline-flex;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--status-neutral-surface);
+  color: var(--ink-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 0.35rem;
+}
+
+.app-rail nav a[aria-current='page'] .rail-nav-count {
+  border-color: color-mix(in srgb, var(--signal-violet) 28%, var(--line-soft));
+  background: color-mix(in srgb, var(--signal-violet) 12%, var(--surface-sheet));
   color: var(--signal-violet-dark);
 }
 
@@ -1050,4 +1082,74 @@ div.inbox-message-copy {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+/* Inbox queue sections and status chips (persistent-history inbox). */
+.inbox-queue-section + .inbox-queue-section {
+  border-top: 1px solid var(--line-emphasis);
+}
+
+.inbox-queue-heading {
+  margin: 0;
+  padding: 0.65rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.inbox-queue-section ol {
+  max-height: 22rem;
+}
+
+.inbox-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--status-neutral-line);
+  border-radius: 999px;
+  background: var(--status-neutral-surface);
+  color: var(--ink-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.inbox-chip-attention {
+  border-color: var(--status-waiting-line);
+  background: var(--status-waiting-surface);
+  color: var(--ink-command);
+}
+
+.inbox-chip-positive {
+  border-color: var(--status-success-line);
+  background: var(--status-success-surface);
+  color: var(--ink-command);
+}
+
+.inbox-chip-negative {
+  border-color: var(--status-danger-line);
+  background: var(--danger-surface);
+  color: var(--danger-ink);
+}
+
+.inbox-row-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.inbox-message-subject > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.inbox-marker-notification {
+  background: var(--status-success-surface);
+  color: var(--ink-command);
 }
