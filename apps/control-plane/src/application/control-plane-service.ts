@@ -437,11 +437,32 @@ function projectRunInput(value: JsonValue | undefined): RunProjection['input'] {
   };
 }
 
+/**
+ * Run output is agent-influenced, and the draft PR URL renders as a live
+ * anchor — only http(s) URLs may pass, exactly like the goal-children
+ * mapping, so a hostile `javascript:` value can never become an href.
+ */
+function safeHttpUrl(
+  source: { readonly [key: string]: JsonValue } | undefined,
+  key: string,
+): string | undefined {
+  const candidate = safeString(source, key);
+  if (candidate === undefined || candidate.length > 2_048) return undefined;
+  try {
+    const parsed = new URL(candidate);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+      ? candidate
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function projectRunOutcome(
   value: JsonValue | undefined,
 ): RunProjection['outcome'] {
   const source = record(value);
-  const draftPullRequestUrl = safeString(source, 'draftPullRequestUrl');
+  const draftPullRequestUrl = safeHttpUrl(source, 'draftPullRequestUrl');
   const localBranch = safeString(source, 'localBranch');
   const localRepositoryUrl = safeString(source, 'localRepositoryUrl');
   if (
@@ -1407,17 +1428,15 @@ export class ControlPlaneService {
             )
               return undefined;
             const output = record(child.output);
-            const candidateUrl = safeString(output, 'draftPullRequestUrl');
-            let draftPullRequestUrl: string | undefined;
-            if (candidateUrl !== undefined && candidateUrl.length <= 2_048) {
-              try {
-                const parsed = new URL(candidateUrl);
-                if (parsed.protocol === 'https:' || parsed.protocol === 'http:')
-                  draftPullRequestUrl = candidateUrl;
-              } catch {
-                draftPullRequestUrl = undefined;
-              }
-            }
+            const draftPullRequestUrl = safeHttpUrl(
+              output,
+              'draftPullRequestUrl',
+            );
+            const localBranch = safeString(output, 'localBranch');
+            const localRepositoryUrl = safeString(
+              output,
+              'localRepositoryUrl',
+            );
             return {
               step,
               runId,
@@ -1425,6 +1444,10 @@ export class ControlPlaneService {
               ...(draftPullRequestUrl === undefined
                 ? {}
                 : { draftPullRequestUrl }),
+              ...(localBranch === undefined ? {} : { localBranch }),
+              ...(localRepositoryUrl === undefined
+                ? {}
+                : { localRepositoryUrl }),
             };
           }),
       )

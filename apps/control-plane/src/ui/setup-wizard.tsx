@@ -197,7 +197,7 @@ export function SetupWizard() {
       namePrefix: 'todo-app',
       title: 'Add todo store module',
       description:
-        'Add src/todo-store.mjs exporting createTodoStore() with add(text) returning the new todo {id, text, done}, complete(id) marking it done, and list() returning a defensive copy of all todos. Ids increment from 1; completing an unknown id throws. Keep it in-memory, ESM, and dependency-free. Add test/todo-store.test.mjs with node:test covering add, complete, list, and the unknown-id error, matching the existing test style.',
+        'Add src/todo-store.mjs exporting createTodoStore() with add(text) returning the new todo {id, text, done}, complete(id) marking it done, and list() returning a deep defensive copy: neither the returned array nor the todo objects inside it (nor the object returned by add) may share identity with internal state, so mutating any of them must not change the store. Ids increment from 1; completing an unknown id throws. Keep it in-memory, ESM, and dependency-free. Add test/todo-store.test.mjs with node:test covering add, complete, list, the unknown-id error, and mutation tests proving that changing a returned todo object or the returned array does not alter the store.',
     },
     {
       key: 'dashboard',
