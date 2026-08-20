@@ -133,23 +133,30 @@ describePostgres(
 
     afterAll(async () => {
       await cleanupFixtures();
+      // Every deletion is individually guarded: one failure must not abort
+      // the remaining cleanup and leak fixture rows into the shared test
+      // database.
+      const attempt = async (statement: string, parameter: string) => {
+        try {
+          await sql.query(statement, [parameter]);
+        } catch {
+          // Best-effort cleanup; a failed delete surfaces as a leftover row
+          // on the next audit rather than cascading into more leaks now.
+        }
+      };
       for (const runId of cleanupRunIds) {
-        await sql.query(
+        await attempt(
           'delete from "publication_events" where "publication_key" in (select "publication_key" from "publication_records" where "run_id" = $1)',
-          [runId],
-        );
-        await sql.query(
-          'delete from "publication_records" where "run_id" = $1',
-          [runId],
-        );
-        await sql.query('delete from "workflow_runs" where "id" = $1', [
           runId,
-        ]);
+        );
+        await attempt(
+          'delete from "publication_records" where "run_id" = $1',
+          runId,
+        );
+        await attempt('delete from "workflow_runs" where "id" = $1', runId);
       }
       for (const projectId of cleanupProjectIds) {
-        await sql.query('delete from "projects" where "id" = $1', [
-          projectId,
-        ]);
+        await attempt('delete from "projects" where "id" = $1', projectId);
       }
     });
 
