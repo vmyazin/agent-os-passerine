@@ -1,19 +1,25 @@
 // src/ui/app-rail-status.tsx
 import { controlPlaneService } from '../application/runtime';
-import {
-  countInboxAttention,
-  countWaitingRuns,
-} from './rail-status-model';
+import { countInboxAttention } from './rail-status-model';
 
 export async function AppRailStatus() {
-  const service = controlPlaneService();
-  const [messages, approvals, runs] = await Promise.all([
-    service.listInbox(),
-    service.listPendingApprovals(),
-    service.listRuns(50),
-  ]);
-  const inboxCount = countInboxAttention(approvals, messages);
-  const waitingCount = countWaitingRuns(runs);
+  // Rendered in the layout on every page: use the cheap primitives (no
+  // per-run projections, no artifact-backed approval summaries), and fail
+  // soft — a status badge must never take the page down with it.
+  let inboxCount: number;
+  let waitingCount: number;
+  try {
+    const service = controlPlaneService();
+    const [messages, approvals, waiting] = await Promise.all([
+      service.listInbox(),
+      service.listPendingApprovals(50, false),
+      service.countRunsByStatus('waiting'),
+    ]);
+    inboxCount = countInboxAttention(approvals, messages);
+    waitingCount = waiting;
+  } catch {
+    return null;
+  }
 
   if (inboxCount === 0 && waitingCount === 0) {
     return null;
