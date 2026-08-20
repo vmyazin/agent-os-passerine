@@ -126,5 +126,13 @@ against a local git repository (`project.localPath` +
 local-branch publication behind the existing seams, a guided setup-wizard
 mode, and no GitHub Apps required.
 
+Multi-project configuration is implemented (Phase 1 of
+[the multi-project design](./superpowers/specs/2026-08-20-multi-project-parallel-design.md)):
+project identity derives from the configuration binding, CAS preconditions
+and the latest-revision lookup are project-scoped in both repository
+adapters, and the configuration/setup/runs/inbox APIs, wizard, and CLI
+accept project selectors. Execution still serializes on the global agent
+session and single-slot Trigger queues until Phase 2.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

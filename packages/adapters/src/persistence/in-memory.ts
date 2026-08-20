@@ -341,12 +341,14 @@ export class InMemoryDomainRepository implements DomainRepository {
       }
       return copy(existing);
     }
-    const active = [...this.#configRevisions.values()].sort(
-      (left, right) =>
-        right.createdAt.localeCompare(left.createdAt) ||
-        right.revision - left.revision ||
-        right.id.localeCompare(left.id),
-    )[0];
+    const active = [...this.#configRevisions.values()]
+      .filter((entry) => entry.projectId === project.id)
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.revision - left.revision ||
+          right.id.localeCompare(left.id),
+      )[0];
     if (
       precondition !== undefined &&
       (active?.revision ?? null) !== precondition.revision
@@ -396,13 +398,17 @@ export class InMemoryDomainRepository implements DomainRepository {
     return value === undefined ? undefined : copy(value);
   }
 
-  async getLatestConfigRevision(): Promise<ConfigRevision | undefined> {
-    const latest = [...this.#configRevisions.values()].sort(
-      (left, right) =>
-        right.createdAt.localeCompare(left.createdAt) ||
-        right.revision - left.revision ||
-        right.id.localeCompare(left.id),
-    )[0];
+  async getLatestConfigRevision(
+    projectId: ProjectId,
+  ): Promise<ConfigRevision | undefined> {
+    const latest = [...this.#configRevisions.values()]
+      .filter((revision) => revision.projectId === projectId)
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.revision - left.revision ||
+          right.id.localeCompare(left.id),
+      )[0];
     return latest === undefined ? undefined : copy(latest);
   }
 

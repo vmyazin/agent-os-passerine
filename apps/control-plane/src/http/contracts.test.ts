@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createGoalRunSchema } from './contracts';
+import { createGoalRunSchema, allowedQuery } from './contracts';
 
 const request = {
   projectId: 'project-1',
@@ -47,5 +47,23 @@ describe('control-plane HTTP contracts', () => {
         })),
       }).success,
     ).toBe(false);
+  });
+
+  describe('allowedQuery', () => {
+    const request = (query: string) =>
+      new Request(`https://control.example/api/x${query}`);
+
+    it('returns allowlisted parameters and rejects everything else', () => {
+      expect(allowedQuery(request(''), ['projectId'])).toEqual({});
+      expect(allowedQuery(request('?projectId=p1'), ['projectId'])).toEqual({
+        projectId: 'p1',
+      });
+      expect(() => allowedQuery(request('?other=1'), ['projectId'])).toThrow(
+        'query parameters are not supported',
+      );
+      expect(() =>
+        allowedQuery(request('?projectId=a&projectId=b'), ['projectId']),
+      ).toThrow('query parameters are not supported');
+    });
   });
 });

@@ -119,7 +119,10 @@ describe('configuration API routes', () => {
     });
 
     const active = await GET(request('/api/configuration'));
-    await expect(active.json()).resolves.toEqual({ active: projected });
+    await expect(active.json()).resolves.toEqual({
+      active: projected,
+      projectId: projected.projectId,
+    });
 
     const session = issueSession(
       authConfigFromEnv(process.env),
@@ -341,5 +344,61 @@ describe('configuration API routes', () => {
     await expect(stale?.json()).resolves.toMatchObject({
       error: { code: 'configuration_stale' },
     });
+  });
+
+  it('scopes GET /api/configuration by project and requires a selector when ambiguous', async () => {
+    const second = loadAgentOsConfig(`
+version: 1
+project: { name: Second, repository: https://github.com/team/second }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const applyFirst = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'multi-1' },
+        body: JSON.stringify(body),
+      }),
+    );
+    expect(applyFirst.status).toBe(201);
+    const first = (await applyFirst.json()) as { projectId: string };
+
+    const applySecond = await POST(
+      request('/api/configuration/apply', {
+        method: 'POST',
+        headers: { 'idempotency-key': 'multi-2' },
+        body: JSON.stringify({
+          canonicalConfig: canonicalConfigJson(second),
+          digest: canonicalConfigHash(second),
+          expectedRevision: null,
+          expectedDigest: null,
+        }),
+      }),
+    );
+    expect(applySecond.status).toBe(201);
+
+    const ambiguous = await GET(request('/api/configuration'));
+    expect(ambiguous.status).toBe(400);
+    expect(((await ambiguous.json()) as { error: { code: string } }).error.code)
+      .toBe('project_required');
+
+    const scoped = await GET(
+      request(`/api/configuration?projectId=${first.projectId}`),
+    );
+    expect(scoped.status).toBe(200);
+    expect(await scoped.json()).toMatchObject({ projectId: first.projectId });
+
+    const byBinding = await GET(
+      request(
+        `/api/configuration?repository=${encodeURIComponent('https://github.com/team/second')}`,
+      ),
+    );
+    expect(byBinding.status).toBe(200);
   });
 });

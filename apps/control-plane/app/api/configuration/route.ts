@@ -1,9 +1,11 @@
+// apps/control-plane/app/api/configuration/route.ts
 import { controlPlaneService } from '../../../src/application/runtime';
 import { handleApi } from '../../../src/http/api';
 import { requireApiAuthentication } from '../../../src/http/authenticated';
 import {
   activeConfigurationSchema,
-  assertNoQuery,
+  allowedQuery,
+  configurationQuerySchema,
 } from '../../../src/http/contracts';
 
 export function GET(request: Request): Promise<Response> {
@@ -17,8 +19,31 @@ export function GET(request: Request): Promise<Response> {
       output: activeConfigurationSchema,
     },
     async () => {
-      assertNoQuery(request);
-      return controlPlaneService().getConfiguration(includeCanonical);
+      const parsed = configurationQuerySchema.safeParse(
+        allowedQuery(request, [
+          'projectId',
+          'repository',
+          'localPath',
+          'name',
+        ]),
+      );
+      if (!parsed.success) {
+        throw Object.assign(new Error('query parameters are invalid'), {
+          code: 'validation_error',
+          status: 422,
+        });
+      }
+      const { projectId, repository, localPath, name } = parsed.data;
+      const selector = {
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(repository === undefined ? {} : { repository }),
+        ...(localPath === undefined ? {} : { localPath }),
+        ...(name === undefined ? {} : { name }),
+      };
+      return controlPlaneService().getConfiguration(
+        includeCanonical,
+        selector,
+      );
     },
   );
 }

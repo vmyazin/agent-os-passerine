@@ -408,12 +408,8 @@ export class NeonDomainRepository implements DomainRepository {
     for (let attempt = 0; attempt < 32; attempt += 1) {
       try {
         result = await this.database.execute<Record<string, unknown>>(sql`
-        with "global_configuration_lock" as materialized (
-          select pg_advisory_xact_lock(hashtextextended('agentos:configuration', 0)) as "held"
-        ),
-        "idempotency_lock" as materialized (
+        with "idempotency_lock" as materialized (
           select pg_advisory_xact_lock(hashtextextended(${revision.id}, 0)) as "held"
-          from "global_configuration_lock"
         ),
         "configuration_lock" as materialized (
           select pg_advisory_xact_lock(hashtextextended(${project.id}, 0)) as "held"
@@ -427,6 +423,7 @@ export class NeonDomainRepository implements DomainRepository {
         "active_revision" as materialized (
           select "active"."revision", "active"."config_digest"
           from "config_revisions" as "active", "configuration_lock"
+          where "active"."project_id" = ${project.id}
           order by "active"."created_at" desc, "active"."revision" desc,
                    "active"."id" collate "C" desc
           limit 1
@@ -527,10 +524,13 @@ export class NeonDomainRepository implements DomainRepository {
     return row === undefined ? undefined : mapConfigRevisionRow(row);
   }
 
-  async getLatestConfigRevision(): Promise<ConfigRevision | undefined> {
+  async getLatestConfigRevision(
+    projectId: ProjectId,
+  ): Promise<ConfigRevision | undefined> {
     const [row] = await this.database
       .select(configRevisionSelection)
       .from(configRevisions)
+      .where(eq(configRevisions.projectId, projectId))
       .orderBy(
         desc(configRevisions.createdAt),
         desc(configRevisions.revision),

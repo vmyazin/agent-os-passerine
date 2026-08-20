@@ -187,7 +187,8 @@ describe('NeonDomainRepository', () => {
     ).resolves.toEqual(recorded);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(executedSql(execute)).toContain('pg_advisory_xact_lock');
-    expect(executedSql(execute)).toContain('"global_configuration_lock"');
+    expect(executedSql(execute)).toContain('"idempotency_lock"');
+    expect(executedSql(execute)).toContain('"project_id" =');
     expect(executedSql(execute)).toContain('"existing_revision"');
     expect(executedSql(execute)).toContain('"active_revision"');
     expect(executedSql(execute)).toContain('"precondition"');

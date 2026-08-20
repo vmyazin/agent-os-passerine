@@ -10,6 +10,7 @@ import {
 import { ServiceError } from '../../../../src/application/control-plane-service';
 import { handleApi } from '../../../../src/http/api';
 import { requireApiAuthentication } from '../../../../src/http/authenticated';
+import { allowedQuery, boundedPathId } from '../../../../src/http/contracts';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,7 +29,13 @@ export function GET(request: Request): Promise<Response> {
     request,
     { authorize: () => requireApiAuthentication(request) },
     async () => {
-      const active = await controlPlaneService().getConfiguration(true);
+      const query = allowedQuery(request, ['projectId']);
+      const active = await controlPlaneService().getConfiguration(
+        true,
+        query.projectId === undefined
+          ? {}
+          : { projectId: boundedPathId(query.projectId) },
+      );
       if (active.active?.canonicalConfig === undefined) {
         throw new ServiceError(
           'no_active_configuration',

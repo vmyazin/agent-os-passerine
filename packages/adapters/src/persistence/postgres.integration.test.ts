@@ -267,11 +267,8 @@ describePostgres('PostgreSQL persistence integration', () => {
   it('allows exactly one concurrent configuration apply for an expected active revision', async () => {
     const suffix = randomUUID();
     const at = isoTimestamp('2026-08-17T12:00:00.123456Z');
-    const current = await repository.getLatestConfigRevision();
-    const currentProject =
-      current === undefined
-        ? undefined
-        : await repository.getProject(current.projectId);
+    const projects = await repository.listProjects({ limit: 1 });
+    const currentProject = projects[0];
     const project = {
       id:
         currentProject?.id ??
@@ -280,6 +277,10 @@ describePostgres('PostgreSQL persistence integration', () => {
       createdAt: currentProject?.createdAt ?? at,
       updatedAt: at,
     };
+    const current =
+      currentProject === undefined
+        ? undefined
+        : await repository.getLatestConfigRevision(currentProject.id);
     const draft = (id: string, digest: string, version: number) => ({
       id: persistenceId('configRevision', `${id}-${suffix}`),
       projectId: project.id,

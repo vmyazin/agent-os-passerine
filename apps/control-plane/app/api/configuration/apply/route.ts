@@ -18,7 +18,12 @@ export function POST(request: Request): Promise<Response> {
       successStatus: 201,
       maxBodyBytes: MAX_CONFIG_APPLY_BODY_BYTES,
     },
-    async (body) =>
-      controlPlaneService().applyConfiguration(idempotencyKey(request), body),
+    async (body) => {
+      const { projectId, ...input } = body;
+      return controlPlaneService().applyConfiguration(idempotencyKey(request), {
+        ...input,
+        ...(projectId === undefined ? {} : { projectId }),
+      });
+    },
   );
 }

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { GET as getReadiness } from '../../app/api/setup/readiness/route';
 import { POST as setupApply } from '../../app/api/setup/apply/route';
+import { GET as getRepositoryHead } from '../../app/api/setup/repository-head/route';
 import {
   GET as getLocalRepositoryDisallowed,
   POST as createLocalRepository,
@@ -211,6 +212,15 @@ describe('setup API routes', () => {
       error: { code: string };
     };
     expect(body.error.code).toBe('invalid_configuration');
+  });
+
+  it('returns 404 for an unknown project on repository-head', async () => {
+    const response = await getRepositoryHead(
+      request('/api/setup/repository-head?projectId=project-unknown'),
+    );
+    expect(response.status).toBe(404);
+    expect(((await response.json()) as { error: { code: string } }).error.code)
+      .toBe('project_not_found');
   });
 
   describe('local-repository route', () => {

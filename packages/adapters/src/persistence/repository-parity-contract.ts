@@ -944,5 +944,99 @@ export function repositoryParityContract(
       });
       expect(third.map((step) => step.stepKey)).toEqual(['😀']);
     });
+
+    it('isolates configuration preconditions per project', async () => {
+      const repository = await createRepository();
+      const project = (key: 'cas-a' | 'cas-b') => ({
+        id: persistenceId('project', `${implementation}-${key}`),
+        name: key,
+        createdAt: at,
+        updatedAt: at,
+      });
+      const draft = (
+        suffix: string,
+        projectId: Parameters<DomainRepository['createProject']>[0]['id'],
+      ) => ({
+        id: persistenceId('configRevision', `${implementation}-cas-${suffix}`),
+        projectId,
+        config: null,
+        configDigest: `digest-${suffix}`,
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: 'sha',
+        createdAt: at,
+      });
+      const a = project('cas-a');
+      const b = project('cas-b');
+
+      const a1 = await repository.applyConfigRevision(a, draft('a1', a.id), {
+        revision: null,
+        digest: null,
+      });
+      expect(a1.revision).toBe(1);
+
+      const b1 = await repository.applyConfigRevision(b, draft('b1', b.id), {
+        revision: null,
+        digest: null,
+      });
+      expect(b1.revision).toBe(1);
+
+      const a2 = await repository.applyConfigRevision(a, draft('a2', a.id), {
+        revision: 1,
+        digest: 'digest-a1',
+      });
+      expect(a2.revision).toBe(2);
+
+      await expect(
+        repository.applyConfigRevision(a, draft('a3', a.id), {
+          revision: 1,
+          digest: 'digest-a1',
+        }),
+      ).rejects.toMatchObject({ name: 'StaleConfigurationError' });
+    });
+
+    it('scopes the latest configuration revision per project', async () => {
+      const repository = await createRepository();
+      const a = {
+        id: persistenceId('project', `${implementation}-latest-a`),
+        name: 'latest-a',
+        createdAt: at,
+        updatedAt: at,
+      };
+      const b = {
+        id: persistenceId('project', `${implementation}-latest-b`),
+        name: 'latest-b',
+        createdAt: at,
+        updatedAt: at,
+      };
+      const draft = (suffix: string, projectId: typeof a.id) => ({
+        id: persistenceId('configRevision', `${implementation}-latest-${suffix}`),
+        projectId,
+        config: null,
+        configDigest: `digest-${suffix}`,
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'environment',
+        policyDigest: 'policy',
+        repositorySha: 'sha',
+        createdAt: at,
+      });
+      await repository.applyConfigRevision(a, draft('a1', a.id), {
+        revision: null,
+        digest: null,
+      });
+      await repository.applyConfigRevision(b, draft('b1', b.id), {
+        revision: null,
+        digest: null,
+      });
+      const latestA = await repository.getLatestConfigRevision(a.id);
+      expect(latestA?.configDigest).toBe('digest-a1');
+      const missing = await repository.getLatestConfigRevision(
+        persistenceId('project', `${implementation}-latest-none`),
+      );
+      expect(missing).toBeUndefined();
+    });
   });
 }

@@ -146,7 +146,9 @@ describe('runCli', () => {
         apply.io,
       ),
     ).resolves.toBe(0);
-    expect(requests[0]?.url).toBe('https://control.example/api/configuration');
+    expect(requests[0]?.url).toBe(
+      'https://control.example/api/configuration?name=example',
+    );
     expect(requests[1]?.url).toBe(
       'https://control.example/api/configuration/apply',
     );
@@ -325,5 +327,109 @@ describe('runCli', () => {
       error: { code: 'remote_error' },
     });
     expect(failure.stderr.join('')).not.toContain('server-secret');
+  });
+
+  it('scopes config plan and apply to the configuration binding', async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'agentos-multi-project-')),
+    );
+    const path = join(root, 'agent-os.yaml');
+    await writeFile(join(root, '.git'), 'gitdir: test\n');
+    await writeFile(
+      path,
+      `
+version: 1
+project:
+  name: local-two
+  localPath: /workspaces/local-two
+  defaultBranch: main
+models:
+  standard:
+    provider: local
+    model: test-model
+    inputMicrodollarsPerMillionTokens: 0
+    outputMicrodollarsPerMillionTokens: 0
+    runtimeMicrodollarsPerMinute: 0
+agents:
+  implementer: { model: standard, environment: default }
+environments:
+  default: { runtime: process }
+pipelines:
+  feature: { steps: [{ id: implement, agent: implementer }] }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`,
+    );
+    const requests: Array<{ url: string; init: RequestInit | undefined }> =
+      [];
+    const fetch = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === 'GET')
+          return Response.json({ active: null, projectId: 'project_two' });
+        return Response.json({
+          projectId: 'project_two',
+          digest: 'b'.repeat(64),
+          revision: 1,
+          appliedAt: '2026-08-20T12:00:00.000Z',
+          provenance: {
+            repositorySha: 'a'.repeat(40),
+            configDigest: 'b'.repeat(64),
+            modelDigest: 'c'.repeat(64),
+            promptDigest: 'd'.repeat(64),
+            environmentDigest: 'e'.repeat(64),
+            policyDigest: 'f'.repeat(64),
+          },
+        });
+      },
+    );
+    const shared = {
+      fetch: fetch as typeof globalThis.fetch,
+      cwd: root,
+      env: { AGENTOS_URL: 'https://control.example', AGENTOS_API_TOKEN: 't' },
+    };
+
+    const apply = capture(shared);
+    expect(
+      await runCli(
+        ['config', 'apply', '--config', path, '--idempotency-key', 'multi'],
+        apply.io,
+      ),
+    ).toBe(0);
+    expect(requests[0]?.url).toBe(
+      `https://control.example/api/configuration?localPath=${encodeURIComponent('/workspaces/local-two')}`,
+    );
+    expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({
+      projectId: 'project_two',
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+  });
+
+  it('scopes config plan to an unbound config by project name', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'agentos-name-project-')));
+    const path = join(root, 'agent-os.yaml');
+    await writeFile(join(root, '.git'), 'gitdir: test\n');
+    await writeFile(path, STARTER_CONFIG);
+
+    const requests: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      requests.push(String(url));
+      return Response.json({ active: null, projectId: 'project_example' });
+    });
+    const plan = capture({
+      fetch: fetch as typeof globalThis.fetch,
+      cwd: root,
+      env: { AGENTOS_URL: 'https://control.example', AGENTOS_API_TOKEN: 't' },
+    });
+
+    await expect(
+      runCli(['config', 'plan', '--config', path], plan.io),
+    ).resolves.toBe(0);
+    expect(requests[0]).toBe(
+      'https://control.example/api/configuration?name=example',
+    );
   });
 });

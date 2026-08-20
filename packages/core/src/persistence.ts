@@ -467,7 +467,9 @@ export interface DomainRepository {
     precondition?: ConfigRevisionPrecondition,
   ): Promise<ConfigRevision>;
   getConfigRevision(id: ConfigRevisionId): Promise<ConfigRevision | undefined>;
-  getLatestConfigRevision(): Promise<ConfigRevision | undefined>;
+  getLatestConfigRevision(
+    projectId: ProjectId,
+  ): Promise<ConfigRevision | undefined>;
   listConfigRevisions(
     projectId: ProjectId,
     page?: ListPage<number>,

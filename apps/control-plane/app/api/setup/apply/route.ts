@@ -51,10 +51,11 @@ export function POST(request: Request): Promise<Response> {
       maxBodyBytes: MAX_CONFIG_APPLY_BODY_BYTES,
     },
     async (body) => {
+      let config;
       let canonicalConfig: string;
       let digest: string;
       try {
-        const config = loadAgentOsConfig(body.yaml);
+        config = loadAgentOsConfig(body.yaml);
         canonicalConfig = canonicalConfigJson(config);
         digest = canonicalConfigHash(config);
       } catch (error) {
@@ -65,12 +66,13 @@ export function POST(request: Request): Promise<Response> {
         );
       }
       const service = controlPlaneService();
-      const active = await service.getConfiguration(false);
+      const resolved = await service.getConfigurationForConfig(config);
       return service.applyConfiguration(idempotencyKey(request), {
         canonicalConfig,
         digest,
-        expectedRevision: active.active?.revision ?? null,
-        expectedDigest: active.active?.digest ?? null,
+        expectedRevision: resolved.active?.revision ?? null,
+        expectedDigest: resolved.active?.digest ?? null,
+        projectId: resolved.projectId,
       });
     },
   );

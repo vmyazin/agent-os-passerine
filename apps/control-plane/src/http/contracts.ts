@@ -68,6 +68,7 @@ export const configurationApplySchema = z
       .string()
       .regex(/^[a-f0-9]{64}$/)
       .nullable(),
+    projectId: id.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -99,8 +100,24 @@ export const configurationProjectionSchema = z
   })
   .strict();
 export const activeConfigurationSchema = z
-  .object({ active: configurationProjectionSchema.nullable() })
+  .object({
+    active: configurationProjectionSchema.nullable(),
+    projectId: id.optional(),
+  })
   .strict();
+
+export const configurationQuerySchema = z
+  .object({
+    projectId: id.optional(),
+    repository: z.string().trim().min(1).max(2_048).optional(),
+    localPath: z.string().trim().min(1).max(4_096).startsWith('/').optional(),
+    name: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
+  .refine(
+    (value) => Object.values(value).filter((v) => v !== undefined).length <= 1,
+    'pass at most one of projectId, repository, localPath, name',
+  );
 export const inboxReplySchema = z
   .object({
     reply: z.union([
@@ -333,6 +350,23 @@ export function boundedPathId(value: string): string {
     });
   }
   return parsed.data;
+}
+
+export function allowedQuery(
+  request: Request,
+  allowed: readonly string[],
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of new URL(request.url).searchParams) {
+    if (!allowed.includes(key) || key in result) {
+      throw Object.assign(new Error('query parameters are not supported'), {
+        code: 'validation_error',
+        status: 422,
+      });
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 export function assertNoQuery(request: Request): void {

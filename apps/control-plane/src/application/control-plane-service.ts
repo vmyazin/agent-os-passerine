@@ -89,6 +89,15 @@ export interface ConfigurationInput {
   readonly digest: string;
   readonly expectedRevision: number | null;
   readonly expectedDigest: string | null;
+  /** Optional integrity check; identity always derives from the config. */
+  readonly projectId?: string;
+}
+
+export interface ProjectSelector {
+  readonly projectId?: string;
+  readonly repository?: string;
+  readonly localPath?: string;
+  readonly name?: string;
 }
 
 export interface ConfigurationProjection {
@@ -652,11 +661,97 @@ export class ControlPlaneService {
     },
   ) {}
 
-  async getConfiguration(includeCanonical = true): Promise<{
+  private bindingKey(config: AgentOsConfig): string {
+    if (config.project.repository !== undefined)
+      return `repository:${config.project.repository}`;
+    if (config.project.localPath !== undefined)
+      return `localPath:${config.project.localPath}`;
+    return `name:${config.project.name}`;
+  }
+
+  /**
+   * Deterministic project identity from a binding key, with one carve-out:
+   * deployments that predate multi-project keep their constant-id project
+   * (and its whole revision history) as long as its latest revision still
+   * carries the same binding.
+   */
+  private async projectIdForBindingKey(
+    key: string,
+  ): Promise<PersistenceId<'project'>> {
+    const derived = this.generateId('project', `binding:${key}`);
+    if ((await this.repository.getProject(derived)) !== undefined)
+      return derived;
+    const legacyId = this.generateId('project', 'configuration');
+    const legacy = await this.repository.getProject(legacyId);
+    if (legacy !== undefined) {
+      const latest = await this.repository.getLatestConfigRevision(legacyId);
+      if (latest !== undefined) {
+        try {
+          if (this.bindingKey(parseAgentOsConfig(latest.config)) === key)
+            return legacyId;
+        } catch {
+          // An unparseable legacy revision never captures new applies.
+        }
+      }
+    }
+    return derived;
+  }
+
+  private async resolveProjectId(
+    selector: ProjectSelector,
+  ): Promise<PersistenceId<'project'> | undefined> {
+    if (selector.projectId !== undefined) {
+      const id = persistenceId('project', selector.projectId);
+      if ((await this.repository.getProject(id)) === undefined)
+        throw new ServiceError('project_not_found', 'project not found', 404);
+      return id;
+    }
+    if (selector.repository !== undefined)
+      return this.projectIdForBindingKey(`repository:${selector.repository}`);
+    if (selector.localPath !== undefined)
+      return this.projectIdForBindingKey(`localPath:${selector.localPath}`);
+    if (selector.name !== undefined)
+      return this.projectIdForBindingKey(`name:${selector.name}`);
+    const projects = await this.repository.listProjects({ limit: 2 });
+    if (projects.length > 1)
+      throw new ServiceError(
+        'project_required',
+        'multiple projects exist; select one with projectId, repository, localPath, or name',
+        400,
+      );
+    return projects[0]?.id;
+  }
+
+  async getConfiguration(
+    includeCanonical = true,
+    selector: ProjectSelector = {},
+  ): Promise<{
+    readonly active: ConfigurationProjection | null;
+    readonly projectId?: string;
+  }> {
+    const projectId = await this.resolveProjectId(selector);
+    if (projectId === undefined) return { active: null };
+    const active = await this.repository.getLatestConfigRevision(projectId);
+    return {
+      projectId,
+      active:
+        active === undefined
+          ? null
+          : configurationProjection(active, includeCanonical),
+    };
+  }
+
+  async getConfigurationForConfig(
+    config: AgentOsConfig,
+    includeCanonical = false,
+  ): Promise<{
+    readonly projectId: string;
     readonly active: ConfigurationProjection | null;
   }> {
-    const active = await this.repository.getLatestConfigRevision();
+    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    const active = await this.repository.getLatestConfigRevision(projectId);
     return {
+      projectId,
       active:
         active === undefined
           ? null
@@ -748,9 +843,13 @@ export class ControlPlaneService {
         configDigest: digest,
       }).slice(0, 40);
     }
-    const active = await this.repository.getLatestConfigRevision();
-    const projectId =
-      active?.projectId ?? this.generateId('project', 'configuration');
+    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    if (input.projectId !== undefined && input.projectId !== projectId)
+      throw new ServiceError(
+        'project_mismatch',
+        'projectId does not match the configuration project',
+        409,
+      );
     try {
       const revision = await this.repository.applyConfigRevision(
         {
@@ -827,6 +926,11 @@ export class ControlPlaneService {
       CreateRunInput | CreateGoalRunInput;
     const runInput = inputForRun(idempotencyKey, requestInput);
     const now = this.clock();
+    const projectRecord = await this.repository.getProject(
+      persistenceId('project', requestInput.projectId),
+    );
+    if (projectRecord === undefined)
+      throw new ServiceError('project_not_found', 'project not found', 404);
     let configRevision: ConfigRevision | undefined;
     if (
       pipeline === 'goal' ||
@@ -955,11 +1059,20 @@ export class ControlPlaneService {
     }
   }
 
-  async listRuns(limit = 50): Promise<readonly RunProjection[]> {
+  async listRuns(
+    limit = 50,
+    projectId?: string,
+  ): Promise<readonly RunProjection[]> {
     // Newest first: run listings serve the UI and the CLI, where the latest
     // activity matters most. Reconciliation paginates the repository
     // directly with the ascending cursor order and is unaffected.
-    const runs = await this.repository.listRuns({ limit, order: 'desc' });
+    const runs = await this.repository.listRuns({
+      limit,
+      order: 'desc',
+      ...(projectId === undefined
+        ? {}
+        : { projectId: persistenceId('project', projectId) }),
+    });
     return Promise.all(runs.map((run) => this.project(run)));
   }
 
@@ -1115,8 +1228,16 @@ export class ControlPlaneService {
     return projectApproval(consumed);
   }
 
-  async listInbox(limit = 50): Promise<readonly InboxProjection[]> {
-    const runs = await this.repository.listRuns({ limit });
+  async listInbox(
+    limit = 50,
+    projectId?: string,
+  ): Promise<readonly InboxProjection[]> {
+    const runs = await this.repository.listRuns({
+      limit,
+      ...(projectId === undefined
+        ? {}
+        : { projectId: persistenceId('project', projectId) }),
+    });
     const pages = await Promise.all(
       runs.map((run) =>
         this.repository.listInboxMessages(run.id, undefined, { limit }),
@@ -1136,8 +1257,14 @@ export class ControlPlaneService {
    * beats durable emission here: it needs no migration or worker change and
    * covers every run that ever finished, not just future ones.
    */
-  async inboxDigest(limit = 50): Promise<InboxDigest> {
-    const runs = await this.repository.listRuns({ limit, order: 'desc' });
+  async inboxDigest(limit = 50, projectId?: string): Promise<InboxDigest> {
+    const runs = await this.repository.listRuns({
+      limit,
+      order: 'desc',
+      ...(projectId === undefined
+        ? {}
+        : { projectId: persistenceId('project', projectId) }),
+    });
     const pages = await mapWithConcurrency(
       runs,
       DIGEST_QUERY_CONCURRENCY,
@@ -1252,8 +1379,14 @@ export class ControlPlaneService {
   async listPendingApprovals(
     limit = 50,
     includeSummaries = true,
+    projectId?: string,
   ): Promise<readonly ApprovalProjection[]> {
-    const runs = await this.repository.listRuns({ limit });
+    const runs = await this.repository.listRuns({
+      limit,
+      ...(projectId === undefined
+        ? {}
+        : { projectId: persistenceId('project', projectId) }),
+    });
     const pages = await Promise.all(
       runs.map((run) =>
         this.repository.listApprovals(run.id, { status: 'pending', limit }),

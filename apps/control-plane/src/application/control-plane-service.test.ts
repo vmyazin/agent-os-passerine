@@ -212,8 +212,12 @@ runtime: { provider: local }
       projectId: expect.stringMatching(/^project-/),
       revision: 1,
     });
-    expect(await service.getConfiguration()).toEqual({ active: first });
+    expect(await service.getConfiguration()).toEqual({
+      active: first,
+      projectId: first.projectId,
+    });
     expect(await service.getConfiguration(false)).toEqual({
+      projectId: first.projectId,
       active: {
         projectId: first.projectId,
         digest: first.digest,
@@ -339,7 +343,6 @@ runtime: { provider: local }
       project: {
         ...config.project,
         name: 'Renamed Project',
-        repository: 'https://example.com/two.git',
       },
       budgets: { ...config.budgets, concurrency: 2 },
     };
@@ -357,7 +360,7 @@ runtime: { provider: local }
       createdAt: '2026-08-17T12:00:00.000Z',
       updatedAt: '2026-08-17T12:01:00.000Z',
       name: 'Renamed Project',
-      repository: 'https://example.com/two.git',
+      repository: 'https://example.com/one.git',
     });
 
     clock = isoTimestamp('2026-08-17T12:02:00.000Z');
@@ -397,7 +400,7 @@ runtime: { provider: local }
     );
   });
 
-  it('allows only one concurrent first configuration apply', async () => {
+  it('allows concurrent first configuration applies for distinct bindings', async () => {
     const repository = new InMemoryDomainRepository();
     const service = createService(repository);
     const firstConfig = loadAgentOsConfig(`
@@ -429,11 +432,8 @@ runtime: { provider: local }
 
     expect(
       applied.filter((entry) => entry.status === 'fulfilled'),
-    ).toHaveLength(1);
-    expect(applied.find((entry) => entry.status === 'rejected')).toMatchObject({
-      reason: { code: 'configuration_stale', status: 409 },
-    });
-    await expect(repository.listProjects()).resolves.toHaveLength(1);
+    ).toHaveLength(2);
+    await expect(repository.listProjects()).resolves.toHaveLength(2);
   });
 
   it('creates a feature idempotently across service restarts', async () => {
@@ -1379,5 +1379,268 @@ runtime: { provider: local }
     expect(
       digest.notifications.find((entry) => entry.runId === rejected.id),
     ).toMatchObject({ runStatus: 'failed', resultStatus: 'rejected' });
+  });
+});
+
+async function applyProjectConfiguration(
+  service: ControlPlaneService,
+  key: string,
+  projectLine: string,
+  precondition: {
+    expectedRevision: number | null;
+    expectedDigest: string | null;
+  } = { expectedRevision: null, expectedDigest: null },
+) {
+  const config = loadAgentOsConfig(`
+version: 1
+project: ${projectLine}
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+  return service.applyConfiguration(key, {
+    canonicalConfig: canonicalConfigJson(config),
+    digest: canonicalConfigHash(config),
+    ...precondition,
+  });
+}
+
+describe('multi-project configuration', () => {
+  it('creates one project per binding and keeps their revision chains independent', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const a1 = await applyProjectConfiguration(
+      service,
+      'a1',
+      '{ name: A, repository: https://github.com/team/a }',
+    );
+    const b1 = await applyProjectConfiguration(
+      service,
+      'b1',
+      '{ name: B, repository: https://github.com/team/b }',
+    );
+    expect(a1.projectId).not.toBe(b1.projectId);
+    expect(a1.revision).toBe(1);
+    expect(b1.revision).toBe(1);
+
+    const a2 = await applyProjectConfiguration(
+      service,
+      'a2',
+      '{ name: A, repository: https://github.com/team/a }',
+      { expectedRevision: 1, expectedDigest: a1.digest },
+    );
+    expect(a2.projectId).toBe(a1.projectId);
+    expect(a2.revision).toBe(2);
+    expect((await repository.listProjects()).length).toBe(2);
+  });
+
+  it('reuses the legacy singleton project when its latest binding matches', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const legacyId = ids('project', 'configuration');
+    const legacyConfig = loadAgentOsConfig(`
+version: 1
+project: { name: Legacy, repository: https://github.com/team/legacy }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    await repository.createProject({
+      id: legacyId,
+      name: 'Legacy',
+      repository: 'https://github.com/team/legacy',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createConfigRevision({
+      id: ids('configRevision', 'legacy-1'),
+      projectId: legacyId,
+      revision: 1,
+      config: JSON.parse(canonicalConfigJson(legacyConfig)),
+      configDigest: canonicalConfigHash(legacyConfig),
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      repositorySha: 'a'.repeat(40),
+      createdAt: now,
+    });
+
+    const next = await applyProjectConfiguration(
+      service,
+      'legacy-2',
+      '{ name: Legacy, repository: https://github.com/team/legacy }',
+      {
+        expectedRevision: 1,
+        expectedDigest: canonicalConfigHash(legacyConfig),
+      },
+    );
+    expect(next.projectId).toBe(legacyId);
+    expect(next.revision).toBe(2);
+
+    const other = await applyProjectConfiguration(
+      service,
+      'other-1',
+      '{ name: Other, repository: https://github.com/team/other }',
+    );
+    expect(other.projectId).not.toBe(legacyId);
+  });
+
+  it('rejects an apply whose declared projectId disagrees with the binding', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: A, repository: https://github.com/team/a }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    await expect(
+      service.applyConfiguration('mismatch', {
+        canonicalConfig: canonicalConfigJson(config),
+        digest: canonicalConfigHash(config),
+        expectedRevision: null,
+        expectedDigest: null,
+        projectId: 'project-not-this-one',
+      }),
+    ).rejects.toMatchObject({ code: 'project_mismatch', status: 409 });
+  });
+
+  it('resolves getConfiguration selectors', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const a = await applyProjectConfiguration(
+      service,
+      'sel-a',
+      '{ name: A, repository: https://github.com/team/a }',
+    );
+
+    const sole = await service.getConfiguration(false);
+    expect(sole.projectId).toBe(a.projectId);
+    expect(sole.active?.digest).toBe(a.digest);
+
+    await applyProjectConfiguration(
+      service,
+      'sel-b',
+      '{ name: B, repository: https://github.com/team/b }',
+    );
+
+    await expect(service.getConfiguration(false)).rejects.toMatchObject({
+      code: 'project_required',
+      status: 400,
+    });
+
+    const byId = await service.getConfiguration(false, {
+      projectId: a.projectId,
+    });
+    expect(byId.active?.digest).toBe(a.digest);
+    const byBinding = await service.getConfiguration(false, {
+      repository: 'https://github.com/team/a',
+    });
+    expect(byBinding.projectId).toBe(a.projectId);
+
+    await expect(
+      service.getConfiguration(false, { projectId: 'project-unknown' }),
+    ).rejects.toMatchObject({ code: 'project_not_found', status: 404 });
+    const fresh = await service.getConfiguration(false, {
+      repository: 'https://github.com/team/new',
+    });
+    expect(fresh.active).toBeNull();
+    expect(typeof fresh.projectId).toBe('string');
+  });
+
+  it('resolves name-bound projects by name selector', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const example = await applyProjectConfiguration(
+      service,
+      'name-example',
+      '{ name: example }',
+    );
+    await applyProjectConfiguration(service, 'name-other', '{ name: other }');
+
+    const byName = await service.getConfiguration(false, { name: 'example' });
+    expect(byName.projectId).toBe(example.projectId);
+    expect(byName.active?.digest).toBe(example.digest);
+  });
+});
+
+describe('project-aware listings', () => {
+  it('filters runs and rejects runs for unknown projects', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const a = await applyProjectConfiguration(
+      service,
+      'runs-a',
+      '{ name: A, repository: https://github.com/team/a }',
+    );
+    const b = await applyProjectConfiguration(
+      service,
+      'runs-b',
+      '{ name: B, repository: https://github.com/team/b }',
+    );
+    const runInput = (projectId: string, applied: typeof a) => ({
+      projectId,
+      title: 'Run',
+      description: 'Run description.',
+      repositorySha: applied.provenance.repositorySha,
+      configDigest: applied.digest,
+      modelDigest: applied.provenance.modelDigest,
+      promptDigest: applied.provenance.promptDigest,
+      environmentDigest: applied.provenance.environmentDigest,
+      policyDigest: applied.provenance.policyDigest,
+    });
+    await service.createFeatureRun('run-a', runInput(a.projectId, a));
+    await service.createFeatureRun('run-b', runInput(b.projectId, b));
+
+    expect((await service.listRuns()).length).toBe(2);
+    const onlyA = await service.listRuns(50, a.projectId);
+    expect(onlyA.length).toBe(1);
+    expect(onlyA[0]?.projectId).toBe(a.projectId);
+
+    await expect(
+      service.createFeatureRun('run-x', runInput('project-missing', a)),
+    ).rejects.toMatchObject({ code: 'project_not_found', status: 404 });
+  });
+
+  it('resolves the apply precondition for a config via its binding', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const applied = await applyProjectConfiguration(
+      service,
+      'for-config',
+      '{ name: A, repository: https://github.com/team/a }',
+    );
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: A, repository: https://github.com/team/a }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const resolved = await service.getConfigurationForConfig(config);
+    expect(resolved.projectId).toBe(applied.projectId);
+    expect(resolved.active?.revision).toBe(1);
   });
 });

@@ -258,7 +258,11 @@ export function SetupWizard() {
     setFetchingHead(true);
     setHeadError('');
     try {
-      const response = await fetch('/api/setup/repository-head');
+      const response = await fetch(
+        applied === undefined
+          ? '/api/setup/repository-head'
+          : `/api/setup/repository-head?projectId=${encodeURIComponent(applied.projectId)}`,
+      );
       if (!response.ok) throw new Error(await readError(response));
       setHead((await response.json()) as RepositoryHead);
     } catch (error) {

@@ -120,16 +120,49 @@ function boundedReply(value: string): string {
   return reply;
 }
 
-function activeConfiguration(value: unknown): {
-  readonly canonicalConfig: string;
-  readonly digest: string;
-  readonly revision: number;
-} | null {
+function configurationQuery(config: {
+  readonly project: {
+    readonly repository?: string | undefined;
+    readonly localPath?: string | undefined;
+    readonly name: string;
+  };
+}): string {
+  const params =
+    config.project.repository !== undefined
+      ? { repository: config.project.repository }
+      : config.project.localPath !== undefined
+        ? { localPath: config.project.localPath }
+        : { name: config.project.name };
+  return `?${new URLSearchParams(params).toString()}`;
+}
+
+function configurationResponse(value: unknown): {
+  readonly projectId?: string;
+  readonly active: {
+    readonly canonicalConfig: string;
+    readonly digest: string;
+    readonly revision: number;
+  } | null;
+} {
   if (value === null || typeof value !== 'object' || !('active' in value)) {
     throw new ApiError('server returned an invalid configuration projection');
   }
-  const active = (value as { active: unknown }).active;
-  if (active === null) return null;
+  const record = value as { active: unknown; projectId?: unknown };
+  if (
+    record.projectId !== undefined &&
+    typeof record.projectId !== 'string'
+  ) {
+    throw new ApiError('server returned an invalid configuration projection');
+  }
+  const active = record.active;
+  if (active === null) {
+    return {
+      ...(record.projectId === undefined
+        ? {}
+        : { projectId: record.projectId }),
+      active: null,
+    };
+  }
   if (
     typeof active !== 'object' ||
     active === null ||
@@ -140,10 +173,13 @@ function activeConfiguration(value: unknown): {
   ) {
     throw new ApiError('server returned an invalid configuration projection');
   }
-  return active as {
-    canonicalConfig: string;
-    digest: string;
-    revision: number;
+  return {
+    ...(record.projectId === undefined ? {} : { projectId: record.projectId }),
+    active: active as {
+      canonicalConfig: string;
+      digest: string;
+      revision: number;
+    },
   };
 }
 
@@ -171,26 +207,32 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
         command.config,
         io.cwd ?? process.cwd(),
       );
-      const [loaded, currentValue] = await Promise.all([
-        readConfiguration(path),
-        remote(connection(command, io)).request({
-          method: 'GET',
-          path: '/api/configuration',
-        }),
-      ]);
-      const current = activeConfiguration(currentValue);
-      if (current === null) {
+      const loaded = await readConfiguration(path);
+      const currentValue = await remote(connection(command, io)).request({
+        method: 'GET',
+        path: `/api/configuration${configurationQuery(loaded.config)}`,
+      });
+      const response = configurationResponse(currentValue);
+      if (response.active === null) {
         return {
           changed: true,
           fromHash: null,
           toHash: loaded.digest,
           changes: [{ kind: 'added', path: '$', after: loaded.config }],
+          ...(response.projectId === undefined
+            ? {}
+            : { projectId: response.projectId }),
         };
       }
-      return planConfigChange(
-        loadAgentOsConfig(current.canonicalConfig),
-        loaded.config,
-      );
+      return {
+        ...planConfigChange(
+          loadAgentOsConfig(response.active.canonicalConfig),
+          loaded.config,
+        ),
+        ...(response.projectId === undefined
+          ? {}
+          : { projectId: response.projectId }),
+      };
     }
     case 'config.apply': {
       const path = await resolveConfigurationPath(
@@ -199,8 +241,11 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
       );
       const loaded = await readConfiguration(path);
       const client = remote(connection(command, io));
-      const current = activeConfiguration(
-        await client.request({ method: 'GET', path: '/api/configuration' }),
+      const response = configurationResponse(
+        await client.request({
+          method: 'GET',
+          path: `/api/configuration${configurationQuery(loaded.config)}`,
+        }),
       );
       return client.request({
         method: 'POST',
@@ -208,8 +253,11 @@ async function execute(command: Command, io: CliIo): Promise<unknown> {
         body: {
           canonicalConfig: loaded.canonical,
           digest: loaded.digest,
-          expectedRevision: current?.revision ?? null,
-          expectedDigest: current?.digest ?? null,
+          expectedRevision: response.active?.revision ?? null,
+          expectedDigest: response.active?.digest ?? null,
+          ...(response.projectId === undefined
+            ? {}
+            : { projectId: response.projectId }),
         },
         idempotencyKey: command.idempotencyKey,
       });
