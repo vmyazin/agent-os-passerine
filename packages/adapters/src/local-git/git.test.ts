@@ -184,4 +184,31 @@ describe('runGit env injection', () => {
       }),
     ).rejects.toThrow(LocalGitError);
   });
+
+  it('fixes the author/committer date, making commit-tree content-addressed across retries', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const tree = await runGit(repo, ['rev-parse', 'HEAD^{tree}']);
+    const parent = await runGit(repo, ['rev-parse', 'HEAD']);
+    const env = {
+      GIT_AUTHOR_NAME: 'Agent OS Publisher',
+      GIT_AUTHOR_EMAIL: 'agentos@localhost',
+      GIT_AUTHOR_DATE: '2026-08-17T11:59:00.000Z',
+      GIT_COMMITTER_NAME: 'Agent OS Publisher',
+      GIT_COMMITTER_EMAIL: 'agentos@localhost',
+      GIT_COMMITTER_DATE: '2026-08-17T11:59:00.000Z',
+    };
+    const first = await runGit(
+      repo,
+      ['commit-tree', tree, '-p', parent, '-m', 'deterministic test'],
+      { env },
+    );
+    const second = await runGit(
+      repo,
+      ['commit-tree', tree, '-p', parent, '-m', 'deterministic test'],
+      { env },
+    );
+    expect(first).toBe(second);
+    expect(first).toMatch(/^[0-9a-f]{40}$/);
+  });
 });

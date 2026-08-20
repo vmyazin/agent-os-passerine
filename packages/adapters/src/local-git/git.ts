@@ -45,9 +45,14 @@ const ALLOWED_SUBCOMMANDS = new Set(Object.keys(SUBCOMMAND_RULES));
 const MAX_ARGUMENT_LENGTH = 4096;
 
 /**
- * Only the git identity variables needed to stamp a deterministic author /
- * committer on plumbing-created commits (see local-git/publisher.ts) may be
- * injected. Anything else (e.g. GIT_SSH_COMMAND, GIT_ALTERNATE_OBJECT_
+ * Only the git identity/date variables needed to stamp a deterministic,
+ * content-addressed author/committer on plumbing-created commits (see
+ * local-git/publisher.ts) may be injected. The date keys matter as much as
+ * the name/email ones: `git commit-tree` defaults to the current wall-clock
+ * time when no date is given, which would make retries of the *same*
+ * (tree, parent, message) produce a *different* commit sha each time --
+ * defeating the resume logic that relies on commit-tree being genuinely
+ * idempotent. Anything else (e.g. GIT_SSH_COMMAND, GIT_ALTERNATE_OBJECT_
  * DIRECTORIES) could change how git resolves objects or talks to the
  * network, which would defeat the containment/allowlisting done elsewhere
  * in this file.
@@ -55,8 +60,10 @@ const MAX_ARGUMENT_LENGTH = 4096;
 const ALLOWED_ENV_KEYS = new Set([
   'GIT_AUTHOR_NAME',
   'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_DATE',
   'GIT_COMMITTER_NAME',
   'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_DATE',
 ]);
 
 function assertSafeEnv(env: Readonly<Record<string, string>> | undefined): void {

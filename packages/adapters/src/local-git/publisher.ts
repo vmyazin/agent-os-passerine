@@ -383,21 +383,67 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
       await runGit(repo, ['ls-tree', '-r', '-z', base]),
     );
 
-    let blobShas: Record<string, string>;
+    // Everything below this point is resume-safe by construction rather
+    // than by trusting previously-recorded values: `hash-object`, `mktree`,
+    // and (given a *fixed* author/committer date -- see `identityEnv`
+    // below) `commit-tree` are all content-addressed, so recomputing them
+    // on every attempt (including retries resuming a crashed run) always
+    // reproduces the exact same shas for the exact same manifest. This is
+    // cheap (a handful of local `git` subprocess calls) and means the store
+    // checkpoints below only ever need to answer "has this phase already
+    // been *persisted*", never "what was the value" -- so a `store.save`
+    // failure between two phases can never leave anything un-recomputable,
+    // and resuming never needs to replay phases that already made it to
+    // durable storage (which the store's own phase-transition table would
+    // reject as a conflict if attempted -- see `phaseAtLeast` below).
+    const blobShas: Record<string, string> = {};
+    for (const change of manifest.changes) {
+      if (change.operation === 'delete') continue;
+      const sha = await runGit(repo, ['hash-object', '-w', '--stdin'], {
+        input: change.content,
+      });
+      if (!GIT_SHA.test(sha))
+        throw new GitHubPublisherError(
+          'publication_rejected',
+          'git returned a malformed blob SHA',
+        );
+      blobShas[change.path] = sha;
+    }
+
+    const newEntries = applyChanges(baseEntries, manifest.changes, blobShas);
+    const newTree = await writeTree(repo, buildDirTree(newEntries));
+
+    // `parsed.authorization.issuedAt` (not `now()`) is the date stamped on
+    // the commit -- fixed per authorization/manifest, so identical across
+    // every retry of the same publish attempt, mirroring exactly how
+    // `github/publisher.ts` stamps its commit identity. Using `now()`
+    // instead would make every recomputation produce a different commit
+    // sha, defeating the whole point of recomputing being resume-safe.
+    const identityEnv = {
+      ...GIT_IDENTITY_ENV,
+      GIT_AUTHOR_DATE: parsed.authorization.issuedAt,
+      GIT_COMMITTER_DATE: parsed.authorization.issuedAt,
+    };
+    const commitSha = await runGit(
+      repo,
+      ['commit-tree', newTree, '-p', base, '-m', commitMessage(manifest.runId)],
+      { env: identityEnv },
+    );
+    if (!GIT_SHA.test(commitSha))
+      throw new GitHubPublisherError(
+        'publication_rejected',
+        'git returned a malformed commit SHA',
+      );
+
+    // From here on, only persist a checkpoint for a phase strictly ahead of
+    // where this record already is -- mirroring how `github/publisher.ts`
+    // resumes (its `phaseAtLeast` guards around each `store.save`). This is
+    // what makes a crash between two `store.save` calls resumable: the next
+    // attempt's `store.claim` returns the record already sitting at
+    // whatever phase last durably committed, and only phases after that
+    // are (re-)persisted -- never re-attempted from the start, and never a
+    // backward transition the store's transition table would reject.
     if (!phaseAtLeast(record.phase, 'blobs_created')) {
-      blobShas = {};
-      for (const change of manifest.changes) {
-        if (change.operation === 'delete') continue;
-        const sha = await runGit(repo, ['hash-object', '-w', '--stdin'], {
-          input: change.content,
-        });
-        if (!GIT_SHA.test(sha))
-          throw new GitHubPublisherError(
-            'publication_rejected',
-            'git returned a malformed blob SHA',
-          );
-        blobShas[change.path] = sha;
-      }
       const blobsAt = now().toISOString();
       record = await options.store.save(
         key,
@@ -407,15 +453,9 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
           count: Object.keys(blobShas).length,
         }),
       );
-    } else {
-      blobShas = { ...(record.blobShas ?? {}) };
     }
 
-    const newEntries = applyChanges(baseEntries, manifest.changes, blobShas);
-
-    let newTree: string;
     if (!phaseAtLeast(record.phase, 'tree_created')) {
-      newTree = await writeTree(repo, buildDirTree(newEntries));
       const treeAt = now().toISOString();
       record = await options.store.save(
         key,
@@ -423,27 +463,9 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
         { phase: 'tree_created', treeSha: newTree, updatedAt: treeAt },
         event(key, 'tree_created', treeAt, { treeSha: newTree }),
       );
-    } else {
-      if (record.treeSha === undefined || !GIT_SHA.test(record.treeSha))
-        throw new GitHubPublisherError(
-          'publication_store_conflict',
-          'Durable tree checkpoint is missing',
-        );
-      newTree = record.treeSha;
     }
 
-    let commitSha: string;
     if (!phaseAtLeast(record.phase, 'commit_created')) {
-      commitSha = await runGit(
-        repo,
-        ['commit-tree', newTree, '-p', base, '-m', commitMessage(manifest.runId)],
-        { env: GIT_IDENTITY_ENV },
-      );
-      if (!GIT_SHA.test(commitSha))
-        throw new GitHubPublisherError(
-          'publication_rejected',
-          'git returned a malformed commit SHA',
-        );
       const commitAt = now().toISOString();
       record = await options.store.save(
         key,
@@ -451,13 +473,19 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
         { phase: 'commit_created', commitSha, updatedAt: commitAt },
         event(key, 'commit_created', commitAt, { commitSha }),
       );
-    } else {
-      if (record.commitSha === undefined || !GIT_SHA.test(record.commitSha))
-        throw new GitHubPublisherError(
-          'publication_store_conflict',
-          'Durable commit checkpoint is missing',
-        );
-      commitSha = record.commitSha;
+    } else if (record.commitSha === undefined) {
+      throw new GitHubPublisherError(
+        'publication_store_conflict',
+        'Durable commit checkpoint is missing',
+      );
+    } else if (record.commitSha !== commitSha) {
+      // The freshly recomputed commit no longer matches what a previous
+      // attempt durably recorded -- since `base` was just re-verified
+      // against `expectedBase.sha` above, this can only mean the change
+      // set (or the fixed authorization date) is not what produced the
+      // recorded commit, which is a genuine binding change, not a benign
+      // resume.
+      collision('Publication commit binding changed');
     }
 
     if (!phaseAtLeast(record.phase, 'ref_created')) {
@@ -469,9 +497,26 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
           '',
         ]);
       } catch (error) {
-        if (error instanceof LocalGitError)
+        if (!(error instanceof LocalGitError)) throw error;
+        // The create-only guard (trailing '' oldvalue) tripped because the
+        // ref already exists. That's not automatically a genuine
+        // collision: a previous attempt may have created this exact ref
+        // and then crashed before its `ref_created` checkpoint was
+        // persisted -- the branch is real, only the bookkeeping lagged.
+        // Compare against what's actually on disk rather than assuming
+        // the worst.
+        let existingSha: string;
+        try {
+          existingSha = await runGit(repo, [
+            'rev-parse',
+            `refs/heads/${branch}`,
+          ]);
+        } catch {
+          throw error;
+        }
+        if (existingSha !== commitSha)
           collision('Publication branch already exists');
-        throw error;
+        // else: benign resume -- fall through and persist the checkpoint.
       }
       const refAt = now().toISOString();
       record = await options.store.save(

@@ -20,7 +20,7 @@ import {
   type PublicationSqlExecutor,
 } from '../github/postgres-store.js';
 import { InMemoryPublicationStore } from '../github/store.js';
-import type { PublicationStore } from '../github/types.js';
+import type { PublicationPhase, PublicationStore } from '../github/types.js';
 import { createLocalGitPublisher } from './publisher.js';
 import { cleanupFixtures, fixtureRoot, seedRepo } from './test-support.js';
 
@@ -519,6 +519,163 @@ describe('local git publisher', () => {
       const fsck = await exec('git', ['-C', repo, 'fsck', '--full', '--strict']);
       expect(fsck.stdout.trim()).toBe('');
       expect(fsck.stderr.trim()).toBe('');
+    });
+  });
+
+  describe('resuming a crashed publish from its recorded phase', () => {
+    /** Wraps a real `PublicationStore` and throws once, synchronously
+     * before delegating, the first time `save` is asked to persist a given
+     * phase -- simulating a transient failure (e.g. a database blip)
+     * between two checkpoints of an otherwise-successful publish. */
+    class FailingOnceStore implements PublicationStore {
+      #failOnPhase: PublicationPhase | undefined;
+      constructor(
+        private readonly inner: PublicationStore,
+        failOnPhase: PublicationPhase,
+      ) {
+        this.#failOnPhase = failOnPhase;
+      }
+      async claim(
+        input: Parameters<PublicationStore['claim']>[0],
+      ): ReturnType<PublicationStore['claim']> {
+        return this.inner.claim(input);
+      }
+      async save(
+        ...args: Parameters<PublicationStore['save']>
+      ): ReturnType<PublicationStore['save']> {
+        const [, , patch] = args;
+        if (this.#failOnPhase !== undefined && patch.phase === this.#failOnPhase) {
+          this.#failOnPhase = undefined;
+          throw new Error('transient database failure');
+        }
+        return this.inner.save(...args);
+      }
+      async get(key: string): ReturnType<PublicationStore['get']> {
+        return this.inner.get(key);
+      }
+      async listEvents(): ReturnType<PublicationStore['listEvents']> {
+        return this.inner.listEvents();
+      }
+    }
+
+    async function recordFor(store: PublicationStore) {
+      const events = await store.listEvents();
+      const key = events[0]?.publicationKey;
+      expect(key).toBeDefined();
+      return store.get(key!);
+    }
+
+    it('resumes after a crash between the update-ref call and its ref_created checkpoint', async () => {
+      // The git branch/commit gets created successfully (update-ref runs
+      // fine), but persisting the ref_created checkpoint fails -- the
+      // durable record is left at 'commit_created'. A naive retry that
+      // treats "the ref already exists" as an automatic collision would be
+      // stuck here forever, since the checkpoint can never advance.
+      const inner = new InMemoryPublicationStore();
+      const root = await fixtureRoot();
+      const repo = await seedNestedRepo(root, 'exp-repo');
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      const manifest = manifestBody(repo, base);
+      const authorization = authorize(manifest);
+
+      const crashingStore = new FailingOnceStore(inner, 'ref_created');
+      const publisher1 = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store: crashingStore,
+        now: NOW,
+      });
+      await expect(
+        publisher1.publish({ manifest, authorization }),
+      ).rejects.toThrow('transient database failure');
+
+      const recordAfterCrash = await recordFor(inner);
+      expect(recordAfterCrash?.phase).toBe('commit_created');
+      // The branch really was created by the crashed attempt.
+      await expect(
+        git(repo, ['rev-parse', `refs/heads/agentos/run-1-${canonicalPublicationManifestDigest(manifest).slice(0, 8)}`]),
+      ).resolves.toMatch(/^[0-9a-f]{40}$/);
+
+      // A fresh publisher instance, sharing the same underlying store,
+      // resumes and succeeds.
+      const publisher2 = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store: inner,
+        now: NOW,
+      });
+      const result = await publisher2.publish({ manifest, authorization });
+
+      expect(result.status).toBe('succeeded');
+      const branchSha = await git(repo, [
+        'rev-parse',
+        `refs/heads/${result.branch}`,
+      ]);
+      expect(branchSha).toBe(result.commitSha);
+
+      const commitsOnTopOfBase = await git(repo, [
+        'rev-list',
+        '--count',
+        result.branch,
+        `^${base}`,
+      ]);
+      expect(commitsOnTopOfBase).toBe('1');
+
+      const finalRecord = await recordFor(inner);
+      expect(finalRecord?.phase).toBe('succeeded');
+      expect(finalRecord?.commitSha).toBe(result.commitSha);
+    });
+
+    it('resumes after a crash between ref_created and the final succeeded checkpoint', async () => {
+      // The ref_created checkpoint DID persist this time (crash happens one
+      // step later, while trying to persist the pr_created bridge phase) --
+      // the record is left at 'ref_created'. Resuming from here must not
+      // re-attempt update-ref at all (the create-only guard would reject a
+      // second attempt even for the correct commit).
+      const inner = new InMemoryPublicationStore();
+      const root = await fixtureRoot();
+      const repo = await seedNestedRepo(root, 'exp-repo');
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      const manifest = manifestBody(repo, base);
+      const authorization = authorize(manifest);
+
+      const crashingStore = new FailingOnceStore(inner, 'pr_created');
+      const publisher1 = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store: crashingStore,
+        now: NOW,
+      });
+      await expect(
+        publisher1.publish({ manifest, authorization }),
+      ).rejects.toThrow('transient database failure');
+
+      const recordAfterCrash = await recordFor(inner);
+      expect(recordAfterCrash?.phase).toBe('ref_created');
+
+      const publisher2 = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store: inner,
+        now: NOW,
+      });
+      const result = await publisher2.publish({ manifest, authorization });
+
+      expect(result.status).toBe('succeeded');
+      const commitsOnTopOfBase = await git(repo, [
+        'rev-list',
+        '--count',
+        result.branch,
+        `^${base}`,
+      ]);
+      expect(commitsOnTopOfBase).toBe('1');
+
+      const finalRecord = await recordFor(inner);
+      expect(finalRecord?.phase).toBe('succeeded');
     });
   });
 });
