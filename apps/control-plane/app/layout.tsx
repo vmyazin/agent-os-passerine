@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import './globals.css';
+import { AppRailNav } from '../src/ui/app-rail-nav';
 
 export const metadata: Metadata = {
   description: 'A control plane for Agent OS.',
@@ -23,13 +24,7 @@ export default function RootLayout({
             <a aria-label="Agent OS home" className="wordmark" href="/">
               Agent OS
             </a>
-            <nav aria-label="Primary navigation">
-              <a href="/">Overview</a>
-              <a href="/runs">Runs</a>
-              <a href="/inbox">Inbox</a>
-              <a href="/configuration">Configuration</a>
-              <a href="/setup">Setup</a>
-            </nav>
+            <AppRailNav />
             <footer className="app-rail-footer">Agent OS control plane</footer>
           </aside>
           <div className="app-content">
