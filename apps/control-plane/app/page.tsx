@@ -1,7 +1,9 @@
+// app/page.tsx
 import { controlPlaneService } from '../src/application/runtime';
 import { requirePageSession } from '../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../src/ui/components';
 import { countWaitingRuns } from '../src/ui/rail-status-model';
+import { timeOfDayGreeting } from '../src/ui/time-of-day-greeting';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,7 +21,7 @@ export default async function HomePage() {
     <div className="page-stack">
       <section aria-labelledby="page-title" className="page-heading">
         <p className="eyebrow">Overview</p>
-        <h1 id="page-title">Good morning, {session.login}.</h1>
+        <h1 id="page-title">{timeOfDayGreeting()}, {session.login}.</h1>
         <p>
           Monitor active work and answer the questions that need your judgment.
         </p>

@@ -1,8 +1,10 @@
+// tests/e2e/scaffold.spec.ts
 import { expect, test } from '@playwright/test';
 import {
   issueSession,
   SESSION_COOKIE,
 } from '../../apps/control-plane/src/auth/auth';
+import { timeOfDayGreeting } from '../../apps/control-plane/src/ui/time-of-day-greeting';
 
 test.beforeEach(async ({ context, page }) => {
   const session = issueSession(
@@ -39,7 +41,7 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
   await expect(
     page.getByRole('heading', {
       level: 1,
-      name: 'Good morning, test-operator.',
+      name: `${timeOfDayGreeting()}, test-operator.`,
     }),
   ).toBeVisible();
   await expect(
@@ -111,7 +113,7 @@ test('operator can sign in via the localhost "Get In" bypass CTA', async ({
   await expect(
     page.getByRole('heading', {
       level: 1,
-      name: 'Good morning, test-operator.',
+      name: `${timeOfDayGreeting()}, test-operator.`,
     }),
   ).toBeVisible();
 });
