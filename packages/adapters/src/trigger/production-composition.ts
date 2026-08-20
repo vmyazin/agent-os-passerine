@@ -5,12 +5,16 @@ import {
   type AgentOsConfig,
   type AttestationVerifier,
   type ConfigSnapshot,
-  type GitHubPublicationRepository,
   type PublicationAuthorizationClaims,
   type PublicationManifestBody,
 } from '@agentos/core';
 
 import { createNeonPublicationStore } from '../github/postgres-store.js';
+import {
+  githubRepositoryBindingKey,
+  parseGitHubRepositoryAllowlist,
+  selectGitHubRepositoryFromUrl,
+} from '../github/repository-allowlist.js';
 import {
   createTrustedGitHubPublisherService,
   type TrustedPublicationPolicyResolver,
@@ -22,6 +26,8 @@ import type { FeatureRole, FeatureWorkflowRoles } from './types.js';
 type Environment = Readonly<Record<string, string | undefined>>;
 
 let initialized: Promise<FeatureWorkflowTaskHandler> | undefined;
+
+const githubPublicationTargets = new Map<string, PublicationTarget>();
 
 const FEATURE_ROLES: readonly FeatureRole[] = [
   'specification',
@@ -172,14 +178,6 @@ function required(environment: Environment, name: string): string {
   return value;
 }
 
-function parsedJson<T>(environment: Environment, name: string): T {
-  try {
-    return JSON.parse(required(environment, name)) as T;
-  } catch {
-    throw new Error(`${name} must contain valid JSON`);
-  }
-}
-
 export interface PublicationTarget {
   readonly publisher: { publish(input: unknown): Promise<unknown> };
   readonly repository: PublicationManifestBody['repository'];
@@ -221,12 +219,17 @@ export function composePublicationTarget(
     );
 
   if (repositoryUrl !== undefined) {
-    const selectedRepositories = parsedJson<GitHubPublicationRepository[]>(
-      options.environment,
+    const selectedRepositories = parseGitHubRepositoryAllowlist(
+      required(options.environment, 'GITHUB_SELECTED_REPOSITORIES_JSON'),
       'GITHUB_SELECTED_REPOSITORIES_JSON',
     );
-    if (selectedRepositories.length !== 1)
-      throw new Error('the POC requires exactly one selected repository');
+    const selected = selectGitHubRepositoryFromUrl(
+      repositoryUrl,
+      selectedRepositories,
+    );
+    const cacheKey = githubRepositoryBindingKey(selected);
+    const cached = githubPublicationTargets.get(cacheKey);
+    if (cached !== undefined) return cached;
     const publisher = createTrustedGitHubPublisherService({
       githubApp: {
         appId: Number(required(options.environment, 'GITHUB_APP_ID')),
@@ -240,11 +243,13 @@ export function composePublicationTarget(
         ? {}
         : { isCancelled: options.isCancelled }),
     });
-    return {
-      publisher: { publish: async (input) => publisher.publish(input) },
-      repository: selectedRepositories[0]!,
-      audience: 'github-publisher',
+    const target = {
+      publisher: { publish: async (input: unknown) => publisher.publish(input) },
+      repository: selected,
+      audience: 'github-publisher' as const,
     };
+    githubPublicationTargets.set(cacheKey, target);
+    return target;
   }
 
   const workspacesRoot = required(

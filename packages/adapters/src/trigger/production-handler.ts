@@ -519,28 +519,6 @@ export async function createProductionFeatureWorkflowFromEnv(
         policyResolver: publicationPolicyResolver,
         isCancelled: publicationIsCancelled,
       });
-      if (config.project.repository !== undefined) {
-        const configuredRepository = new URL(config.project.repository);
-        const configuredPath = configuredRepository.pathname
-          .replace(/^\//, '')
-          .replace(/\.git$/, '');
-        // `target.repository` is the GitHub shape whenever
-        // config.project.repository is set -- composePublicationTarget's
-        // GitHub branch is exactly the branch taken here.
-        const selectedRepository = target.repository as {
-          readonly owner: string;
-          readonly name: string;
-        };
-        if (
-          configuredRepository.hostname !== 'github.com' ||
-          configuredPath !==
-            `${selectedRepository.owner}/${selectedRepository.name}`
-        ) {
-          throw new Error(
-            'stored config repository is outside the selected GitHub repository',
-          );
-        }
-      }
       const source = sourceBundles.get(snapshot.runId);
       if (source === undefined) throw new Error('source bundle is unavailable');
       const commands = parsedJson<

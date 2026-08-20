@@ -23,7 +23,7 @@ interface Readiness {
   readonly ready: boolean;
   readonly readyForGitHub: boolean;
   readonly readyForLocal: boolean;
-  readonly repository?: string;
+  readonly repositories?: readonly string[];
   readonly groups: readonly ReadinessGroup[];
 }
 
@@ -345,8 +345,9 @@ export function SetupWizard() {
               {modeReady
                 ? 'Every subsystem is configured.'
                 : 'Set the missing variables in .env.local, restart the control plane, then check again.'}
-              {readiness.repository !== undefined
-                ? ` Bound repository: ${readiness.repository}.`
+              {readiness.repositories !== undefined &&
+              readiness.repositories.length > 0
+                ? ` Bound repositories: ${readiness.repositories.join(', ')}.`
                 : ''}
             </p>
             <ul>

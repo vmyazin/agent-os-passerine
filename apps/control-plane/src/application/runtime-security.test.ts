@@ -44,7 +44,7 @@ describe('control-plane GitHub reader identity', () => {
     process.env.GITHUB_READER_APP_ID = '43';
     process.env.GITHUB_READER_SELECTED_REPOSITORIES_JSON = JSON.stringify([
       {
-        installationId: 2,
+        installationId: 1,
         owner: 'team',
         name: 'repo',
         repositoryId: 3,
@@ -79,7 +79,7 @@ describe('control-plane GitHub reader identity', () => {
     process.env.GITHUB_READER_APP_ID = '43';
     process.env.GITHUB_READER_SELECTED_REPOSITORIES_JSON = JSON.stringify([
       {
-        installationId: 2,
+        installationId: 1,
         owner: 'team',
         name: 'repo',
         repositoryId: 3,

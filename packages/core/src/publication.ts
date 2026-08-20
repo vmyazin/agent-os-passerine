@@ -95,7 +95,7 @@ const branchSchema = z
     }
     return true;
   }, 'invalid base branch');
-const githubRepositorySchema = z
+export const githubRepositorySchema = z
   .object({
     owner: z.string().regex(OWNER, 'invalid repository owner'),
     name: z.string().regex(REPOSITORY, 'invalid repository name'),

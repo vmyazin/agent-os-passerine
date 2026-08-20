@@ -1,4 +1,13 @@
 export {
+  assertReaderPublisherRepositoryPairing,
+  githubOwnerNameFromUrl,
+  githubRepositoryBindingKey,
+  listGitHubRepositoryBindings,
+  parseGitHubRepositoryAllowlist,
+  sameRepositoryIdentity,
+  selectGitHubRepositoryFromUrl,
+} from './repository-allowlist.js';
+export {
   createTrustedGitHubPublisherService,
   type TrustedGitHubPublisherService,
   type TrustedGitHubPublisherServiceOptions,

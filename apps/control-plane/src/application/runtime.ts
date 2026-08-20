@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 
 import {
   assertContainedRepository,
+  assertReaderPublisherRepositoryPairing,
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
@@ -19,7 +20,10 @@ import {
   createTrustedRepositoryHeadResolver,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
+  githubRepositoryBindingKey,
+  parseGitHubRepositoryAllowlist,
   runGit,
+  selectGitHubRepositoryFromUrl,
   kimiFromEnv,
   type TrustedSourceSnapshotIngestor,
 } from '@agentos/adapters';
@@ -107,32 +111,25 @@ function trustedReaderConfiguration() {
     throw new Error(
       'GITHUB_READER_APP_ID must identify a separate read-only GitHub App',
     );
-  const selectedRepositories = parsedRuntimeJson<GitHubPublicationRepository[]>(
+  const readerRepositories = parseGitHubRepositoryAllowlist(
+    requiredRuntime('GITHUB_READER_SELECTED_REPOSITORIES_JSON'),
     'GITHUB_READER_SELECTED_REPOSITORIES_JSON',
   );
-  if (selectedRepositories.length !== 1)
-    throw new Error('the POC requires exactly one selected reader repository');
-  const publisherRepositories = parsedRuntimeJson<
-    GitHubPublicationRepository[]
-  >('GITHUB_SELECTED_REPOSITORIES_JSON');
-  const readerRepository = selectedRepositories[0]!;
-  const publisherRepository = publisherRepositories[0];
-  if (
-    publisherRepositories.length !== 1 ||
-    publisherRepository === undefined ||
-    publisherRepository.owner !== readerRepository.owner ||
-    publisherRepository.name !== readerRepository.name ||
-    publisherRepository.repositoryId !== readerRepository.repositoryId
-  )
-    throw new Error(
-      'reader and publisher GitHub Apps must bind the same selected repository',
-    );
+  const publisherRepositories = parseGitHubRepositoryAllowlist(
+    requiredRuntime('GITHUB_SELECTED_REPOSITORIES_JSON'),
+    'GITHUB_SELECTED_REPOSITORIES_JSON',
+  );
+  assertReaderPublisherRepositoryPairing(
+    readerRepositories,
+    publisherRepositories,
+  );
   return {
     githubApp: {
       appId: readerAppId,
       privateKey: requiredRuntime('GITHUB_READER_APP_PRIVATE_KEY'),
     },
-    selectedRepositories,
+    readerRepositories,
+    publisherRepositories,
   };
 }
 
@@ -155,7 +152,7 @@ export function repositoryHeadResolverFromEnv(): {
   let github:
     | {
         readonly resolver: ReturnType<typeof createTrustedRepositoryHeadResolver>;
-        readonly selected: GitHubPublicationRepository;
+        readonly readerRepositories: readonly GitHubPublicationRepository[];
       }
     | undefined;
   const getGithub = () => {
@@ -174,7 +171,7 @@ export function repositoryHeadResolverFromEnv(): {
         resolver: createTrustedRepositoryHeadResolver({
           githubApp: reader.githubApp,
         }),
-        selected: reader.selectedRepositories[0]!,
+        readerRepositories: reader.readerRepositories,
       };
     }
     return github;
@@ -203,14 +200,18 @@ export function repositoryHeadResolverFromEnv(): {
       }
       if (config.project.repository === undefined)
         throw new Error('GitHub repository URL is required');
-      const { resolver, selected } = getGithub();
+      const { resolver, readerRepositories } = getGithub();
+      const selected = selectGitHubRepositoryFromUrl(
+        config.project.repository,
+        readerRepositories,
+      );
       const repositorySha = await resolver.resolve({
         repository: selected,
         repositoryUrl: config.project.repository,
         defaultBranch: config.project.defaultBranch,
       });
       return {
-        repository: `${selected.owner}/${selected.name}`,
+        repository: githubRepositoryBindingKey(selected),
         branch: config.project.defaultBranch,
         repositorySha,
       };
@@ -439,29 +440,42 @@ export function workflowDispatchFromEnv() {
     return { run, config, repositorySha };
   };
 
-  // Built lazily, one per process: the GitHub ingestor needs the trusted
-  // reader env (GITHUB_READER_*), which a local-only deployment must not be
-  // required to set. Each is constructed only the first time a run actually
-  // needs that path.
-  let githubIngestor: TrustedSourceSnapshotIngestor | undefined;
-  const getGithubIngestor = (): TrustedSourceSnapshotIngestor =>
-    (githubIngestor ??= (() => {
-      const reader = eagerReader ?? trustedReaderConfiguration();
-      return createTrustedSourceSnapshotIngestor({
-        githubApp: { ...reader.githubApp },
-        artifacts,
-        resolveBinding: async (runId) => {
-          const resolved = await resolveSourceSnapshotRun(runId);
-          return {
-            projectId: resolved.run.projectId,
-            runId: resolved.run.id,
-            repositorySha: resolved.repositorySha,
-            baseBranch: resolved.config.project.defaultBranch,
-            repository: reader.selectedRepositories[0]!,
-          };
-        },
-      });
-    })());
+  // Built lazily, one ingestor per allowlisted repository: the GitHub
+  // ingestor needs the trusted reader env (GITHUB_READER_*), which a
+  // local-only deployment must not be required to set.
+  const githubIngestors = new Map<string, TrustedSourceSnapshotIngestor>();
+  const getGithubIngestor = (
+    repository: GitHubPublicationRepository,
+  ): TrustedSourceSnapshotIngestor => {
+    const cacheKey = githubRepositoryBindingKey(repository);
+    const cached = githubIngestors.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const reader = eagerReader ?? trustedReaderConfiguration();
+    const ingestor = createTrustedSourceSnapshotIngestor({
+      githubApp: { ...reader.githubApp },
+      artifacts,
+      resolveBinding: async (runId) => {
+        const resolved = await resolveSourceSnapshotRun(runId);
+        if (resolved.config.project.repository === undefined)
+          throw new Error('source snapshot binding is not a GitHub run');
+        const selected = selectGitHubRepositoryFromUrl(
+          resolved.config.project.repository,
+          reader.readerRepositories,
+        );
+        if (githubRepositoryBindingKey(selected) !== cacheKey)
+          throw new Error('source snapshot repository binding mismatch');
+        return {
+          projectId: resolved.run.projectId,
+          runId: resolved.run.id,
+          repositorySha: resolved.repositorySha,
+          baseBranch: resolved.config.project.defaultBranch,
+          repository: selected,
+        };
+      },
+    });
+    githubIngestors.set(cacheKey, ingestor);
+    return ingestor;
+  };
 
   let localIngestor: TrustedSourceSnapshotIngestor | undefined;
   const getLocalIngestor = (): TrustedSourceSnapshotIngestor =>
@@ -494,9 +508,16 @@ export function workflowDispatchFromEnv() {
   const sourceSnapshot: TrustedSourceSnapshotIngestor = {
     async ensure(runId) {
       const resolved = await resolveSourceSnapshotRun(runId);
-      return resolved.config.project.localPath !== undefined
-        ? getLocalIngestor().ensure(runId)
-        : getGithubIngestor().ensure(runId);
+      if (resolved.config.project.localPath !== undefined)
+        return getLocalIngestor().ensure(runId);
+      if (resolved.config.project.repository === undefined)
+        throw new Error('source snapshot binding requires a repository URL');
+      const reader = eagerReader ?? trustedReaderConfiguration();
+      const selected = selectGitHubRepositoryFromUrl(
+        resolved.config.project.repository,
+        reader.readerRepositories,
+      );
+      return getGithubIngestor(selected).ensure(runId);
     },
   };
   let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;

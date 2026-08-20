@@ -593,4 +593,55 @@ describe('composePublicationTarget', () => {
     });
     expect(target.audience).toBe('github-publisher');
   });
+
+  it('selects the configured repository from a multi-entry allowlist', () => {
+    const privateKey = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    }).privateKey;
+    const env = environment({
+      GITHUB_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+        {
+          owner: 'team-zork',
+          name: 'other',
+          installationId: 1,
+          repositoryId: 9,
+        },
+        {
+          owner: 'team-zork',
+          name: 'sandbox',
+          installationId: 1,
+          repositoryId: 2,
+        },
+      ]),
+      GITHUB_APP_ID: '1',
+      GITHUB_APP_PRIVATE_KEY: privateKey,
+    });
+    const target = composePublicationTarget(githubConfig, {
+      environment: env,
+      authorizationVerifier,
+      policy: {},
+      policyResolver,
+    });
+    expect(target.repository).toEqual({
+      owner: 'team-zork',
+      name: 'sandbox',
+      installationId: 1,
+      repositoryId: 2,
+    });
+    expect(() =>
+      composePublicationTarget(
+        projectConfig(
+          '{ name: exp, repository: https://github.com/team-zork/unlisted }',
+        ),
+        {
+          environment: env,
+          authorizationVerifier,
+          policy: {},
+          policyResolver,
+        },
+      ),
+    ).toThrow(/allowlist/i);
+  });
 });

@@ -10,7 +10,7 @@ import {
   GET as getLocalRepositoryDisallowed,
   POST as createLocalRepository,
 } from '../../app/api/setup/local-repository/route';
-import { setupReadiness } from '../application/setup-readiness';
+import { setupReadiness, projectSetupReadinessFromYaml } from '../application/setup-readiness';
 import { resetControlPlaneServiceForTests } from '../application/runtime';
 import { resetRepositoryForTests } from '../persistence/repository-factory';
 
@@ -74,7 +74,7 @@ describe('setup readiness model', () => {
       ]),
     });
     expect(readiness.ready).toBe(false);
-    expect(readiness.repository).toBe('octo/repo');
+    expect(readiness.repositories).toEqual(['octo/repo']);
     const database = readiness.groups.find((group) => group.id === 'database');
     expect(database?.ready).toBe(true);
     const trust = readiness.groups.find((group) => group.id === 'trust');
@@ -90,14 +90,75 @@ describe('setup readiness model', () => {
     );
   });
 
-  it('omits the repository for malformed bindings', () => {
+  it('omits repositories for malformed bindings', () => {
     expect(
       setupReadiness({ GITHUB_SELECTED_REPOSITORIES_JSON: 'not-json' })
-        .repository,
+        .repositories,
     ).toBeUndefined();
     expect(
-      setupReadiness({ GITHUB_SELECTED_REPOSITORIES_JSON: '[]' }).repository,
+      setupReadiness({ GITHUB_SELECTED_REPOSITORIES_JSON: '[]' }).repositories,
     ).toBeUndefined();
+  });
+
+  it('lists every publisher allowlist entry', () => {
+    const readiness = setupReadiness({
+      GITHUB_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+        { owner: 'octo', name: 'one', installationId: 1, repositoryId: 2 },
+        { owner: 'octo', name: 'two', installationId: 1, repositoryId: 3 },
+      ]),
+    });
+    expect(readiness.repositories).toEqual(['octo/one', 'octo/two']);
+  });
+
+  it('reports per-project readiness against the GitHub allowlist', () => {
+    const env = {
+      GITHUB_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+        { owner: 'octo', name: 'repo', installationId: 1, repositoryId: 2 },
+      ]),
+      GITHUB_READER_SELECTED_REPOSITORIES_JSON: JSON.stringify([
+        { owner: 'octo', name: 'repo', installationId: 1, repositoryId: 2 },
+      ]),
+    };
+    const allowed = projectSetupReadinessFromYaml(
+      env,
+      `
+version: 1
+project:
+  name: Demo
+  repository: https://github.com/octo/repo
+  defaultBranch: main
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`,
+    );
+    expect(allowed.ready).toBe(true);
+    expect(allowed.repository).toBe('octo/repo');
+
+    const blocked = projectSetupReadinessFromYaml(
+      env,
+      `
+version: 1
+project:
+  name: Demo
+  repository: https://github.com/octo/other
+  defaultBranch: main
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`,
+    );
+    expect(blocked.ready).toBe(false);
   });
 
   it('relabels the GitHub group and reports readyForLocal once local workspaces are configured', () => {

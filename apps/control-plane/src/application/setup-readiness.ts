@@ -1,3 +1,12 @@
+import { loadAgentOsConfig, type AgentOsConfig } from '@agentos/core';
+
+import {
+  assertReaderPublisherRepositoryPairing,
+  listGitHubRepositoryBindings,
+  parseGitHubRepositoryAllowlist,
+  selectGitHubRepositoryFromUrl,
+} from '@agentos/adapters';
+
 export interface SetupReadinessItem {
   readonly key: string;
   readonly label: string;
@@ -12,13 +21,22 @@ export interface SetupReadinessGroup {
   readonly items: readonly SetupReadinessItem[];
 }
 
-export interface SetupReadiness {
+export interface DeploymentSetupReadiness {
   readonly ready: boolean;
   readonly readyForGitHub: boolean;
   readonly readyForLocal: boolean;
-  readonly repository?: string;
+  readonly repositories?: readonly string[];
   readonly groups: readonly SetupReadinessGroup[];
 }
+
+export interface ProjectSetupReadiness {
+  readonly ready: boolean;
+  readonly repository?: string;
+  readonly items: readonly SetupReadinessItem[];
+}
+
+/** Backward-compatible alias for the setup wizard's deployment step. */
+export type SetupReadiness = DeploymentSetupReadiness;
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -44,27 +62,30 @@ function group(
   return { id, title, ready: items.every((entry) => entry.ready), items };
 }
 
-function boundRepository(environment: Environment): string | undefined {
+function githubAllowlistReady(environment: Environment): boolean {
   try {
-    const parsed: unknown = JSON.parse(
-      environment.GITHUB_SELECTED_REPOSITORIES_JSON ?? '',
+    const reader = parseGitHubRepositoryAllowlist(
+      environment.GITHUB_READER_SELECTED_REPOSITORIES_JSON ?? '',
+      'GITHUB_READER_SELECTED_REPOSITORIES_JSON',
     );
-    if (!Array.isArray(parsed) || parsed.length !== 1) return undefined;
-    const entry = parsed[0] as { owner?: unknown; name?: unknown };
-    if (typeof entry.owner !== 'string' || typeof entry.name !== 'string')
-      return undefined;
-    return `${entry.owner}/${entry.name}`;
+    const publisher = parseGitHubRepositoryAllowlist(
+      environment.GITHUB_SELECTED_REPOSITORIES_JSON ?? '',
+      'GITHUB_SELECTED_REPOSITORIES_JSON',
+    );
+    assertReaderPublisherRepositoryPairing(reader, publisher);
+    return true;
   } catch {
-    return undefined;
+    return false;
   }
 }
 
 /**
- * Reports which subsystems the environment has configured, as booleans only.
- * The report never contains environment values: the wizard shows what is
- * missing, and the operator edits the environment file outside the app.
+ * Deployment-wide readiness: database, dispatch, storage, GitHub Apps env,
+ * local workspaces, and trust anchors. Never echoes secret values.
  */
-export function setupReadiness(environment: Environment): SetupReadiness {
+export function deploymentSetupReadiness(
+  environment: Environment,
+): DeploymentSetupReadiness {
   const groups: SetupReadinessGroup[] = [
     group('database', 'Database', [
       item(
@@ -144,8 +165,8 @@ export function setupReadiness(environment: Environment): SetupReadiness {
       item(
         environment,
         'GITHUB_READER_SELECTED_REPOSITORIES_JSON',
-        'Reader repository binding',
-        'Exactly one bound repository for the reader.',
+        'Reader repository allowlist',
+        'One or more bound repositories for the reader app.',
       ),
       item(
         environment,
@@ -162,9 +183,16 @@ export function setupReadiness(environment: Environment): SetupReadiness {
       item(
         environment,
         'GITHUB_SELECTED_REPOSITORIES_JSON',
-        'Publisher repository binding',
-        'Exactly one bound repository for the publisher.',
+        'Publisher repository allowlist',
+        'One or more bound repositories for the publisher app.',
       ),
+      {
+        key: 'github.repository_pairing',
+        label: 'Reader/publisher pairing',
+        ready: githubAllowlistReady(environment),
+        hint:
+          'Reader and publisher allowlists must list the same repositories.',
+      },
     ]),
     group('local', 'Local workspaces (experiments)', [
       item(
@@ -227,7 +255,9 @@ export function setupReadiness(environment: Environment): SetupReadiness {
       ),
     ]),
   ];
-  const repository = boundRepository(environment);
+  const repositories = listGitHubRepositoryBindings(
+    environment.GITHUB_SELECTED_REPOSITORIES_JSON,
+  );
   const github = groups.find((entry) => entry.id === 'github');
   const local = groups.find((entry) => entry.id === 'local');
   const ready = groups
@@ -237,7 +267,87 @@ export function setupReadiness(environment: Environment): SetupReadiness {
     ready,
     readyForGitHub: ready && (github?.ready ?? false),
     readyForLocal: ready && (local?.ready ?? false),
-    ...(repository === undefined ? {} : { repository }),
+    ...(repositories === undefined ? {} : { repositories }),
     groups,
   };
+}
+
+/** Per-project readiness for a GitHub-bound configuration. */
+export function projectSetupReadiness(
+  environment: Environment,
+  config: AgentOsConfig,
+): ProjectSetupReadiness {
+  if (config.project.localPath !== undefined) {
+    const localReady = present(environment, 'AGENTOS_LOCAL_WORKSPACES_ROOT');
+    return {
+      ready: localReady,
+      items: [
+        {
+          key: 'project.localPath',
+          label: 'Local repository binding',
+          ready: localReady,
+          hint: 'Local experiment projects require AGENTOS_LOCAL_WORKSPACES_ROOT.',
+        },
+      ],
+    };
+  }
+  if (config.project.repository === undefined) {
+    return {
+      ready: false,
+      items: [
+        {
+          key: 'project.repository',
+          label: 'Project repository binding',
+          ready: false,
+          hint: 'Project must configure either repository or localPath.',
+        },
+      ],
+    };
+  }
+  let allowlistReady: boolean;
+  let selectedRepository: string | undefined;
+  try {
+    const publisher = parseGitHubRepositoryAllowlist(
+      environment.GITHUB_SELECTED_REPOSITORIES_JSON ?? '',
+      'GITHUB_SELECTED_REPOSITORIES_JSON',
+    );
+    const reader = parseGitHubRepositoryAllowlist(
+      environment.GITHUB_READER_SELECTED_REPOSITORIES_JSON ?? '',
+      'GITHUB_READER_SELECTED_REPOSITORIES_JSON',
+    );
+    assertReaderPublisherRepositoryPairing(reader, publisher);
+    const selected = selectGitHubRepositoryFromUrl(
+      config.project.repository,
+      publisher,
+    );
+    allowlistReady = true;
+    selectedRepository = `${selected.owner}/${selected.name}`;
+  } catch {
+    allowlistReady = false;
+  }
+  return {
+    ready: allowlistReady,
+    ...(selectedRepository === undefined ? {} : { repository: selectedRepository }),
+    items: [
+      {
+        key: 'project.repository',
+        label: 'GitHub repository allowlist',
+        ready: allowlistReady,
+        hint:
+          'The configured repository URL must match an entry in the deployment allowlist.',
+      },
+    ],
+  };
+}
+
+export function projectSetupReadinessFromYaml(
+  environment: Environment,
+  yaml: string,
+): ProjectSetupReadiness {
+  return projectSetupReadiness(environment, loadAgentOsConfig(yaml));
+}
+
+/** Deployment readiness report for the setup wizard step 1. */
+export function setupReadiness(environment: Environment): SetupReadiness {
+  return deploymentSetupReadiness(environment);
 }
