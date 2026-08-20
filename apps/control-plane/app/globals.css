@@ -652,14 +652,33 @@ textarea {
   color: var(--danger-ink);
 }
 
+/* The inbox is a full-height mailbox: the document stops scrolling and
+   each pane scrolls on its own. Scoped with :has so every other page
+   keeps normal document flow. */
+.app-content-scroll:has(.inbox-page) {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-content-scroll:has(.inbox-page) main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .inbox-page {
   display: grid;
+  flex: 1 1 auto;
   gap: 1rem;
-  padding-block: 1.25rem 3rem;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  padding-block: 1.25rem 1.5rem;
 }
 
 .mailbox {
   overflow: hidden;
+  min-height: 0;
   border: 1px solid var(--line-soft);
   border-radius: 0.75rem;
   background: var(--surface-sheet);
@@ -680,11 +699,14 @@ textarea {
 .mailbox-layout {
   display: grid;
   grid-template-columns: minmax(17rem, 22rem) minmax(0, 1fr);
-  min-height: 36rem;
+  height: 100%;
+  min-height: 0;
 }
 
 .inbox-queue {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   border-right: 1px solid var(--line-soft);
   background: color-mix(
     in srgb,
@@ -694,8 +716,6 @@ textarea {
 }
 
 .inbox-queue ol {
-  max-height: 44rem;
-  overflow-y: auto;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -811,6 +831,8 @@ textarea {
 
 .inbox-reading-pane {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   padding: 1.5rem clamp(1.25rem, 4vw, 3rem) 2.5rem;
 }
 
@@ -1071,17 +1093,25 @@ div.inbox-message-copy {
     padding-block: 0.75rem 2.5rem;
   }
 
+  /* Stacked mobile layout returns to natural document flow: the queue
+     is capped and scrolls, the reading pane flows with the page. */
+  .inbox-page {
+    grid-template-rows: none;
+  }
+
   .mailbox-layout {
     grid-template-columns: minmax(0, 1fr);
+    height: auto;
   }
 
   .inbox-queue {
+    max-height: 16.5rem;
     border-right: 0;
     border-bottom: 1px solid var(--line-soft);
   }
 
-  .inbox-queue ol {
-    max-height: 16.5rem;
+  .inbox-reading-pane {
+    overflow-y: visible;
   }
 
   .inbox-row {
@@ -1126,10 +1156,6 @@ div.inbox-message-copy {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.inbox-queue-section ol {
-  max-height: 22rem;
 }
 
 .inbox-chip {
