@@ -5,15 +5,17 @@ import type { ReactNode } from 'react';
 import './globals.css';
 import { AppRailNav } from '../src/ui/app-rail-nav';
 import { AppRailStatus } from '../src/ui/app-rail-status';
+import { fetchRailCounts } from '../src/ui/rail-counts';
 
 export const metadata: Metadata = {
   description: 'A control plane for Agent OS.',
   title: 'Agent OS',
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
+  const counts = await fetchRailCounts();
   return (
     <html lang="en">
       <body>
@@ -25,11 +27,11 @@ export default function RootLayout({
             <a aria-label="Agent OS home" className="wordmark" href="/">
               Agent OS
             </a>
-            <AppRailNav />
+            <AppRailNav inboxCount={counts?.inboxCount ?? 0} />
             <footer className="app-rail-footer">Agent OS control plane</footer>
           </aside>
           <div className="app-content">
-            <AppRailStatus />
+            <AppRailStatus counts={counts} />
             <div className="app-content-scroll">
               <main id="main-content">{children}</main>
             </div>

@@ -26,7 +26,11 @@ function isNavItemActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-export function AppRailNav() {
+export function AppRailNav({
+  inboxCount = 0,
+}: {
+  readonly inboxCount?: number;
+}) {
   const pathname = usePathname();
 
   return (
@@ -34,7 +38,14 @@ export function AppRailNav() {
       {NAV_ITEMS.map((item) => {
         const { href, label } = item;
         const isActive = isNavItemActive(pathname, href);
-        const count = 'count' in item ? item.count : undefined;
+        const count =
+          href === '/inbox'
+            ? inboxCount > 0
+              ? inboxCount
+              : undefined
+            : 'count' in item
+              ? item.count
+              : undefined;
 
         return (
           <a
