@@ -400,6 +400,7 @@ export interface RunProjection extends PersistenceDigests {
     stepKey: string;
     attempt: number;
     status: string;
+    model?: string;
   }[];
   readonly timeline: readonly {
     eventId: string;
@@ -1215,11 +1216,20 @@ export class ControlPlaneService {
   }
 
   private async project(run: WorkflowRun): Promise<RunProjection> {
-    const [steps, events, goal] = await Promise.all([
+    const [steps, events, goal, usage] = await Promise.all([
       this.repository.listStepRuns(run.id, { limit: 100 }),
       this.repository.listEvents(run.id, { limit: 1_000 }),
       this.projectGoal(run),
+      this.repository.listUsage(run.id, { limit: 1_000 }),
     ]);
+    // Usage records carry the model that actually executed each step (the
+    // provider-reported identity), which is stronger evidence than the
+    // configured model profile.
+    const stepModels = new Map<string, string>();
+    for (const entry of usage) {
+      if (entry.stepRunId !== undefined && !stepModels.has(entry.stepRunId))
+        stepModels.set(entry.stepRunId, redactText(entry.model).slice(0, 120));
+    }
     const safeInput = projectRunInput(run.input);
     const safeError = projectRunError(run.error);
     return {
@@ -1238,6 +1248,9 @@ export class ControlPlaneService {
         stepKey: step.stepKey,
         attempt: step.attempt,
         status: step.status,
+        ...(stepModels.has(step.id)
+          ? { model: stepModels.get(step.id)! }
+          : {}),
       })),
       timeline: events.map((event) => {
         const payload = projectEventPayload(event.payload);

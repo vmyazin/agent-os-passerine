@@ -87,7 +87,15 @@ export default async function RunPage({
             {run.steps.map((step) => (
               <li key={step.id}>
                 <strong>{step.stepKey}</strong>
-                <span>{step.status}</span>
+                <span>
+                  {step.status}
+                  {step.model === undefined ? null : (
+                    <>
+                      {' · '}
+                      <code>{step.model}</code>
+                    </>
+                  )}
+                </span>
               </li>
             ))}
           </ol>

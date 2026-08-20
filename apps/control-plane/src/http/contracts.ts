@@ -204,6 +204,7 @@ export const runProjectionSchema = z
           stepKey: z.string(),
           attempt: z.number(),
           status: z.string(),
+          model: z.string().max(120).optional(),
         })
         .strict(),
     ),
