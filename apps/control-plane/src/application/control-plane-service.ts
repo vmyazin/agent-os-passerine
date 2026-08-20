@@ -393,6 +393,11 @@ export interface RunProjection extends PersistenceDigests {
       readonly draftPullRequestUrl?: string;
     }[];
   };
+  readonly outcome?: {
+    readonly draftPullRequestUrl?: string;
+    readonly localBranch?: string;
+    readonly localRepositoryUrl?: string;
+  };
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
   readonly steps: readonly {
@@ -429,6 +434,26 @@ function projectRunInput(value: JsonValue | undefined): RunProjection['input'] {
   return {
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
+  };
+}
+
+function projectRunOutcome(
+  value: JsonValue | undefined,
+): RunProjection['outcome'] {
+  const source = record(value);
+  const draftPullRequestUrl = safeString(source, 'draftPullRequestUrl');
+  const localBranch = safeString(source, 'localBranch');
+  const localRepositoryUrl = safeString(source, 'localRepositoryUrl');
+  if (
+    draftPullRequestUrl === undefined &&
+    localBranch === undefined &&
+    localRepositoryUrl === undefined
+  )
+    return undefined;
+  return {
+    ...(draftPullRequestUrl === undefined ? {} : { draftPullRequestUrl }),
+    ...(localBranch === undefined ? {} : { localBranch }),
+    ...(localRepositoryUrl === undefined ? {} : { localRepositoryUrl }),
   };
 }
 
@@ -1232,6 +1257,7 @@ export class ControlPlaneService {
     }
     const safeInput = projectRunInput(run.input);
     const safeError = projectRunError(run.error);
+    const outcome = projectRunOutcome(run.output);
     return {
       id: run.id,
       projectId: run.projectId,
@@ -1240,6 +1266,7 @@ export class ControlPlaneService {
       ...(safeInput === undefined ? {} : { input: safeInput }),
       ...(safeError === undefined ? {} : { error: safeError }),
       ...(goal === undefined ? {} : { goal }),
+      ...(outcome === undefined ? {} : { outcome }),
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       ...provenance(run),

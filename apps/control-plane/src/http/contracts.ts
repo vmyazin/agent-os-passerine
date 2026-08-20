@@ -189,6 +189,14 @@ export const runProjectionSchema = z
       })
       .strict()
       .optional(),
+    outcome: z
+      .object({
+        draftPullRequestUrl: z.string().max(2_048).optional(),
+        localBranch: z.string().max(2_048).optional(),
+        localRepositoryUrl: z.string().max(2_048).optional(),
+      })
+      .strict()
+      .optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
     repositorySha: z.string(),

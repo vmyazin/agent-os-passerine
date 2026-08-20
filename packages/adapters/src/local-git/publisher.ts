@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 
 import {
+  canonicalPublicationPolicyDigest,
   DEFAULT_PUBLICATION_POLICY,
   evaluatePublicationPolicy,
   isLocalRepository,
+  normalizePublicationPolicySnapshot,
   parsePublicationManifest,
   validatePublicationAuthorization,
   type AttestationVerifier,
@@ -304,6 +306,14 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
       rejected('GitHub publications must use the trusted GitHub publisher');
 
     verifyAuthorization(parsed, options.verifier, now());
+
+    const resolvedPolicyDigest = canonicalPublicationPolicyDigest(
+      normalizePublicationPolicySnapshot(
+        options.policy ?? DEFAULT_PUBLICATION_POLICY,
+      ),
+    );
+    if (resolvedPolicyDigest !== manifest.policyDigest)
+      rejected('publication policy digest mismatch');
 
     try {
       evaluatePublicationPolicy(

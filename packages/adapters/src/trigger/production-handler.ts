@@ -73,7 +73,9 @@ const sourceBundleSchema = z
         .object({
           kind: z.literal('local'),
           owner: z.literal('local'),
-          name: z.string().min(1).max(100),
+          name: z
+            .string()
+            .regex(/^(?!\.)(?!.*\.git$)[A-Za-z0-9._-]{1,100}$/i),
         })
         .strict(),
     ]),
@@ -859,6 +861,12 @@ export async function createProductionGoalWorkflowFromEnv(
                 ...(result.draftPullRequestUrl === undefined
                   ? {}
                   : { draftPullRequestUrl: result.draftPullRequestUrl }),
+                ...(result.localBranch === undefined
+                  ? {}
+                  : { localBranch: result.localBranch }),
+                ...(result.localRepositoryUrl === undefined
+                  ? {}
+                  : { localRepositoryUrl: result.localRepositoryUrl }),
                 ...(result.reason === undefined
                   ? {}
                   : { reason: result.reason }),

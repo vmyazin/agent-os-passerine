@@ -101,6 +101,29 @@ export default async function RunPage({
           </ol>
         )}
       </section>
+      {run.outcome === undefined ? null : (
+        <section aria-labelledby="outcome-title">
+          <h2 id="outcome-title">Outcome</h2>
+          {run.outcome.draftPullRequestUrl === undefined ? null : (
+            <p>
+              <a href={run.outcome.draftPullRequestUrl}>Draft pull request</a>
+            </p>
+          )}
+          {run.outcome.localBranch === undefined ? null : (
+            <p>
+              Local branch <code>{run.outcome.localBranch}</code>
+              {run.outcome.localRepositoryUrl === undefined ? null : (
+                <>
+                  {' '}
+                  in <code>{run.outcome.localRepositoryUrl}</code>
+                </>
+              )}
+              {' — inspect with '}
+              <code>git log {run.outcome.localBranch}</code>
+            </p>
+          )}
+        </section>
+      )}
       <section aria-labelledby="timeline-title">
         <h2 id="timeline-title">Sanitized timeline</h2>
         {run.timeline.length === 0 ? (

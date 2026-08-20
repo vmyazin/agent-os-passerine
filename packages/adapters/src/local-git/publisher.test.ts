@@ -270,6 +270,18 @@ describe('local git publisher', () => {
     ).rejects.toThrow('Publication base changed');
   });
 
+  it('rejects a manifest signed with a policyDigest that does not match the resolved policy', async () => {
+    const { repo, base, publisher } = await fixture();
+    const manifest = manifestBody(repo, base, {
+      policyDigest: 'f'.repeat(64),
+    });
+    const authorization = authorize(manifest);
+
+    await expect(
+      (async () => publisher.publish({ manifest, authorization }))(),
+    ).rejects.toThrow('publication policy digest mismatch');
+  });
+
   it('rejects a change touching a protected path', async () => {
     const { repo, base, publisher } = await fixture();
     const manifest = manifestBody(repo, base, {

@@ -308,6 +308,8 @@ export function SetupWizard() {
   const modeReady =
     readiness !== undefined &&
     (mode === 'github' ? readiness.readyForGitHub : readiness.readyForLocal);
+  const localNotReady =
+    mode === 'local' && readiness !== undefined && !readiness.readyForLocal;
 
   return (
     <div className="page-stack">
@@ -430,7 +432,11 @@ export function SetupWizard() {
             <div className="button-row">
               <button
                 className="secondary"
-                disabled={creatingLocalRepository || localName.trim() === ''}
+                disabled={
+                  creatingLocalRepository ||
+                  localName.trim() === '' ||
+                  localNotReady
+                }
                 onClick={() => void createLocalRepository()}
                 type="button"
               >
@@ -439,7 +445,7 @@ export function SetupWizard() {
               {TEST_PROJECTS.map((project) => (
                 <button
                   className="secondary"
-                  disabled={creatingLocalRepository}
+                  disabled={creatingLocalRepository || localNotReady}
                   key={project.key}
                   onClick={() => void fillTestProject(project)}
                   type="button"
@@ -460,6 +466,14 @@ export function SetupWizard() {
                 time.
               </small>
             </p>
+            {localNotReady ? (
+              <p>
+                <small>
+                  Set AGENTOS_LOCAL_WORKSPACES_ROOT to enable local
+                  experiments.
+                </small>
+              </p>
+            ) : null}
             {localRepositoryError !== '' ? (
               <p role="alert">{localRepositoryError}</p>
             ) : null}
