@@ -1,3 +1,4 @@
+/* globals.css */
 :root {
   color-scheme: light;
   --canvas-log: #f7f7f2;
@@ -40,7 +41,8 @@
 
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 a {
@@ -56,7 +58,7 @@ a:focus-visible {
   position: absolute;
   left: 1rem;
   top: -5rem;
-  z-index: 1;
+  z-index: 4;
   background: var(--ink-command);
   color: var(--surface-sheet);
   padding: 0.75rem 1rem;
@@ -66,19 +68,70 @@ a:focus-visible {
   top: 1rem;
 }
 
+.app-status-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-sheet);
+  padding: 0.18rem 0.7rem;
+}
+
+.status-badge {
+  display: inline-flex;
+  min-height: 1.35rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.12rem 0.48rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.status-badge-attention {
+  background: color-mix(
+    in srgb,
+    var(--status-waiting-line) 18%,
+    var(--surface-sheet)
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--status-waiting-line) 55%,
+    var(--line-soft)
+  );
+  color: #6b4f12;
+}
+
+.status-badge-neutral {
+  background: var(--status-neutral-surface);
+  color: var(--ink-secondary);
+}
+
+.status-badge:hover {
+  color: var(--ink-command);
+}
+
+.status-badge:focus-visible {
+  outline-offset: 2px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: minmax(11rem, 14rem) minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100dvh;
 }
 
 .app-rail {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  height: 100%;
   overflow-y: auto;
   border-right: 1px solid var(--line-soft);
   background: var(--surface-sheet);
@@ -130,7 +183,16 @@ a:focus-visible {
 }
 
 .app-content {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+
+.app-content-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 main {
@@ -146,42 +208,6 @@ main {
 
 .app-rail .wordmark {
   padding-inline: 0.75rem;
-}
-
-.app-rail-badges {
-  display: grid;
-  gap: 0.45rem;
-  padding-inline: 0.35rem;
-}
-
-.rail-badge {
-  display: flex;
-  min-height: 36px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 700;
-  line-height: 1.2;
-  padding: 0.35rem 0.7rem;
-  text-align: center;
-  text-decoration: none;
-}
-
-.rail-badge-attention {
-  background: color-mix(in srgb, var(--status-waiting-line) 18%, var(--surface-sheet));
-  border-color: color-mix(in srgb, var(--status-waiting-line) 55%, var(--line-soft));
-  color: #6b4f12;
-}
-
-.rail-badge-neutral {
-  background: var(--status-neutral-surface);
-  color: var(--ink-secondary);
-}
-
-.rail-badge:hover {
-  color: var(--ink-command);
 }
 
 .page-toolbar {
@@ -885,9 +911,8 @@ div.inbox-message-copy {
     flex: 0 0 auto;
   }
 
-  .rail-badge {
-    font-size: 0.68rem;
-    min-height: 32px;
+  .app-status-bar {
+    justify-content: flex-start;
     padding-inline: 0.5rem;
   }
 

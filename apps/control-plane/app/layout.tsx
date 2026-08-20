@@ -25,12 +25,14 @@ export default function RootLayout({
             <a aria-label="Agent OS home" className="wordmark" href="/">
               Agent OS
             </a>
-            <AppRailStatus />
             <AppRailNav />
             <footer className="app-rail-footer">Agent OS control plane</footer>
           </aside>
           <div className="app-content">
-            <main id="main-content">{children}</main>
+            <AppRailStatus />
+            <div className="app-content-scroll">
+              <main id="main-content">{children}</main>
+            </div>
           </div>
         </div>
       </body>
