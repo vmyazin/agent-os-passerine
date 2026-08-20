@@ -1,6 +1,7 @@
 import { controlPlaneService } from '../src/application/runtime';
 import { requirePageSession } from '../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../src/ui/components';
+import { countWaitingRuns } from '../src/ui/rail-status-model';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,6 +9,12 @@ export default async function HomePage() {
   const session = await requirePageSession();
   const runs = await controlPlaneService().listRuns(6);
   const projects = new Set(runs.map((run) => run.projectId));
+  const waitingCount = countWaitingRuns(runs);
+  const activeProjectsLabel =
+    projects.size === 1 ? '1 active project' : `${projects.size} active projects`;
+  const waitingLabel =
+    waitingCount === 1 ? '1 run waiting' : `${waitingCount} runs waiting`;
+
   return (
     <div className="page-stack">
       <section aria-labelledby="page-title" className="page-heading">
@@ -24,16 +31,19 @@ export default async function HomePage() {
       </section>
       <section aria-label="Workspace summary" className="metric-grid">
         <article>
-          <span>Projects</span>
-          <strong>{projects.size}</strong>
+          <span className="metric-label">Projects</span>
+          <strong className="metric-value">{projects.size}</strong>
+          <span className="metric-detail">{activeProjectsLabel}</span>
         </article>
         <article>
-          <span>Recent runs</span>
-          <strong>{runs.length}</strong>
+          <span className="metric-label">Recent runs</span>
+          <strong className="metric-value">{runs.length}</strong>
+          <span className="metric-detail">{waitingLabel}</span>
         </article>
         <article>
-          <span>Budget</span>
-          <strong>Not configured</strong>
+          <span className="metric-label">Budget</span>
+          <strong className="metric-value">—</strong>
+          <span className="metric-detail">Not configured</span>
         </article>
       </section>
       <section aria-labelledby="recent-runs">

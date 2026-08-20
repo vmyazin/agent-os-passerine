@@ -173,24 +173,13 @@ export function InboxView({
   const items = createInboxItems(approvals, messages);
   const [selectedKey, setSelectedKey] = useState(items[0]?.key);
   const selected = items.find((item) => item.key === selectedKey) ?? items[0]!;
-  const pendingCount =
-    approvals.length +
-    messages.filter((message) => message.status === 'pending').length;
   const selectedRunId =
     selected.kind === 'approval'
       ? selected.approval.runId
       : selected.message.runId;
 
   return (
-    <section className="mailbox" aria-labelledby="inbox-title">
-      <header className="mailbox-toolbar">
-        <div>
-          <h1 id="inbox-title">Inbox</h1>
-          <p>Agent requests waiting for your decision.</p>
-        </div>
-        <span className="mailbox-count">{pendingCount} pending</span>
-      </header>
-
+    <section className="mailbox" aria-label="Inbox mailbox">
       <div className="mailbox-layout">
         <aside className="inbox-queue" aria-label="Agent requests">
           <ol>

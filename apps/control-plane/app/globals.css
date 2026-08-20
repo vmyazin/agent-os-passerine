@@ -148,6 +148,74 @@ main {
   padding-inline: 0.75rem;
 }
 
+.app-rail-badges {
+  display: grid;
+  gap: 0.45rem;
+  padding-inline: 0.35rem;
+}
+
+.rail-badge {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 0.35rem 0.7rem;
+  text-align: center;
+  text-decoration: none;
+}
+
+.rail-badge-attention {
+  background: color-mix(in srgb, var(--status-waiting-line) 18%, var(--surface-sheet));
+  border-color: color-mix(in srgb, var(--status-waiting-line) 55%, var(--line-soft));
+  color: #6b4f12;
+}
+
+.rail-badge-neutral {
+  background: var(--status-neutral-surface);
+  color: var(--ink-secondary);
+}
+
+.rail-badge:hover {
+  color: var(--ink-command);
+}
+
+.page-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 0.25rem 1rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.page-toolbar-copy {
+  min-width: 0;
+}
+
+.page-toolbar h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.page-toolbar p {
+  margin: 0.35rem 0 0;
+  color: var(--ink-secondary);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.page-toolbar-action {
+  flex: 0 0 auto;
+}
+
 .hero {
   max-width: 48rem;
   padding-block: clamp(5rem, 14vw, 11rem);
@@ -177,8 +245,8 @@ h1 {
 
 .page-stack {
   display: grid;
-  gap: 2.5rem;
-  padding-block: clamp(2rem, 6vw, 5rem);
+  gap: 1.75rem;
+  padding-block: 1.25rem 3rem;
 }
 
 .page-stack > * {
@@ -216,7 +284,6 @@ h1 {
   gap: 1rem;
 }
 
-.metric-grid article,
 .empty-state,
 .auth-card {
   border: 1px solid var(--line-soft);
@@ -227,19 +294,42 @@ h1 {
 
 .metric-grid article {
   display: grid;
-  gap: 0.5rem;
-  min-height: 8rem;
-  align-content: space-between;
-  padding: 1.25rem;
+  gap: 0.35rem;
+  min-height: 6.5rem;
+  align-content: start;
+  padding: 1rem 1.1rem 1.1rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--surface-inset) 55%, var(--surface-sheet));
+  box-shadow: none;
 }
 
-.metric-grid span,
+.metric-label {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.metric-value {
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  font-weight: 750;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.metric-detail {
+  color: var(--ink-secondary);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .run-list small {
   color: var(--ink-muted);
-}
-
-.metric-grid strong {
-  font-size: clamp(1.4rem, 3vw, 2.2rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .section-heading,
@@ -274,12 +364,6 @@ h1 {
   display: grid;
   gap: 0.25rem;
   min-width: 0;
-}
-
-.run-list small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .status {
@@ -409,26 +493,9 @@ textarea {
 }
 
 .inbox-page {
-  padding-block: 1.5rem 4rem;
-}
-
-.inbox-empty-heading {
-  margin-bottom: 2rem;
-}
-
-.inbox-empty-heading h1,
-.mailbox-toolbar h1 {
-  margin: 0;
-  font-size: 1.75rem;
-  line-height: 1.2;
-  letter-spacing: -0.035em;
-}
-
-.inbox-empty-heading p,
-.mailbox-toolbar p {
-  margin-block: 0.3rem 0;
-  color: var(--ink-secondary);
-  line-height: 1.5;
+  display: grid;
+  gap: 1rem;
+  padding-block: 1.25rem 3rem;
 }
 
 .mailbox {
@@ -436,14 +503,6 @@ textarea {
   border: 1px solid var(--line-soft);
   border-radius: 0.75rem;
   background: var(--surface-sheet);
-}
-
-.mailbox-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem;
 }
 
 .mailbox-count {
@@ -461,7 +520,6 @@ textarea {
   display: grid;
   grid-template-columns: minmax(17rem, 22rem) minmax(0, 1fr);
   min-height: 36rem;
-  border-top: 1px solid var(--line-soft);
 }
 
 .inbox-queue {
@@ -827,18 +885,24 @@ div.inbox-message-copy {
     flex: 0 0 auto;
   }
 
-  .inbox-page {
-    padding-block: 0.5rem 2.5rem;
+  .rail-badge {
+    font-size: 0.68rem;
+    min-height: 32px;
+    padding-inline: 0.5rem;
   }
 
-  .mailbox-toolbar {
+  .page-toolbar {
     align-items: flex-start;
-    padding: 1rem;
+    flex-direction: column;
+    gap: 0.75rem;
   }
 
-  .mailbox-toolbar p {
-    max-width: 18rem;
-    font-size: 0.9rem;
+  .page-toolbar h1 {
+    font-size: 1.3rem;
+  }
+
+  .inbox-page {
+    padding-block: 0.75rem 2.5rem;
   }
 
   .mailbox-layout {

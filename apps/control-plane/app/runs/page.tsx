@@ -1,6 +1,7 @@
 import { controlPlaneService } from '../../src/application/runtime';
 import { requirePageSession } from '../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../src/ui/components';
+import { PageToolbar } from '../../src/ui/page-toolbar';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,11 +10,11 @@ export default async function RunsPage() {
   const runs = await controlPlaneService().listRuns();
   return (
     <div className="page-stack">
-      <section className="page-heading" aria-labelledby="runs-title">
-        <p className="eyebrow">Operations</p>
-        <h1 id="runs-title">Runs</h1>
-        <p>Track durable feature and goal workflows.</p>
-      </section>
+      <PageToolbar
+        description="Track durable feature and goal workflows."
+        title="Runs"
+        titleId="runs-title"
+      />
       {runs.length === 0 ? (
         <EmptyState title="No runs found">
           Create a feature or goal through the API to start work.
