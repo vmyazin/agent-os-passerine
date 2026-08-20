@@ -4,6 +4,7 @@ import {
   issueSession,
   SESSION_COOKIE,
 } from '../../apps/control-plane/src/auth/auth';
+import { PLACEHOLDER_PROJECTS } from '../../apps/control-plane/src/ui/projects-placeholder';
 import { timeOfDayGreeting } from '../../apps/control-plane/src/ui/time-of-day-greeting';
 
 test.beforeEach(async ({ context, page }) => {
@@ -48,7 +49,9 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
     page.getByRole('navigation', { name: 'Primary navigation' }),
   ).toBeVisible();
   await expect(
-    page.getByRole('link', { name: 'Projects', exact: true }),
+    page.getByRole('link', {
+      name: `Projects, ${PLACEHOLDER_PROJECTS.length}`,
+    }),
   ).toBeVisible();
 });
 
@@ -62,7 +65,9 @@ test('operator can open the projects directory', async ({ page }) => {
     page.getByRole('table', { name: 'Placeholder projects' }),
   ).toBeVisible();
   await expect(
-    page.getByRole('link', { name: 'Projects', exact: true }),
+    page.getByRole('link', {
+      name: `Projects, ${PLACEHOLDER_PROJECTS.length}`,
+    }),
   ).toHaveAttribute('aria-current', 'page');
 });
 
