@@ -18,6 +18,10 @@ import {
   type WorkflowCheckpointStore,
   type WorkflowEffect,
 } from './types.js';
+import {
+  budgetLimitsForRun,
+  createProjectDailyUsageMicrodollars,
+} from './workflow-budget.js';
 import type {
   TriggerApprovalWaiter,
   TriggerWorkflowDispatcher,
@@ -545,16 +549,22 @@ export function createDurableTriggerOutbox(
             { limit: 1_000 },
           )
         ).reduce((sum, usage) => sum + usage.microdollars, 0);
+        const budgetLimits = await budgetLimitsForRun(
+          options.repository!,
+          reservation.runId,
+        );
+        const dailySpent = await createProjectDailyUsageMicrodollars(
+          options.repository!,
+        )(now, reservation.projectId);
         await options.checkpoints.settleSession({
           reservationKey: reservation.reservationKey,
           runId: reservation.runId,
           stepKey: reservation.stepKey,
           actualMicrodollars: reservation.estimatedMicrodollars,
           workflowSpentMicrodollars: spent,
-          dailySpentMicrodollars: spent,
-          workflowLimitMicrodollars:
-            FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
-          dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
+          dailySpentMicrodollars: dailySpent,
+          workflowLimitMicrodollars: budgetLimits.workflowLimitMicrodollars,
+          dailyLimitMicrodollars: budgetLimits.dailyLimitMicrodollars,
           now,
         });
         await options.checkpoints.releaseSession(
@@ -774,16 +784,22 @@ export function createDurableTriggerOutbox(
             { limit: 1_000 },
           )
         ).reduce((sum, record) => sum + record.microdollars, 0);
+        const budgetLimits = await budgetLimitsForRun(
+          options.repository,
+          reservation.runId,
+        );
+        const dailySpent = await createProjectDailyUsageMicrodollars(
+          options.repository,
+        )(now, reservation.projectId);
         await options.checkpoints.settleSession({
           reservationKey: reservation.reservationKey,
           runId: reservation.runId,
           stepKey: reservation.stepKey,
           actualMicrodollars: microdollars,
           workflowSpentMicrodollars: spent,
-          dailySpentMicrodollars: spent,
-          workflowLimitMicrodollars:
-            FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
-          dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
+          dailySpentMicrodollars: dailySpent,
+          workflowLimitMicrodollars: budgetLimits.workflowLimitMicrodollars,
+          dailyLimitMicrodollars: budgetLimits.dailyLimitMicrodollars,
           now,
         });
         await options.checkpoints.releaseSession(

@@ -147,6 +147,21 @@ export const RuntimeRoutingSchema = z
   })
   .strict();
 
+const RegistryHostSchema = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i);
+
+export const VerificationConfigSchema = z
+  .object({
+    trustedTestCommands: z
+      .array(z.string().trim().min(1).max(10_000))
+      .default([]),
+    registryHosts: z.array(RegistryHostSchema).max(4).default([]),
+  })
+  .strict();
+
 export const AgentOsConfigSchema = z
   .object({
     version: z.literal(1),
@@ -186,6 +201,7 @@ export const AgentOsConfigSchema = z
     budgets: BudgetConfigSchema,
     goals: GoalLimitsSchema,
     runtime: RuntimeRoutingSchema,
+    verification: VerificationConfigSchema.optional(),
   })
   .strict()
   .superRefine((config, context) => {

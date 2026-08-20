@@ -63,6 +63,21 @@ function trustedGoalCommandsFromEnv(): ReadonlySet<string> | undefined {
   return keys.length > 0 ? new Set(keys) : undefined;
 }
 
+function deploymentRegistryHostsFromEnv(): readonly string[] {
+  const raw = process.env.AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON;
+  if (raw === undefined || raw.trim() === '') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter(
+    (host): host is string => typeof host === 'string' && host.trim().length > 0,
+  );
+}
+
 /**
  * The absolute directory that holds local experiment repositories, or
  * `undefined` when local experiments are not configured for this
@@ -602,6 +617,7 @@ export function controlPlaneService(): ControlPlaneService {
       dispatch,
       repositoryHead,
       trustedGoalCommandsFromEnv(),
+      deploymentRegistryHostsFromEnv(),
       approvalArtifacts,
     );
   }

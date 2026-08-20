@@ -47,6 +47,10 @@ import {
   type WorkflowEffect,
   type WorkflowEffectLease,
 } from './types.js';
+import {
+  resolveProjectDailyUsageMicrodollars,
+  resolveWorkflowBudgetLimits,
+} from './workflow-budget.js';
 
 const asJson = (value: unknown): JsonValue => {
   const encoded = JSON.stringify(value);
@@ -627,18 +631,26 @@ async function runAgentStep<T>(
       continue;
     }
 
+    const budgetLimits = resolveWorkflowBudgetLimits(dependencies);
+    const projectDailyUsage = resolveProjectDailyUsageMicrodollars(dependencies);
     const workflowSpent = await sumWorkflowUsage(dependencies, workflow.runId);
-    const dailySpent = await (dependencies.dailyUsageMicrodollars?.(
+    const dailySpent = await projectDailyUsage(
       dependencies.clock(),
       workflow.projectId,
-    ) ?? Promise.resolve(workflowSpent));
+    );
+    const deploymentSpent =
+      dependencies.deploymentDailyUsageMicrodollars === undefined
+        ? undefined
+        : await dependencies.deploymentDailyUsageMicrodollars(
+            dependencies.clock(),
+          );
     const estimatedMicrodollars =
       roleDefinition.maxReservationMicrodollars ??
       FEATURE_WORKFLOW_DEFAULTS.defaultSessionReservationMicrodollars;
     if (
       !Number.isSafeInteger(estimatedMicrodollars) ||
       estimatedMicrodollars < 1 ||
-      estimatedMicrodollars > FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars
+      estimatedMicrodollars > budgetLimits.workflowLimitMicrodollars
     ) {
       throw new WorkflowPermanentError('role cost reservation is invalid');
     }
@@ -650,10 +662,18 @@ async function runAgentStep<T>(
       stepKey,
       workflowSpentMicrodollars: workflowSpent,
       dailySpentMicrodollars: dailySpent,
-      workflowLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
-      dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
-      admissionNumerator: FEATURE_WORKFLOW_DEFAULTS.admissionNumerator,
-      admissionDenominator: FEATURE_WORKFLOW_DEFAULTS.admissionDenominator,
+      workflowLimitMicrodollars: budgetLimits.workflowLimitMicrodollars,
+      dailyLimitMicrodollars: budgetLimits.dailyLimitMicrodollars,
+      admissionNumerator: budgetLimits.admissionNumerator,
+      admissionDenominator: budgetLimits.admissionDenominator,
+      ...(dependencies.deploymentDailyLimitMicrodollars === undefined ||
+      deploymentSpent === undefined
+        ? {}
+        : {
+            deploymentDailyLimitMicrodollars:
+              dependencies.deploymentDailyLimitMicrodollars,
+            deploymentSpentMicrodollars: deploymentSpent,
+          }),
       now,
       leaseExpiresAt: new Date(
         Date.parse(now) + FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs + 60_000,
@@ -1060,9 +1080,8 @@ async function runAgentStep<T>(
           actualMicrodollars: recordedMicrodollars,
           workflowSpentMicrodollars: workflowSpent + recordedMicrodollars,
           dailySpentMicrodollars: dailySpent + recordedMicrodollars,
-          workflowLimitMicrodollars:
-            FEATURE_WORKFLOW_DEFAULTS.workflowMicrodollars,
-          dailyLimitMicrodollars: FEATURE_WORKFLOW_DEFAULTS.dailyMicrodollars,
+          workflowLimitMicrodollars: budgetLimits.workflowLimitMicrodollars,
+          dailyLimitMicrodollars: budgetLimits.dailyLimitMicrodollars,
           now: dependencies.clock(),
         });
         await dependencies.checkpoints.releaseSession(

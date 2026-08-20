@@ -29,6 +29,7 @@ import {
   normalizePublicationPolicySnapshot,
   parseAgentOsConfig,
   persistenceId,
+  resolveProjectVerificationPolicy,
 } from '@agentos/core';
 
 export type IdGenerator = <Kind extends PersistenceIdKind>(
@@ -657,6 +658,7 @@ export class ControlPlaneService {
       resolve(config: AgentOsConfig): Promise<string>;
     },
     private readonly trustedGoalCommands?: ReadonlySet<string>,
+    private readonly deploymentRegistryHosts: readonly string[] = [],
     private readonly artifacts?: {
       get(input: {
         readonly scope: {
@@ -1027,8 +1029,29 @@ export class ControlPlaneService {
         'the trusted goal command allowlist is not configured',
         503,
       );
+    let allowedCommands: ReadonlySet<string> = this.trustedGoalCommands;
+    const latest = await this.repository.getLatestConfigRevision(
+      persistenceId('project', input.projectId),
+    );
+    if (latest !== undefined) {
+      try {
+        const policy = resolveProjectVerificationPolicy(
+          parseAgentOsConfig(latest.config),
+          {
+            trustedTestCommands: this.trustedGoalCommands,
+            registryHosts: this.deploymentRegistryHosts,
+          },
+        );
+        allowedCommands = new Set(policy.trustedTestCommands);
+      } catch {
+        // A project policy can only ever narrow the deployment allowlist, so
+        // an unreadable revision falls back to that allowlist rather than
+        // failing the run with a raw parse error. Widening is impossible here.
+        allowedCommands = this.trustedGoalCommands;
+      }
+    }
     for (const criterion of input.criteria) {
-      if (!this.trustedGoalCommands.has(criterion.command))
+      if (!allowedCommands.has(criterion.command))
         throw new ServiceError(
           'invalid_goal_criteria',
           'goal criterion commands must name trusted test commands',

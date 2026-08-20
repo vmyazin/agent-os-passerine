@@ -272,6 +272,8 @@ export interface WorkflowSessionAdmission {
   readonly dailyLimitMicrodollars: number;
   readonly admissionNumerator: number;
   readonly admissionDenominator: number;
+  readonly deploymentDailyLimitMicrodollars?: number;
+  readonly deploymentSpentMicrodollars?: number;
   readonly now: string;
   readonly leaseExpiresAt: string;
   readonly estimatedMicrodollars: number;
@@ -380,6 +382,18 @@ export interface DurableFeatureWorkflowDependencies {
   readonly roles: FeatureWorkflowRoles;
   readonly clock: () => string;
   readonly priceUsage: (usage: RuntimeUsage, model: string) => number;
+  readonly budgetLimits?: {
+    readonly workflowLimitMicrodollars: number;
+    readonly dailyLimitMicrodollars: number;
+    readonly admissionNumerator: number;
+    readonly admissionDenominator: number;
+  };
+  readonly projectDailyUsageMicrodollars?: (
+    at: string,
+    projectId: string,
+  ) => Promise<number>;
+  readonly deploymentDailyLimitMicrodollars?: number;
+  readonly deploymentDailyUsageMicrodollars?: (at: string) => Promise<number>;
   readonly dailyUsageMicrodollars?: (
     at: string,
     projectId: string,

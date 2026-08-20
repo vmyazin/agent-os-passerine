@@ -231,7 +231,8 @@ export class PostgresWorkflowCheckpointStore implements WorkflowCheckpointStore 
     const rows = await this.sql.execute(
       `select "agentos_admit_workflow_session"(
         $1, $2, $3, $4, $5::bigint, $6::bigint, $7::bigint,
-        $8::integer, $9::integer, $10::timestamptz, $11::timestamptz
+        $8::integer, $9::integer, $10::timestamptz, $11::timestamptz,
+        $12::bigint
       ) as "result"`,
       [
         request.runId,
@@ -245,6 +246,7 @@ export class PostgresWorkflowCheckpointStore implements WorkflowCheckpointStore 
         request.admissionDenominator,
         request.now,
         request.leaseExpiresAt,
+        request.deploymentDailyLimitMicrodollars ?? 0,
       ],
     );
     const result = String(rows[0]?.result);

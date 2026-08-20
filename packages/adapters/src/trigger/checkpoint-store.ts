@@ -227,6 +227,34 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
       (request.dailyLimitMicrodollars * request.admissionNumerator) /
         request.admissionDenominator,
     );
+    const deploymentLimit = request.deploymentDailyLimitMicrodollars;
+    const deploymentSpent = request.deploymentSpentMicrodollars;
+    if (
+      deploymentLimit !== undefined &&
+      deploymentSpent !== undefined &&
+      deploymentLimit > 0
+    ) {
+      const deploymentReserved = [...this.#reservations.values()].reduce(
+        (sum, reservation) => sum + reservation.estimatedMicrodollars,
+        0,
+      );
+      const deploymentThreshold = Math.floor(
+        (deploymentLimit * request.admissionNumerator) /
+          request.admissionDenominator,
+      );
+      if (
+        deploymentSpent +
+          deploymentReserved +
+          request.estimatedMicrodollars >=
+          deploymentThreshold ||
+        deploymentSpent +
+          deploymentReserved +
+          request.estimatedMicrodollars >
+          deploymentLimit
+      ) {
+        return { admitted: false, reason: 'daily_budget' };
+      }
+    }
     if (
       request.workflowSpentMicrodollars +
         workflowReserved +

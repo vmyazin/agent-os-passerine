@@ -716,6 +716,57 @@ runtime: { provider: local }
     await expect(repository.listRuns({ limit: 10 })).resolves.toEqual([]);
   });
 
+  it('rejects goal criteria outside the project verification subset', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'a'.repeat(40)) },
+      goalCommands,
+    );
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Restricted Goal Project }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+verification:
+  trustedTestCommands: [pnpm test]
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const applied = await service.applyConfiguration('project-verification', {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+
+    await expect(
+      service.createGoalRun('subset-goal', {
+        projectId: applied.projectId,
+        title: 'Typecheck goal',
+        description: 'This must not start.',
+        ...applied.provenance,
+        criteria: [
+          {
+            id: 'typecheck',
+            type: 'command' as const,
+            description: 'Typecheck passes',
+            required: true,
+            command: 'pnpm typecheck',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_goal_criteria', status: 422 });
+    await expect(repository.listRuns({ limit: 10 })).resolves.toEqual([]);
+  });
+
   it('does not dispatch a goal until every deterministic criterion is durable', async () => {
     const repository = new InMemoryDomainRepository();
     const requestStart = vi.fn();

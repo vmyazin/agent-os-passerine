@@ -244,6 +244,11 @@ budgets:
   dailyMicrodollars: 20000000
   concurrency: 2
   admissionReservePercent: 80
+verification:
+  trustedTestCommands:
+    - pnpm test
+  registryHosts:
+    - registry.npmjs.org
 goals:
   maxSteps: 3
   maxRetries: 2

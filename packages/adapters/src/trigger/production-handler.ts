@@ -14,6 +14,7 @@ import {
   parseAgentOsConfig,
   persistenceId,
   registerVerifier,
+  resolveProjectVerificationPolicy,
   type AgentOsConfig,
   type ArtifactCapabilityKey,
   type ArtifactMetadata,
@@ -49,6 +50,12 @@ import {
 import type { FeatureWorkflowTaskHandler } from './task.js';
 import { createFeatureWorkflowTaskHandler } from './task-handler.js';
 import { createTriggerApprovalWaiter } from './trigger-adapter.js';
+import {
+  budgetLimitsFromConfig,
+  createDeploymentDailyUsageMicrodollars,
+  createProjectDailyUsageMicrodollars,
+  deploymentDailyLimitFromEnv,
+} from './workflow-budget.js';
 import type {
   FeatureWorkflowRoles,
   WorkflowPublicationAuthority,
@@ -379,6 +386,19 @@ export async function createProductionFeatureWorkflowFromEnv(
         'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',
       ),
     );
+  const commands = parsedJson<
+    Record<string, { executable: string; arguments: string[] }>
+  >(environment, 'AGENTOS_TRUSTED_TEST_COMMANDS_JSON');
+  const deploymentVerificationPolicy = {
+    trustedTestCommands: new Set(Object.keys(commands)),
+    registryHosts: verificationRegistryHosts,
+  };
+  const projectDailyUsageMicrodollars =
+    createProjectDailyUsageMicrodollars(repository);
+  const deploymentDailyUsageMicrodollars =
+    createDeploymentDailyUsageMicrodollars(repository);
+  const deploymentDailyLimitMicrodollars =
+    deploymentDailyLimitFromEnv(environment);
   const artifactCapabilityKeys = parsedJson<ArtifactCapabilityKey[]>(
     environment,
     'ARTIFACT_CAPABILITY_KEYS_JSON',
@@ -521,9 +541,11 @@ export async function createProductionFeatureWorkflowFromEnv(
       });
       const source = sourceBundles.get(snapshot.runId);
       if (source === undefined) throw new Error('source bundle is unavailable');
-      const commands = parsedJson<
-        Record<string, { executable: string; arguments: string[] }>
-      >(environment, 'AGENTOS_TRUSTED_TEST_COMMANDS_JSON');
+      const verification = resolveProjectVerificationPolicy(
+        config,
+        deploymentVerificationPolicy,
+      );
+      const allowedCommands = new Set(verification.trustedTestCommands);
       const verifier = createTrustedWorkflowVerifier({
         policy: policy(config),
         artifacts,
@@ -615,7 +637,7 @@ export async function createProductionFeatureWorkflowFromEnv(
       };
       const roleDefinitions = resolveFeatureRolesFromSnapshot(snapshot, {
         artifactMcpUrl,
-        verificationRegistryHosts,
+        verificationRegistryHosts: verification.registryHosts,
       });
       // Fail-closed routing check, before any session work (see
       // resolveRoleRuntimeKeys for the three rules it enforces).
@@ -792,8 +814,18 @@ export async function createProductionFeatureWorkflowFromEnv(
         runtimeAccess,
         clock: () => new Date().toISOString(),
         priceUsage: (usage, model) => priceUsage(config, usage, model),
+        budgetLimits: budgetLimitsFromConfig(config),
+        projectDailyUsageMicrodollars,
+        ...(deploymentDailyLimitMicrodollars === undefined
+          ? {}
+          : {
+              deploymentDailyLimitMicrodollars,
+              deploymentDailyUsageMicrodollars,
+            }),
         verifier,
         resolveTestCommand: (commandKey) => {
+          if (!allowedCommands.has(commandKey))
+            throw new Error('test command is not allowed for this project');
           const definition = commands[commandKey];
           if (definition === undefined)
             throw new Error('test command is not in the trusted allowlist');
