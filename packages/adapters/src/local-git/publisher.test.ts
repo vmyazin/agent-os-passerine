@@ -15,6 +15,7 @@ import {
   type PublicationManifestBody,
 } from '@agentos/core';
 
+import { GitHubPublisherError } from '../github/errors.js';
 import {
   createPostgresPublicationStoreForTest,
   type PublicationSqlExecutor,
@@ -636,16 +637,22 @@ describe('local git publisher', () => {
       expect(commitsOnTopOfBase).toBe('1');
 
       const finalRecord = await recordFor(inner);
-      expect(finalRecord?.phase).toBe('succeeded');
+      // `ref_created`, not `succeeded`: this publisher's durable terminal
+      // phase (see the `LOCAL_PHASE_ORDER` comment in publisher.ts for
+      // why `pr_created`/`succeeded` are never attempted against the real
+      // schema -- a CHECK constraint makes both unreachable for a
+      // non-GitHub publication).
+      expect(finalRecord?.phase).toBe('ref_created');
       expect(finalRecord?.commitSha).toBe(result.commitSha);
     });
 
-    it('resumes after a crash between ref_created and the final succeeded checkpoint', async () => {
-      // The ref_created checkpoint DID persist this time (crash happens one
-      // step later, while trying to persist the pr_created bridge phase) --
-      // the record is left at 'ref_created'. Resuming from here must not
-      // re-attempt update-ref at all (the create-only guard would reject a
-      // second attempt even for the correct commit).
+    it('resuming from an already-durable ref_created record replays without touching git', async () => {
+      // Once a record reaches this publisher's terminal phase
+      // (`ref_created`), a later `publish()` call for the same manifest --
+      // even a brand new publisher instance -- must short-circuit to
+      // success without running any git command at all (mirrors the
+      // top-level replay test, but exercised specifically through the
+      // resume path after a prior crash-and-recover, not a clean run).
       const inner = new InMemoryPublicationStore();
       const root = await fixtureRoot();
       const repo = await seedNestedRepo(root, 'exp-repo');
@@ -653,20 +660,15 @@ describe('local git publisher', () => {
       const manifest = manifestBody(repo, base);
       const authorization = authorize(manifest);
 
-      const crashingStore = new FailingOnceStore(inner, 'pr_created');
       const publisher1 = createLocalGitPublisher({
         workspacesRoot: root,
         localPath: repo,
         verifier,
-        store: crashingStore,
+        store: inner,
         now: NOW,
       });
-      await expect(
-        publisher1.publish({ manifest, authorization }),
-      ).rejects.toThrow('transient database failure');
-
-      const recordAfterCrash = await recordFor(inner);
-      expect(recordAfterCrash?.phase).toBe('ref_created');
+      const first = await publisher1.publish({ manifest, authorization });
+      expect((await recordFor(inner))?.phase).toBe('ref_created');
 
       const publisher2 = createLocalGitPublisher({
         workspacesRoot: root,
@@ -675,9 +677,98 @@ describe('local git publisher', () => {
         store: inner,
         now: NOW,
       });
-      const result = await publisher2.publish({ manifest, authorization });
+      const second = await publisher2.publish({ manifest, authorization });
+
+      expect(second).toEqual(first);
+      const commitsOnTopOfBase = await git(repo, [
+        'rev-list',
+        '--count',
+        first.branch,
+        `^${base}`,
+      ]);
+      expect(commitsOnTopOfBase).toBe('1');
+    });
+  });
+
+  describe('reconciling a durable-store save conflict', () => {
+    /** Wraps a real `PublicationStore`. The first time `save` is asked to
+     * persist `conflictOnPhase`, it applies that *exact* patch to the
+     * underlying store first (simulating a concurrent attempt that raced
+     * ahead and won), then reports a conflict to the caller -- exactly
+     * what real optimistic-concurrency contention looks like: the
+     * checkpoint really did advance, just not via *this* call. */
+    class ConcurrentWinnerStore implements PublicationStore {
+      #conflictOnPhase: PublicationPhase | undefined;
+      constructor(
+        private readonly inner: PublicationStore,
+        conflictOnPhase: PublicationPhase,
+      ) {
+        this.#conflictOnPhase = conflictOnPhase;
+      }
+      async claim(
+        input: Parameters<PublicationStore['claim']>[0],
+      ): ReturnType<PublicationStore['claim']> {
+        return this.inner.claim(input);
+      }
+      async save(
+        ...args: Parameters<PublicationStore['save']>
+      ): ReturnType<PublicationStore['save']> {
+        const [key, expectedRevision, patch, publicationEvent] = args;
+        if (
+          this.#conflictOnPhase !== undefined &&
+          patch.phase === this.#conflictOnPhase
+        ) {
+          this.#conflictOnPhase = undefined;
+          await this.inner.save(
+            key,
+            expectedRevision,
+            patch,
+            publicationEvent,
+          );
+          throw new GitHubPublisherError(
+            'publication_store_conflict',
+            'Publication checkpoint changed concurrently',
+          );
+        }
+        return this.inner.save(...args);
+      }
+      async get(key: string): ReturnType<PublicationStore['get']> {
+        return this.inner.get(key);
+      }
+      async listEvents(): ReturnType<PublicationStore['listEvents']> {
+        return this.inner.listEvents();
+      }
+    }
+
+    it('reconciles a save conflict after update-ref succeeds instead of failing the run', async () => {
+      const inner = new InMemoryPublicationStore();
+      const store = new ConcurrentWinnerStore(inner, 'ref_created');
+      const root = await fixtureRoot();
+      const repo = await seedNestedRepo(root, 'exp-repo');
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      const manifest = manifestBody(repo, base);
+      const authorization = authorize(manifest);
+
+      const publisher = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store,
+        now: NOW,
+      });
+
+      // A checkpoint race after the branch commit already exists must
+      // never strand the run: this single `publish()` call must succeed,
+      // not throw -- the conflict is reconciled inline, with no need for
+      // the caller to retry.
+      const result = await publisher.publish({ manifest, authorization });
 
       expect(result.status).toBe('succeeded');
+      const branchSha = await git(repo, [
+        'rev-parse',
+        `refs/heads/${result.branch}`,
+      ]);
+      expect(branchSha).toBe(result.commitSha);
       const commitsOnTopOfBase = await git(repo, [
         'rev-list',
         '--count',
@@ -685,9 +776,65 @@ describe('local git publisher', () => {
         `^${base}`,
       ]);
       expect(commitsOnTopOfBase).toBe('1');
+    });
 
-      const finalRecord = await recordFor(inner);
-      expect(finalRecord?.phase).toBe('succeeded');
+    it('still fails on a save conflict whose durable state does not match (genuine conflict)', async () => {
+      // A conflict is only reconciled when durable state AND the git ref
+      // agree the publication already reached this phase with the *same*
+      // commit. Here `ref_created` always reports a conflict but --
+      // unlike `ConcurrentWinnerStore` above -- never actually applies
+      // that patch anywhere, so the durable record stays behind at
+      // `commit_created` forever: reconciliation must correctly refuse to
+      // paper over this and the conflict must still propagate.
+      class NeverResolvingConflictStore implements PublicationStore {
+        constructor(
+          private readonly inner: PublicationStore,
+          private readonly conflictOnPhase: PublicationPhase,
+        ) {}
+        async claim(
+          input: Parameters<PublicationStore['claim']>[0],
+        ): ReturnType<PublicationStore['claim']> {
+          return this.inner.claim(input);
+        }
+        async save(
+          ...args: Parameters<PublicationStore['save']>
+        ): ReturnType<PublicationStore['save']> {
+          const [, , patch] = args;
+          if (patch.phase === this.conflictOnPhase) {
+            throw new GitHubPublisherError(
+              'publication_store_conflict',
+              'Publication checkpoint changed concurrently',
+            );
+          }
+          return this.inner.save(...args);
+        }
+        async get(k: string): ReturnType<PublicationStore['get']> {
+          return this.inner.get(k);
+        }
+        async listEvents(): ReturnType<PublicationStore['listEvents']> {
+          return this.inner.listEvents();
+        }
+      }
+
+      const inner = new InMemoryPublicationStore();
+      const store = new NeverResolvingConflictStore(inner, 'ref_created');
+      const root = await fixtureRoot();
+      const repo = await seedNestedRepo(root, 'exp-repo');
+      const base = await git(repo, ['rev-parse', 'HEAD']);
+      const manifest = manifestBody(repo, base);
+      const authorization = authorize(manifest);
+
+      const publisher = createLocalGitPublisher({
+        workspacesRoot: root,
+        localPath: repo,
+        verifier,
+        store,
+        now: NOW,
+      });
+
+      await expect(
+        publisher.publish({ manifest, authorization }),
+      ).rejects.toThrow('Publication checkpoint changed concurrently');
     });
   });
 });

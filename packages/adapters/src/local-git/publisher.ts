@@ -46,16 +46,34 @@ export interface LocalGitPublisherOptions {
 // 40-hex value -- keep the same shape check the GitHub publisher applies.
 const GIT_SHA = /^[0-9a-f]{40}$/;
 
-// This is the same phase sequence the GitHub publisher uses
-// (packages/adapters/src/github/publisher.ts), reusing the *same*
-// `PublicationPhase` union and the *same* `InMemoryPublicationStore`
-// transition table (packages/adapters/src/github/store.ts, not editable by
-// this task). That table only allows `succeeded` to be reached via
-// `... -> ref_created -> pr_created -> succeeded`, so even though a local
-// publish never creates a pull request, it still passes through the
-// `pr_created` checkpoint as a no-op bridge -- there is no legal way to
-// reach `succeeded` in the shared store without it. `commit_created` and
-// `ref_created` map naturally onto "commit-tree ran" and "update-ref ran".
+// This reuses the *same* `PublicationPhase` union and the *same* durable
+// `publication_records` schema the GitHub publisher uses (packages/
+// adapters/src/github/publisher.ts, packages/adapters/src/persistence/
+// schema.ts -- none editable by this task), but a local publication's
+// durable checkpoint progression stops at `ref_created`, not `succeeded`.
+// This was empirically confirmed against a real Postgres instance (not
+// guessed): the table's `publication_records_pull_request_shape` CHECK
+// constraint requires `pull_request_url` to be either NULL or start with
+// `'https://github.com/'`, while `publication_records_phase_checkpoint_
+// shape` requires `pull_request_number`/`pull_request_url`/`draft` to all
+// be NOT NULL whenever `phase IN ('pr_created', 'succeeded')`. Those two
+// constraints are mutually unsatisfiable for anything that isn't a real
+// GitHub PR -- there is no patch value a local publication could ever
+// write that reaches `pr_created` or `succeeded` in this table. So this
+// publisher never attempts either save: `ref_created` (the git branch
+// commit durably exists) is treated as "done" at the application level
+// (see the `phaseAtLeast(record.phase, 'ref_created')` checks below),
+// while the *in-memory* `LocalPublicationResult` returned by `publish()`
+// still reports `status: 'succeeded'` to the caller -- that's an
+// application-level result, not a read of `record.phase`, so it isn't
+// affected by this. No downstream consumer was found reading
+// `publication_records.phase` for local records specifically (`grep`
+// confirmed `createLocalGitPublisher` is only ever consumed for its
+// `publish()` return value, in packages/adapters/src/trigger/
+// production-composition.ts), so stopping at `ref_created` durably is
+// safe today; a real fix (letting `pull_request_url`/`draft` be NULL for
+// local `succeeded` records, or adding a real `branch_created` phase) is
+// a `schema.ts`/migration change outside this task's allowed files.
 const LOCAL_PHASE_ORDER: Readonly<Record<PublicationPhase, number>> = {
   failed: 0,
   claimed: 0,
@@ -131,6 +149,56 @@ function event(
   details: PublicationEvent['details'] = {},
 ): PublicationEvent {
   return { publicationKey: key, phase, at, details };
+}
+
+/**
+ * Persists a checkpoint, but treats a durable-store save conflict after the
+ * git branch commit already exists as *reconcilable*, not fatal. A save
+ * conflict here can legitimately happen without anything being wrong (e.g.
+ * two concurrent attempts for the same manifest both recompute the exact
+ * same deterministic commit and race to persist the same checkpoint; only
+ * one wins the optimistic-concurrency check, but the git side effect --
+ * the branch itself -- is real and shared either way). Re-reads durable
+ * state *and* the actual git ref: only when both agree the publication
+ * already reached (at least) the phase being persisted, with the same
+ * commit, is this treated as reconciled and the fresher record returned
+ * instead of throwing. Anything else (record missing, phase behind, or a
+ * *different* commit bound to the branch) is a genuine, unresolved
+ * conflict and still propagates.
+ */
+async function saveReconcilingConflicts(
+  store: PublicationStore,
+  repo: string,
+  branch: string,
+  commitSha: string,
+  key: string,
+  expectedRevision: number,
+  patch: Parameters<PublicationStore['save']>[2],
+  publicationEvent: PublicationEvent,
+): Promise<PublicationRecord> {
+  try {
+    return await store.save(key, expectedRevision, patch, publicationEvent);
+  } catch (error) {
+    if (
+      !(error instanceof GitHubPublisherError) ||
+      error.code !== 'publication_store_conflict'
+    )
+      throw error;
+    const [current, refSha] = await Promise.all([
+      store.get(key),
+      runGit(repo, ['rev-parse', `refs/heads/${branch}`]).catch(
+        () => undefined,
+      ),
+    ]);
+    if (
+      current !== undefined &&
+      refSha === commitSha &&
+      current.commitSha === commitSha &&
+      phaseAtLeast(current.phase, patch.phase)
+    )
+      return current;
+    throw error;
+  }
 }
 
 function verifyAuthorization(
@@ -359,7 +427,11 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
       now: now().toISOString(),
     });
 
-    if (record.phase === 'succeeded') {
+    // `ref_created` (not `succeeded` -- see the `LOCAL_PHASE_ORDER` comment
+    // above for why) is this publisher's durable terminal phase: reaching
+    // it means the git branch commit already durably exists, so replay
+    // returns immediately without running any git command.
+    if (phaseAtLeast(record.phase, 'ref_created')) {
       if (record.commitSha === undefined || !GIT_SHA.test(record.commitSha))
         throw new GitHubPublisherError(
           'publication_store_conflict',
@@ -529,36 +601,40 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
         // else: benign resume -- fall through and persist the checkpoint.
       }
       const refAt = now().toISOString();
-      record = await options.store.save(
+      // From here on (the git branch commit now durably exists on disk),
+      // every save goes through `saveReconcilingConflicts`: a checkpoint
+      // race must never strand a run whose branch already exists. The
+      // result isn't read afterward (this is the last checkpoint this
+      // publisher ever persists -- see the `LOCAL_PHASE_ORDER` comment
+      // above), it's awaited purely so a genuine, unreconciled conflict
+      // still surfaces as a thrown error.
+      await saveReconcilingConflicts(
+        options.store,
+        repo,
+        branch,
+        commitSha,
         key,
         record.revision,
-        { phase: 'ref_created', updatedAt: refAt },
+        // `commitSha` must be included here, not just at `commit_created`:
+        // the durable store's `agentos_save_publication` SQL function
+        // (packages/persistence migration for `publication_records`)
+        // requires the patch to carry `commitSha` for *both*
+        // `commit_created` AND `ref_created` -- omitting it (as an earlier
+        // version of this file did) makes every `ref_created` save fail
+        // its shape validation against the real Postgres store on the
+        // very first attempt, even though `update-ref` just succeeded.
+        // `github/publisher.ts`'s own `ref_created` save already includes
+        // `commitSha` for the same reason; this mirrors that.
+        { phase: 'ref_created', commitSha, updatedAt: refAt },
         event(key, 'ref_created', refAt, { branch, commitSha }),
       );
     }
 
-    // No pull request exists for a local publication; `pr_created` is used
-    // purely as the required bridge phase between `ref_created` and
-    // `succeeded` in the shared store's transition table (see the
-    // `LOCAL_PHASE_ORDER` comment above).
-    if (!phaseAtLeast(record.phase, 'pr_created')) {
-      const prAt = now().toISOString();
-      record = await options.store.save(
-        key,
-        record.revision,
-        { phase: 'pr_created', updatedAt: prAt },
-        event(key, 'pr_created', prAt),
-      );
-    }
-
-    const succeededAt = now().toISOString();
-    await options.store.save(
-      key,
-      record.revision,
-      { phase: 'succeeded', commitSha, updatedAt: succeededAt },
-      event(key, 'succeeded', succeededAt, { branch, commitSha }),
-    );
-
+    // `ref_created` is this publisher's durable terminal phase -- see the
+    // `LOCAL_PHASE_ORDER` comment above for why `pr_created`/`succeeded`
+    // are never attempted (a real Postgres CHECK constraint makes both
+    // unreachable for a non-GitHub publication). The git branch commit
+    // durably exists at this point, so this is a genuine, safe success.
     return {
       status: 'succeeded',
       local: true,
