@@ -392,6 +392,81 @@ h1 {
   min-width: 0;
 }
 
+.projects-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.75rem;
+  background: var(--surface-sheet);
+}
+
+.projects-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.projects-table th,
+.projects-table td {
+  padding: 0.9rem 1.15rem;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.projects-table thead th {
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.projects-table tbody th,
+.projects-table tbody td {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.projects-table tbody tr:last-child th,
+.projects-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.projects-table tbody tr:hover {
+  background: color-mix(
+    in srgb,
+    var(--surface-inset) 55%,
+    var(--surface-sheet)
+  );
+}
+
+.project-name-cell {
+  font-weight: 400;
+}
+
+.project-name {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.project-id {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+}
+
+.project-repository,
+.project-updated {
+  color: var(--ink-secondary);
+  font-size: 0.88rem;
+}
+
+.project-updated {
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
 .status {
   display: inline-flex;
   width: fit-content;
@@ -531,7 +606,8 @@ textarea {
   background: var(--surface-sheet);
 }
 
-.mailbox-count {
+.mailbox-count,
+.project-count {
   flex: 0 0 auto;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
@@ -906,6 +982,11 @@ div.inbox-message-copy {
   .timeline li {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .projects-table th,
+  .projects-table td {
+    padding: 0.8rem 0.9rem;
   }
   .status {
     flex: 0 0 auto;

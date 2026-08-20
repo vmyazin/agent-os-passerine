@@ -47,6 +47,23 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
   await expect(
     page.getByRole('navigation', { name: 'Primary navigation' }),
   ).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: 'Projects', exact: true }),
+  ).toBeVisible();
+});
+
+test('operator can open the projects directory', async ({ page }) => {
+  await page.goto('/projects');
+
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Projects' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('table', { name: 'Placeholder projects' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: 'Projects', exact: true }),
+  ).toHaveAttribute('aria-current', 'page');
 });
 
 test('operator can monitor a waiting run and consume a scoped approval', async ({
