@@ -1060,6 +1060,7 @@ export class ControlPlaneService {
 
   async listPendingApprovals(
     limit = 50,
+    includeSummaries = true,
   ): Promise<readonly ApprovalProjection[]> {
     const runs = await this.repository.listRuns({ limit });
     const pages = await Promise.all(
@@ -1071,12 +1072,21 @@ export class ControlPlaneService {
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(projectApproval);
+    if (!includeSummaries) return projected;
     return Promise.all(
       projected.map(async (approval) => ({
         ...approval,
         ...(await this.approvalSummary(approval)),
       })),
     );
+  }
+
+  /**
+   * Lightweight status count for navigation badges: one repository query,
+   * no per-run projection (a full projection costs four queries per run).
+   */
+  async countRunsByStatus(status: RunStatus, limit = 100): Promise<number> {
+    return (await this.repository.listRuns({ status, limit })).length;
   }
 
   /**
@@ -1266,7 +1276,9 @@ export class ControlPlaneService {
       this.repository.listStepRuns(run.id, { limit: 100 }),
       this.repository.listEvents(run.id, { limit: 1_000 }),
       this.projectGoal(run),
-      this.repository.listUsage(run.id, { limit: 1_000 }),
+      // Per-step model info is decorative; a failed usage lookup (e.g. a
+      // transient database hiccup) must never take a page down with it.
+      this.repository.listUsage(run.id, { limit: 1_000 }).catch(() => []),
     ]);
     // Usage records carry the model that actually executed each step (the
     // provider-reported identity), which is stronger evidence than the
