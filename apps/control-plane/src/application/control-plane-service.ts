@@ -1218,7 +1218,12 @@ export class ControlPlaneService {
         ? {}
         : { projectId: persistenceId('project', projectId) }),
     });
-    return Promise.all(runs.map((run) => this.project(run)));
+    // project() issues three to four queries per run, so an unbounded
+    // Promise.all here multiplies straight past the Neon HTTP connection
+    // ceiling — the same failure the inbox digest was bounded to avoid.
+    return mapWithConcurrency(runs, DIGEST_QUERY_CONCURRENCY, (run) =>
+      this.project(run),
+    );
   }
 
   async getRun(id: string): Promise<RunProjection> {
@@ -1383,10 +1388,10 @@ export class ControlPlaneService {
         ? {}
         : { projectId: persistenceId('project', projectId) }),
     });
-    const pages = await Promise.all(
-      runs.map((run) =>
-        this.repository.listInboxMessages(run.id, undefined, { limit }),
-      ),
+    const pages = await mapWithConcurrency(
+      runs,
+      DIGEST_QUERY_CONCURRENCY,
+      (run) => this.repository.listInboxMessages(run.id, undefined, { limit }),
     );
     return pages
       .flat()
@@ -1532,21 +1537,23 @@ export class ControlPlaneService {
         ? {}
         : { projectId: persistenceId('project', projectId) }),
     });
-    const pages = await Promise.all(
-      runs.map((run) =>
-        this.repository.listApprovals(run.id, { status: 'pending', limit }),
-      ),
+    const pages = await mapWithConcurrency(
+      runs,
+      DIGEST_QUERY_CONCURRENCY,
+      (run) => this.repository.listApprovals(run.id, { status: 'pending', limit }),
     );
     const projected = pages
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(projectApproval);
     if (!includeSummaries) return projected;
-    return Promise.all(
-      projected.map(async (approval) => ({
+    return mapWithConcurrency(
+      projected,
+      DIGEST_QUERY_CONCURRENCY,
+      async (approval) => ({
         ...approval,
         ...(await this.approvalSummary(approval)),
-      })),
+      }),
     );
   }
 
