@@ -16,6 +16,7 @@ import type {
   PersistenceDigests,
   PersistenceId,
   PersistenceIdKind,
+  Project,
   RunStatus,
   WorkflowRun,
 } from '@agentos/core';
@@ -98,6 +99,24 @@ export interface ProjectSelector {
   readonly repository?: string;
   readonly localPath?: string;
   readonly name?: string;
+}
+
+export interface ProjectListProjection {
+  readonly id: string;
+  readonly name: string;
+  readonly binding: string;
+  readonly latestRevision?: number;
+  readonly configDigest?: string;
+  readonly lastRunStatus?: RunStatus;
+  readonly lastRunAt?: IsoTimestamp;
+  readonly runCount: number;
+  readonly updatedAt: IsoTimestamp;
+}
+
+export interface ProjectDetailProjection extends ProjectListProjection {
+  readonly workflowBudgetMicrodollars?: number;
+  readonly dailyBudgetMicrodollars?: number;
+  readonly recentRuns: readonly RunProjection[];
 }
 
 export interface ConfigurationProjection {
@@ -720,6 +739,109 @@ export class ControlPlaneService {
         400,
       );
     return projects[0]?.id;
+  }
+
+  /** Lightweight project count for navigation badges. */
+  async countProjects(limit = 1_000): Promise<number> {
+    return (await this.repository.listProjects({ limit })).length;
+  }
+
+  private projectBindingLabel(
+    project: Project,
+    revision: ConfigRevision | undefined,
+  ): string {
+    if (revision !== undefined) {
+      try {
+        const config = parseAgentOsConfig(revision.config);
+        if (config.project.repository !== undefined)
+          return redactText(config.project.repository);
+        if (config.project.localPath !== undefined)
+          return redactText(config.project.localPath);
+      } catch {
+        // Fall back to the durable project row when revision config is unreadable.
+      }
+    }
+    if (project.repository !== undefined) return redactText(project.repository);
+    return redactText(project.name);
+  }
+
+  private async projectListProjection(
+    project: Project,
+  ): Promise<ProjectListProjection> {
+    // countRuns is an exact aggregate: listing to count saturates at the
+    // repository page cap, so a busy project's total would stop moving. The
+    // listing here only needs the newest row for last-run status.
+    const [latest, runCount, runs] = await Promise.all([
+      this.repository.getLatestConfigRevision(project.id),
+      this.repository.countRuns({ projectId: project.id }),
+      this.repository.listRuns({
+        projectId: project.id,
+        limit: 1,
+        order: 'desc',
+      }),
+    ]);
+    const lastRun = runs[0];
+    return {
+      id: project.id,
+      name: redactText(project.name).slice(0, 120),
+      binding: this.projectBindingLabel(project, latest),
+      ...(latest === undefined
+        ? {}
+        : {
+            latestRevision: latest.revision,
+            configDigest: latest.configDigest,
+          }),
+      ...(lastRun === undefined
+        ? {}
+        : {
+            lastRunStatus: lastRun.status,
+            lastRunAt: lastRun.updatedAt,
+          }),
+      runCount,
+      updatedAt: project.updatedAt,
+    };
+  }
+
+  async listProjects(limit = 100): Promise<readonly ProjectListProjection[]> {
+    const projects = await this.repository.listProjects({ limit });
+    return mapWithConcurrency(
+      projects,
+      DIGEST_QUERY_CONCURRENCY,
+      (project) => this.projectListProjection(project),
+    );
+  }
+
+  async getProjectDetail(projectId: string): Promise<ProjectDetailProjection> {
+    const id = persistenceId('project', projectId);
+    const project = await this.repository.getProject(id);
+    if (project === undefined)
+      throw new ServiceError('project_not_found', 'project not found', 404);
+    const [summary, recentRuns, latest] = await Promise.all([
+      this.projectListProjection(project),
+      this.listRuns(6, projectId),
+      this.repository.getLatestConfigRevision(id),
+    ]);
+    let workflowBudgetMicrodollars: number | undefined;
+    let dailyBudgetMicrodollars: number | undefined;
+    if (latest !== undefined) {
+      try {
+        const config = parseAgentOsConfig(latest.config);
+        workflowBudgetMicrodollars = config.budgets.workflowMicrodollars;
+        dailyBudgetMicrodollars = config.budgets.dailyMicrodollars;
+      } catch {
+        // Budget labels are decoration; unreadable config must not break the page.
+      }
+    }
+    return {
+      ...summary,
+      ...(workflowBudgetMicrodollars === undefined
+        ? {}
+        : { workflowBudgetMicrodollars }),
+      ...(dailyBudgetMicrodollars === undefined
+        ? {}
+        : { dailyBudgetMicrodollars }),
+      recentRuns,
+    };
   }
 
   async getConfiguration(

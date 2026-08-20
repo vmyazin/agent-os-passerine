@@ -701,6 +701,26 @@ export class NeonDomainRepository implements DomainRepository {
     );
   }
 
+  async countRuns(
+    filter: Pick<RunListFilter, 'projectId' | 'status'> = {},
+  ): Promise<number> {
+    const [row] = await this.database
+      .select({ total: sql<string>`count(*)` })
+      .from(workflowRuns)
+      .where(
+        and(
+          filter.projectId === undefined
+            ? undefined
+            : eq(workflowRuns.projectId, filter.projectId),
+          filter.status === undefined
+            ? undefined
+            : eq(workflowRuns.status, filter.status),
+        ),
+      );
+    // count(*) is bigint; the driver hands it back as a string.
+    return Number(row?.total ?? 0);
+  }
+
   async updateRun(
     id: WorkflowRunId,
     update: WorkflowRunUpdate,

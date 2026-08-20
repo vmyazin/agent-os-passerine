@@ -945,6 +945,35 @@ export function repositoryParityContract(
       expect(third.map((step) => step.stepKey)).toEqual(['😀']);
     });
 
+    it('counts runs exactly beyond the list page cap', async () => {
+      const repository = await createRepository();
+      const { projectId, revisionId } = await seed(
+        repository,
+        `${implementation}-count`,
+      );
+      // MAX_LIST_LIMIT is 100, so a count derived from listRuns would
+      // saturate here and report a total that never grows again.
+      const total = 105;
+      for (let index = 1; index < total; index += 1) {
+        await repository.createRun({
+          id: persistenceId('run', `${implementation}-count-run-${String(index)}`),
+          projectId,
+          configRevisionId: revisionId,
+          pipeline: 'parity',
+          status: 'pending',
+          createdAt: at,
+          updatedAt: at,
+        });
+      }
+      expect(await repository.countRuns({ projectId })).toBe(total);
+      expect((await repository.listRuns({ projectId, limit: 1_000 })).length).toBe(100);
+      expect(
+        await repository.countRuns({
+          projectId: persistenceId('project', `${implementation}-count-absent`),
+        }),
+      ).toBe(0);
+    });
+
     it('isolates configuration preconditions per project', async () => {
       const repository = await createRepository();
       const project = (key: 'cas-a' | 'cas-b') => ({

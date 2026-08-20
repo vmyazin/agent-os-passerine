@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { SETUP_CONFIG_TEMPLATE } from './setup-template';
-import { SETUP_CONFIG_TEMPLATE_LOCAL } from './setup-template-local';
+import type { ProjectListProjection } from '../application/control-plane-service';
+import { renderSetupConfig } from './setup-template-render';
 
 interface ReadinessItem {
   readonly key: string;
@@ -29,11 +29,6 @@ interface Readiness {
 
 type ProjectMode = 'github' | 'local';
 
-/** The pristine (operator-untouched) template text for a given mode. */
-function templateForMode(mode: ProjectMode): string {
-  return mode === 'github' ? SETUP_CONFIG_TEMPLATE : SETUP_CONFIG_TEMPLATE_LOCAL;
-}
-
 interface LocalRepositoryResult {
   readonly localPath: string;
   readonly headSha: string;
@@ -56,6 +51,39 @@ interface RepositoryHead {
   readonly repository: string;
   readonly branch: string;
   readonly repositorySha: string;
+}
+
+interface WizardSnapshot {
+  readonly mode: ProjectMode;
+  readonly yaml: string;
+  readonly localName: string;
+  readonly localRepositoryResult?: LocalRepositoryResult;
+  readonly applied?: AppliedConfiguration;
+  readonly head?: RepositoryHead;
+  readonly title: string;
+  readonly description: string;
+  readonly runId: string;
+}
+
+const NEW_PROJECT_KEY = 'new';
+
+function defaultWizardSnapshot(mode: ProjectMode = 'github'): WizardSnapshot {
+  return {
+    mode,
+    yaml: renderSetupConfig(mode, { name: 'my-project' }),
+    localName: '',
+    title: '',
+    description: '',
+    runId: '',
+  };
+}
+
+function templateForMode(mode: ProjectMode): string {
+  return renderSetupConfig(mode, { name: 'my-project' });
+}
+
+function modeFromYaml(yaml: string): ProjectMode {
+  return /^[^\S\n]*localPath:/m.test(yaml) ? 'local' : 'github';
 }
 
 async function readError(response: Response): Promise<string> {
@@ -88,8 +116,15 @@ function StepHeading({
 export function SetupWizard() {
   const [readiness, setReadiness] = useState<Readiness | undefined>();
   const [readinessError, setReadinessError] = useState('');
+  const [projects, setProjects] = useState<readonly ProjectListProjection[]>(
+    [],
+  );
+  const [activeProjectKey, setActiveProjectKey] = useState(NEW_PROJECT_KEY);
+  const wizardByKey = useRef<Record<string, WizardSnapshot>>({
+    [NEW_PROJECT_KEY]: defaultWizardSnapshot(),
+  });
   const [mode, setMode] = useState<ProjectMode>('github');
-  const [yaml, setYaml] = useState(SETUP_CONFIG_TEMPLATE);
+  const [yaml, setYaml] = useState(templateForMode('github'));
   const [localName, setLocalName] = useState('');
   const [creatingLocalRepository, setCreatingLocalRepository] = useState(false);
   const [localRepositoryError, setLocalRepositoryError] = useState('');
@@ -108,6 +143,44 @@ export function SetupWizard() {
   const [startError, setStartError] = useState('');
   const [runId, setRunId] = useState('');
 
+  const snapshotWizard = (): WizardSnapshot => ({
+    mode,
+    yaml,
+    localName,
+    ...(localRepositoryResult === undefined ? {} : { localRepositoryResult }),
+    ...(applied === undefined ? {} : { applied }),
+    ...(head === undefined ? {} : { head }),
+    title,
+    description,
+    runId,
+  });
+
+  const restoreWizard = (saved: WizardSnapshot) => {
+    setMode(saved.mode);
+    setYaml(saved.yaml);
+    setLocalName(saved.localName);
+    setLocalRepositoryResult(saved.localRepositoryResult);
+    setApplied(saved.applied);
+    setHead(saved.head);
+    setTitle(saved.title);
+    setDescription(saved.description);
+    setRunId(saved.runId);
+    setApplyError('');
+    setHeadError('');
+    setStartError('');
+    setLocalRepositoryError('');
+  };
+
+  const loadProjects = async () => {
+    try {
+      const response = await fetch('/api/projects');
+      if (!response.ok) return;
+      setProjects((await response.json()) as readonly ProjectListProjection[]);
+    } catch {
+      // Project listing is decoration for the switcher; never block setup.
+    }
+  };
+
   const loadReadiness = async () => {
     setReadinessError('');
     try {
@@ -121,13 +194,72 @@ export function SetupWizard() {
     }
   };
 
+  const loadExistingProject = async (
+    projectId: string,
+  ): Promise<WizardSnapshot> => {
+    const response = await fetch(
+      `/api/configuration?projectId=${encodeURIComponent(projectId)}`,
+    );
+    if (!response.ok) throw new Error(await readError(response));
+    const body = (await response.json()) as {
+      active?: {
+        canonicalConfig?: string;
+        revision: number;
+        provenance: AppliedConfiguration['provenance'];
+      };
+      projectId?: string;
+    };
+    if (body.active?.canonicalConfig === undefined) {
+      const empty = defaultWizardSnapshot('github');
+      restoreWizard(empty);
+      return empty;
+    }
+    const nextMode = modeFromYaml(body.active.canonicalConfig);
+    const loaded: WizardSnapshot = {
+      mode: nextMode,
+      yaml: body.active.canonicalConfig,
+      localName: '',
+      applied: {
+        projectId: body.projectId ?? projectId,
+        revision: body.active.revision,
+        provenance: body.active.provenance,
+      },
+      title: '',
+      description: '',
+      runId: '',
+    };
+    restoreWizard(loaded);
+    return loaded;
+  };
+
+  const selectProject = async (key: string) => {
+    if (key === activeProjectKey) return;
+    wizardByKey.current[activeProjectKey] = snapshotWizard();
+    setActiveProjectKey(key);
+    const saved = wizardByKey.current[key];
+    if (saved !== undefined) {
+      restoreWizard(saved);
+      return;
+    }
+    if (key === NEW_PROJECT_KEY) {
+      restoreWizard(defaultWizardSnapshot(mode));
+      return;
+    }
+    try {
+      wizardByKey.current[key] = await loadExistingProject(key);
+    } catch (error) {
+      restoreWizard(defaultWizardSnapshot(mode));
+      setApplyError(
+        error instanceof Error ? error.message : 'project load failed',
+      );
+    }
+  };
+
   useEffect(() => {
     void loadReadiness();
+    void loadProjects();
   }, []);
 
-  // Switching modes only swaps the textarea when it still holds the
-  // pristine template for the mode being left — an operator's edits (in
-  // either mode) are never overwritten.
   const selectMode = (nextMode: ProjectMode) => {
     if (nextMode === mode) return;
     setYaml((current) =>
@@ -162,10 +294,11 @@ export function SetupWizard() {
         localPath: result.localPath,
         headSha: result.headSha,
       });
-      setYaml((current) =>
-        current
-          .replace(/^(\s*localPath:).*$/m, `$1 ${result.localPath}`)
-          .replace(/^(\s*name:).*$/m, `$1 ${result.name}`),
+      setYaml(
+        renderSetupConfig('local', {
+          name: result.name,
+          localPath: result.localPath,
+        }),
       );
       return result;
     } catch (error) {
@@ -182,14 +315,6 @@ export function SetupWizard() {
 
   const createLocalRepository = () => createRepository({ name: localName });
 
-  // One click sets up everything a fresh end-to-end walkthrough needs: a new
-  // auto-numbered repository, the matching project name and path in the
-  // YAML, and a first feature in step 4. Apply, head resolution, and run
-  // start stay explicit so the flow is still visible step by step.
-  //
-  // First features are deliberately dependency-free vanilla modules: the
-  // sealed verifier runs `pnpm test` with no network and no package
-  // installs, so a first feature that adds dependencies cannot verify.
   const TEST_PROJECTS = [
     {
       key: 'todo',
@@ -244,6 +369,18 @@ export function SetupWizard() {
       setApplied(result);
       setHead(undefined);
       setRunId('');
+      setActiveProjectKey(result.projectId);
+      wizardByKey.current[result.projectId] = {
+        mode,
+        yaml,
+        localName,
+        ...(localRepositoryResult === undefined ? {} : { localRepositoryResult }),
+        applied: result,
+        title,
+        description,
+        runId: '',
+      };
+      await loadProjects();
     } catch (error) {
       setApplyError(
         error instanceof Error ? error.message : 'configuration apply failed',
@@ -319,7 +456,7 @@ export function SetupWizard() {
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="setup-title">
         <p className="eyebrow">Guided setup</p>
-        <h1 id="setup-title">New project</h1>
+        <h1 id="setup-title">Projects</h1>
         <p>
           Four steps from an empty workspace to a running feature workflow.
           Approvals stay in the inbox; merging stays with you.
@@ -387,6 +524,27 @@ export function SetupWizard() {
 
       <section aria-labelledby="setup-step-2">
         <StepHeading step={2} title="Apply configuration" done={applied !== undefined} />
+        <nav aria-label="Project switcher" className="project-switcher">
+          <button
+            aria-pressed={activeProjectKey === NEW_PROJECT_KEY}
+            className={activeProjectKey === NEW_PROJECT_KEY ? undefined : 'secondary'}
+            onClick={() => void selectProject(NEW_PROJECT_KEY)}
+            type="button"
+          >
+            New project
+          </button>
+          {projects.map((project) => (
+            <button
+              aria-pressed={activeProjectKey === project.id}
+              className={activeProjectKey === project.id ? undefined : 'secondary'}
+              key={project.id}
+              onClick={() => void selectProject(project.id)}
+              type="button"
+            >
+              {project.name}
+            </button>
+          ))}
+        </nav>
         <div className="button-row" role="group" aria-label="Project type">
           <button
             aria-pressed={mode === 'github'}

@@ -4,15 +4,9 @@
 import type { ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
 
-import { PLACEHOLDER_PROJECTS } from './projects-placeholder';
-
 const NAV_ITEMS = [
   { href: '/', label: 'Overview' },
-  {
-    href: '/projects',
-    label: 'Projects',
-    count: PLACEHOLDER_PROJECTS.length,
-  },
+  { href: '/projects', label: 'Projects', countKey: 'projects' as const },
   { href: '/runs', label: 'Runs' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/configuration', label: 'Configuration' },
@@ -30,9 +24,11 @@ function isNavItemActive(pathname: string, href: string): boolean {
 export function AppRailNav({
   children,
   inboxCount = 0,
+  projectCount = 0,
 }: {
   readonly children?: ReactNode;
   readonly inboxCount?: number;
+  readonly projectCount?: number;
 }) {
   const pathname = usePathname();
 
@@ -46,8 +42,10 @@ export function AppRailNav({
             ? inboxCount > 0
               ? inboxCount
               : undefined
-            : 'count' in item
-              ? item.count
+            : 'countKey' in item && item.countKey === 'projects'
+              ? projectCount > 0
+                ? projectCount
+                : undefined
               : undefined;
 
         return (

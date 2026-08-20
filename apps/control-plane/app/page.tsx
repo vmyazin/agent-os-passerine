@@ -9,13 +9,15 @@ export const dynamic = 'force-dynamic';
 
 export default async function HomePage() {
   const session = await requirePageSession();
-  const runs = await controlPlaneService().listRuns(6);
-  const projects = new Set(runs.map((run) => run.projectId));
+  const service = controlPlaneService();
+  const [runs, projects] = await Promise.all([
+    service.listRuns(6),
+    service.listProjects(),
+  ]);
   const waitingCount = countWaitingRuns(runs);
+  const projectCount = projects.length;
   const activeProjectsLabel =
-    projects.size === 1
-      ? '1 active project'
-      : `${projects.size} active projects`;
+    projectCount === 1 ? '1 project' : `${projectCount} projects`;
   const waitingLabel =
     waitingCount === 1 ? '1 run waiting' : `${waitingCount} runs waiting`;
 
@@ -33,7 +35,7 @@ export default async function HomePage() {
       <section aria-label="Workspace summary" className="metric-grid">
         <article>
           <span className="metric-label">Projects</span>
-          <strong className="metric-value">{projects.size}</strong>
+          <strong className="metric-value">{projectCount}</strong>
           <span className="metric-detail">{activeProjectsLabel}</span>
         </article>
         <article>

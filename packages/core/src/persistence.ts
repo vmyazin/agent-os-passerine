@@ -488,6 +488,12 @@ export interface DomainRepository {
   ): Promise<WorkflowRun>;
   getRun(id: WorkflowRunId): Promise<WorkflowRun | undefined>;
   listRuns(filter?: RunListFilter): Promise<readonly WorkflowRun[]>;
+  /**
+   * Exact run count, unaffected by MAX_LIST_LIMIT. Counting via listRuns
+   * silently saturates at the page cap, which turns a displayed total into a
+   * number that stops moving once a project gets busy.
+   */
+  countRuns(filter?: Pick<RunListFilter, 'projectId' | 'status'>): Promise<number>;
   updateRun(id: WorkflowRunId, update: WorkflowRunUpdate): Promise<WorkflowRun>;
   transitionRun(
     id: WorkflowRunId,

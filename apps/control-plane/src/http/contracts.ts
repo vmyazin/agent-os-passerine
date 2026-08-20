@@ -262,6 +262,35 @@ export const runProjectionSchema = z
   })
   .strict();
 
+export const projectListProjectionSchema = z
+  .object({
+    id,
+    name: z.string().max(120),
+    binding: z.string().max(4_096),
+    latestRevision: z.number().int().positive().optional(),
+    configDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    lastRunStatus: z
+      .enum([
+        'pending',
+        'running',
+        'waiting',
+        'succeeded',
+        'failed',
+        'cancelled',
+      ])
+      .optional(),
+    lastRunAt: z.string().optional(),
+    runCount: z.number().int().min(0),
+    updatedAt: z.string(),
+  })
+  .strict();
+
+export const projectDetailProjectionSchema = projectListProjectionSchema.extend({
+  workflowBudgetMicrodollars: z.number().int().positive().optional(),
+  dailyBudgetMicrodollars: z.number().int().positive().optional(),
+  recentRuns: z.array(runProjectionSchema),
+});
+
 export const approvalSchema = z
   .object({
     id,

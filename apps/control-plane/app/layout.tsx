@@ -32,7 +32,10 @@ export default async function RootLayout({
             <a aria-label="Agent OS home" className="wordmark" href="/">
               Agent OS
             </a>
-            <AppRailNav inboxCount={counts?.inboxCount ?? 0}>
+            <AppRailNav
+              inboxCount={counts?.inboxCount ?? 0}
+              projectCount={counts?.projectCount ?? 0}
+            >
               {session ? <AppRailSignOut /> : null}
             </AppRailNav>
             <footer className="app-rail-footer">Agent OS control plane</footer>

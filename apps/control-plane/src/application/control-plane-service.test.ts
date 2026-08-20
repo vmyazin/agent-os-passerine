@@ -1644,3 +1644,50 @@ runtime: { provider: local }
     expect(resolved.active?.revision).toBe(1);
   });
 });
+
+describe('project directory projections', () => {
+  it('lists projects with binding, revision, and run summary', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    const applied = await applyProjectConfiguration(
+      service,
+      'directory-a',
+      '{ name: Directory A, repository: https://github.com/team/a }',
+    );
+    await service.createFeatureRun('directory-run', {
+      projectId: applied.projectId,
+      title: 'Directory run',
+      description: 'Exercise the directory projection.',
+      repositorySha: applied.provenance.repositorySha,
+      configDigest: applied.digest,
+      modelDigest: applied.provenance.modelDigest,
+      promptDigest: applied.provenance.promptDigest,
+      environmentDigest: applied.provenance.environmentDigest,
+      policyDigest: applied.provenance.policyDigest,
+    });
+
+    const projects = await service.listProjects();
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toMatchObject({
+      id: applied.projectId,
+      name: 'Directory A',
+      binding: 'https://github.com/team/a',
+      latestRevision: 1,
+      configDigest: applied.digest,
+      runCount: 1,
+      lastRunStatus: 'pending',
+    });
+
+    const detail = await service.getProjectDetail(applied.projectId);
+    expect(detail.recentRuns).toHaveLength(1);
+    expect(detail.workflowBudgetMicrodollars).toBe(1);
+    expect(detail.dailyBudgetMicrodollars).toBe(2);
+  });
+
+  it('rejects unknown project detail lookups', async () => {
+    const service = createService(new InMemoryDomainRepository());
+    await expect(service.getProjectDetail('missing-project')).rejects.toMatchObject(
+      { code: 'project_not_found', status: 404 },
+    );
+  });
+});

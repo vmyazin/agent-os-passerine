@@ -1,14 +1,16 @@
 // app/projects/page.tsx
+import { controlPlaneService } from '../../src/application/runtime';
 import { requirePageSession } from '../../src/auth/page-session';
+import { EmptyState } from '../../src/ui/components';
 import { PageToolbar } from '../../src/ui/page-toolbar';
-import { PLACEHOLDER_PROJECTS } from '../../src/ui/projects-placeholder';
 import { ProjectsTable } from '../../src/ui/projects-table';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ProjectsPage() {
   await requirePageSession();
-  const projectCount = PLACEHOLDER_PROJECTS.length;
+  const projects = await controlPlaneService().listProjects();
+  const projectCount = projects.length;
   const projectCountLabel =
     projectCount === 1 ? '1 project' : `${projectCount} projects`;
 
@@ -16,11 +18,18 @@ export default async function ProjectsPage() {
     <div className="page-stack">
       <PageToolbar
         action={<span className="project-count">{projectCountLabel}</span>}
-        description="Placeholder inventory of workspaces the control plane can run against."
+        description="Workspaces the control plane can run against."
         title="Projects"
         titleId="projects-title"
       />
-      <ProjectsTable projects={PLACEHOLDER_PROJECTS} />
+      {projects.length === 0 ? (
+        <EmptyState title="No projects yet">
+          Apply a configuration in{' '}
+          <a href="/setup">Setup</a> to register your first project.
+        </EmptyState>
+      ) : (
+        <ProjectsTable projects={projects} />
+      )}
     </div>
   );
 }

@@ -553,6 +553,16 @@ export class InMemoryDomainRepository implements DomainRepository {
     );
   }
 
+  async countRuns(
+    filter: Pick<RunListFilter, 'projectId' | 'status'> = {},
+  ): Promise<number> {
+    return [...this.#runs.values()].filter(
+      (run) =>
+        (filter.projectId === undefined || run.projectId === filter.projectId) &&
+        (filter.status === undefined || run.status === filter.status),
+    ).length;
+  }
+
   async updateRun(
     id: WorkflowRunId,
     update: WorkflowRunUpdate,

@@ -4,7 +4,6 @@ import {
   issueSession,
   SESSION_COOKIE,
 } from '../../apps/control-plane/src/auth/auth';
-import { PLACEHOLDER_PROJECTS } from '../../apps/control-plane/src/ui/projects-placeholder';
 import { timeOfDayGreeting } from '../../apps/control-plane/src/ui/time-of-day-greeting';
 
 test.beforeEach(async ({ context, page }) => {
@@ -54,9 +53,7 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
       .getByRole('button', { name: 'Sign Out' }),
   ).toBeVisible();
   await expect(
-    page.getByRole('link', {
-      name: `Projects, ${PLACEHOLDER_PROJECTS.length}`,
-    }),
+    page.getByRole('link', { name: 'Projects, 1' }),
   ).toBeVisible();
 });
 
@@ -66,13 +63,10 @@ test('operator can open the projects directory', async ({ page }) => {
   await expect(
     page.getByRole('heading', { level: 1, name: 'Projects' }),
   ).toBeVisible();
+  await expect(page.getByRole('table', { name: 'Projects' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'E2E Project' })).toBeVisible();
   await expect(
-    page.getByRole('table', { name: 'Placeholder projects' }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('link', {
-      name: `Projects, ${PLACEHOLDER_PROJECTS.length}`,
-    }),
+    page.getByRole('link', { name: 'Projects, 1' }),
   ).toHaveAttribute('aria-current', 'page');
 });
 

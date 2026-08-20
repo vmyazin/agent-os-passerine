@@ -1,22 +1,82 @@
+// app/configuration/page.tsx
+import { controlPlaneService } from '../../src/application/runtime';
+import { ServiceError } from '../../src/application/control-plane-service';
 import { requirePageSession } from '../../src/auth/page-session';
-import { loadConfigurationPageYaml } from '../../src/config/configuration-page-model';
+import { EmptyState } from '../../src/ui/components';
 import { PageToolbar } from '../../src/ui/page-toolbar';
+import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
+import { redactConfigurationForDisplay } from '../../src/ui/redact-configuration';
 
 export const dynamic = 'force-dynamic';
 
-export default async function ConfigurationPage() {
+export default async function ConfigurationPage({
+  searchParams,
+}: {
+  readonly searchParams: Promise<{ projectId?: string }>;
+}) {
   await requirePageSession();
-  const yaml = await loadConfigurationPageYaml();
+  const { projectId: requestedProjectId } = await searchParams;
+  const service = controlPlaneService();
+  const projects = await service.listProjects();
+  const selectorProjectId =
+    requestedProjectId ??
+    (projects.length === 1 ? projects[0]!.id : undefined);
+
+  let yaml: string | undefined;
+  let activeProjectId: string | undefined;
+  let revisionLabel: string | undefined;
+
+  if (selectorProjectId !== undefined) {
+    try {
+      const { active, projectId } = await service.getConfiguration(true, {
+        projectId: selectorProjectId,
+      });
+      activeProjectId = projectId;
+      if (active?.canonicalConfig !== undefined) {
+        yaml = redactConfigurationForDisplay(active.canonicalConfig);
+        revisionLabel = `Revision ${active.revision} · digest ${active.digest.slice(0, 12)}…`;
+      }
+    } catch (error) {
+      if (!(error instanceof ServiceError && error.code === 'project_not_found'))
+        throw error;
+    }
+  }
+
   return (
     <div className="page-stack">
       <PageToolbar
-        description="Canonical metadata for the active control-plane configuration."
+        action={
+          revisionLabel === undefined ? undefined : (
+            <span className="project-count">{revisionLabel}</span>
+          )
+        }
+        description="Canonical metadata for the selected project's applied configuration."
         title="Configuration"
         titleId="configuration-title"
       />
-      <pre className="configuration" aria-label="Canonical configuration YAML">
-        <code>{yaml}</code>
-      </pre>
+      <ProjectFilterChips
+        activeProjectId={activeProjectId}
+        basePath="/configuration"
+        projects={projects}
+      />
+      {projects.length === 0 ? (
+        <EmptyState title="No projects yet">
+          Apply a configuration in <a href="/setup">Setup</a> first.
+        </EmptyState>
+      ) : selectorProjectId === undefined ? (
+        <EmptyState title="Select a project">
+          Choose a project above to view its applied configuration.
+        </EmptyState>
+      ) : yaml === undefined ? (
+        <EmptyState title="No configuration applied">
+          This project has no applied revision yet. Use{' '}
+          <a href="/setup">Setup</a> to apply one.
+        </EmptyState>
+      ) : (
+        <pre className="configuration" aria-label="Canonical configuration YAML">
+          <code>{yaml}</code>
+        </pre>
+      )}
     </div>
   );
 }

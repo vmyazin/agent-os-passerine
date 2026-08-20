@@ -1,19 +1,21 @@
 // src/ui/projects-table.tsx
+import type { ProjectListProjection } from '../application/control-plane-service';
+import { formatDisplayDate } from './format-timestamp';
 import { RunStatusBadge } from './components';
-import type { PlaceholderProject } from './projects-placeholder';
 
 export function ProjectsTable({
   projects,
 }: {
-  readonly projects: readonly PlaceholderProject[];
+  readonly projects: readonly ProjectListProjection[];
 }) {
   return (
     <div className="projects-table-wrap">
-      <table className="projects-table" aria-label="Placeholder projects">
+      <table className="projects-table" aria-label="Projects">
         <thead>
           <tr>
             <th scope="col">Project</th>
-            <th scope="col">Repository</th>
+            <th scope="col">Binding</th>
+            <th scope="col">Revision</th>
             <th scope="col">Last run</th>
             <th scope="col">Updated</th>
           </tr>
@@ -22,14 +24,37 @@ export function ProjectsTable({
           {projects.map((project) => (
             <tr key={project.id}>
               <th className="project-name-cell" scope="row">
-                <strong className="project-name">{project.name}</strong>
-                <small className="project-id">{project.id}</small>
+                <a className="project-name-link" href={`/projects/${project.id}`}>
+                  <strong className="project-name">{project.name}</strong>
+                  <small className="project-id">{project.id}</small>
+                </a>
               </th>
-              <td className="project-repository">{project.repository}</td>
-              <td>
-                <RunStatusBadge status={project.lastRunStatus} />
+              <td className="project-repository">{project.binding}</td>
+              <td className="project-revision">
+                {project.latestRevision === undefined ? (
+                  '—'
+                ) : (
+                  <>
+                    r{project.latestRevision}
+                    {project.configDigest === undefined ? null : (
+                      <>
+                        {' '}
+                        <code>{project.configDigest.slice(0, 8)}…</code>
+                      </>
+                    )}
+                  </>
+                )}
               </td>
-              <td className="project-updated">{project.updatedAt}</td>
+              <td>
+                {project.lastRunStatus === undefined ? (
+                  '—'
+                ) : (
+                  <RunStatusBadge status={project.lastRunStatus} />
+                )}
+              </td>
+              <td className="project-updated">
+                {formatDisplayDate(project.updatedAt)}
+              </td>
             </tr>
           ))}
         </tbody>

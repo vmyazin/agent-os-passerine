@@ -1207,3 +1207,68 @@ div.inbox-message-copy {
   background: var(--status-success-surface);
   color: var(--ink-command);
 }
+
+.project-filter-chips,
+.project-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.project-filter-chips a,
+.project-switcher button {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  background: var(--surface-sheet);
+  color: var(--ink-secondary);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.project-filter-chips a[aria-current='page'],
+.project-switcher button[aria-pressed='true'] {
+  border-color: var(--ink-command);
+  background: var(--surface-inset);
+  color: var(--ink-command);
+}
+
+.project-name-link {
+  display: grid;
+  gap: 0.15rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.project-name-link:hover .project-name {
+  color: var(--ink-command);
+}
+
+.project-provenance-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.project-provenance-list div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.project-provenance-list dt {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.secondary-link {
+  color: var(--ink-secondary);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.secondary-link:hover {
+  color: var(--ink-command);
+}
