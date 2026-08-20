@@ -36,8 +36,11 @@ export function renderSetupConfig(
   const template =
     mode === 'github' ? SETUP_CONFIG_TEMPLATE : SETUP_CONFIG_TEMPLATE_LOCAL;
   const block = projectBlock(mode, params);
-  const replaced = template.replace(/^project:\n(?: {2}.*\n)+/m, `${block}\n`);
-  if (replaced === template)
+  // Guard on the pattern, not on whether the output changed: rendering with
+  // the template's own defaults produces a byte-identical document, and
+  // comparing strings would report that correct result as a failed match.
+  const projectBlockPattern = /^project:\n(?: {2}.*\n)+/m;
+  if (!projectBlockPattern.test(template))
     throw new Error('setup template project block did not match');
-  return replaced;
+  return template.replace(projectBlockPattern, `${block}\n`);
 }
