@@ -1,0 +1,1 @@
+Durable, idempotent feature and goal workflow adapters over Trigger.dev that orchestrate agent sessions with effect-based checkpointing, budget enforcement, approvals, verification, and publication.

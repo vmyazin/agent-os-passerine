@@ -1,0 +1,1 @@
+TypeScript adapters built on `@trigger.dev/sdk` for distributed tasks, waitpoints, and run cancellation; Zod schemas for all payload validation; SHA-256 canonical JSON hashing for idempotency keys; AES handle sealing via `handle-sealer.ts`; Postgres-backed checkpoint store (`postgres-checkpoint-store.ts`) with Neon database integration for publication stores.

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: control_plane_app/ui_pages
+title: Control Plane UI Pages & API Routes
+scope:
+    - apps/control-plane/app/
+source_files: []
+depends_on: []
+related_to: []

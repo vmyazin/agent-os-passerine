@@ -1,0 +1,1 @@
+Next.js App Router application that exposes the Agent OS control plane through HTTP routes, authentication flows, UI pages, and a domain service layer backed by in-memory or Neon repositories.

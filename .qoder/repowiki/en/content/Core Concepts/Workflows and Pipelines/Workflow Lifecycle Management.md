@@ -6,6 +6,7 @@
 - [workflow-reconciliation.ts](file://apps/control-plane/src/application/workflow-reconciliation.ts)
 - [workflow-dispatch.test.ts](file://apps/control-plane/src/application/workflow-dispatch.test.ts)
 - [workflow.ts](file://packages/adapters/src/trigger/workflow.ts)
+- [types.ts](file://packages/adapters/src/trigger/types.ts)
 - [budget.ts](file://packages/core/src/budget.ts)
 - [durable-feature-workflow.md](file://docs/architecture/durable-feature-workflow.md)
 - [reconciliation-cursor-store.ts](file://packages/adapters/src/trigger/reconciliation-cursor-store.ts)
@@ -14,6 +15,13 @@
 - [0019_project_session_leases.sql](file://drizzle/0019_project_session_leases.sql)
 - [0020_deployment_daily_budget.sql](file://drizzle/0020_deployment_daily_budget.sql)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated approval workflow timing section to reflect decoupling of deliberation time from run budget
+- Modified deadline calculation logic to use approval consumedAt timestamp instead of run createdAt
+- Updated workflow timeout behavior to provide adequate time for remaining steps after approval consumption
+- Enhanced monitoring and reconciliation sections to reflect new deadline computation approach
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -28,7 +36,7 @@
 10. [Appendices](#appendices)
 
 ## Introduction
-This document explains how Agent OS Passerine manages the full lifecycle of workflows: creation, start, monitoring, pause/resume via approvals, cancellation, and termination with cleanup. It covers durable state persistence, recovery through reconciliation, resource allocation and budget enforcement, graceful shutdown, and concurrency controls for high-throughput scenarios. It also provides practical API interaction patterns derived from the control plane outbox and reconciliation logic, and highlights error recovery strategies used by the system.
+This document explains how Agent OS Passerine manages the full lifecycle of workflows: creation, start, monitoring, pause/resume via approvals, cancellation, and termination with cleanup. It covers durable state persistence, recovery through reconciliation, resource allocation and budget enforcement, graceful shutdown, and concurrency controls for high-throughput scenarios. The system now provides enhanced approval workflow timing that decouples deliberation time from run budget by computing execution deadlines from approval consumedAt timestamps plus workflow timeout, ensuring adequate time for remaining workflow steps regardless of approval consumption delays.
 
 ## Project Structure
 The workflow lifecycle spans several layers:
@@ -53,6 +61,7 @@ end
 subgraph "Persistence"
 DB["Postgres"]
 CURSOR["Reconciliation Cursor"]
+APPROVALS["Approval Store"]
 end
 CP --> OUTBOX
 RECONCILE --> OUTBOX
@@ -60,6 +69,7 @@ OUTBOX --> WF
 WF --> CKPT
 WF --> ADMIT
 WF --> RUNTIME
+WF --> APPROVALS
 CKPT --> DB
 ADMIT --> DB
 RUNTIME --> DB
@@ -96,12 +106,12 @@ RECONCILE --> DB
 - [postgres-checkpoint-store.ts:1-367](file://packages/adapters/src/trigger/postgres-checkpoint-store.ts#L1-L367)
 
 ## Architecture Overview
-The lifecycle is event-driven and durable:
+The lifecycle is event-driven and durable with enhanced approval timing:
 - Creation: The control plane persists a run and emits a start intent only after durable artifacts exist.
 - Start: The reconciler detects pending runs and requests start via the outbox; the trigger task claims an effect and admits a session under budget and concurrency constraints.
 - Execution: Steps are executed with idempotent input fingerprints, retries, and checkpointed outputs; usage is recorded per step.
-- Monitoring: The reconciler enforces deadlines, cancels long-running or failed runs, and triggers cleanup.
-- Pause/Resume: Workflows wait for scoped approvals; when approved or rejected, the reconciler emits resume intents that transition the workflow state machine.
+- Monitoring: The reconciler enforces deadlines based on approval consumption, cancels long-running or failed runs, and triggers cleanup.
+- Pause/Resume: Workflows wait for scoped approvals with 24-hour TTL; when approved or rejected, the reconciler emits resume intents that transition the workflow state machine.
 - Termination: Terminal states (succeeded, failed, cancelled, budget_exhausted) trigger cleanup intents and release resources.
 
 ```mermaid
@@ -111,6 +121,7 @@ participant CP as "ControlPlaneService"
 participant OUT as "Outbox"
 participant REC as "Reconciler"
 participant TRG as "Trigger Task"
+participant APPR as "Approval Store"
 participant DB as "Postgres"
 Client->>CP : Create feature run
 CP->>DB : Persist run + config snapshot
@@ -120,10 +131,11 @@ REC->>DB : Scan runs (cursor-based)
 REC->>OUT : requestStart(runId) if pending
 OUT->>TRG : Deliver start intent
 TRG->>DB : Claim effect + admit session
+TRG->>APPR : Create approval with expiresAt = createdAt + approvalTtlMs
 TRG->>TRG : Execute step(s) with retries
 TRG->>DB : Record usage + settle reservation
 TRG-->>REC : Run status updates
-REC->>DB : Enforce deadline / cancel if needed
+REC->>DB : Enforce deadline based on consumedAt + workflowTimeout
 REC-->>OUT : requestCancel / requestCleanup
 ```
 
@@ -171,6 +183,41 @@ running --> budget_exhausted : "exhaust_budget"
 
 **Section sources**
 - [feature-workflow.ts:8-320](file://packages/core/src/feature-workflow.ts#L8-L320)
+
+### Approval Workflow Timing and Deadline Management
+
+**Updated** The approval workflow timing has been enhanced to decouple deliberation time from run budget. Previously, the execution deadline was calculated from the run's creation time plus workflow timeout. Now, the deadline is computed from the approval's consumedAt timestamp plus the workflow timeout, providing adequate time for remaining workflow steps regardless of approval consumption delays.
+
+Key changes include:
+- **Approval TTL**: Approvals now have a separate 24-hour TTL (`approvalTtlMs`) independent of the workflow execution budget
+- **Deadline Calculation**: After approval consumption, the execution deadline is set to `consumedAt + workflowTimeoutMs`
+- **Wait Duration**: Approval wait duration is bounded by the approval TTL rather than the workflow timeout
+- **Reconciliation Logic**: The reconciler now checks approval expiration separately from execution deadlines
+
+```mermaid
+sequenceDiagram
+participant TRG as "Trigger Task"
+participant APPR as "Approval Store"
+participant DB as "Database"
+Note over TRG,DB : Before : deadline = createdAt + workflowTimeoutMs
+Note over TRG,DB : After : deadline = consumedAt + workflowTimeoutMs
+TRG->>APPR : Create approval with expiresAt = createdAt + approvalTtlMs
+APPR-->>TRG : Approval created with 24h TTL
+TRG->>APPR : Wait for approval decision
+Note over TRG : Approval can be delayed up to 24 hours
+APPR-->>TRG : Approval decision received
+TRG->>DB : Get approval with consumedAt timestamp
+TRG->>TRG : Calculate deadline = consumedAt + workflowTimeoutMs
+Note over TRG : Remaining workflow steps have full timeout budget
+```
+
+**Diagram sources**
+- [workflow.ts:1220-1360](file://packages/adapters/src/trigger/workflow.ts#L1220-L1360)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-L33)
+
+**Section sources**
+- [workflow.ts:1220-1360](file://packages/adapters/src/trigger/workflow.ts#L1220-L1360)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-L33)
 
 ### Control Plane Outbox and Reconciliation
 - Idempotent start: Creating a feature run persists the run and emits one start intent keyed by run ID. Duplicate calls do not create duplicates.
@@ -244,7 +291,7 @@ Complete --> End(["Step Exit"])
 - Global concurrency fence: A single live agent-session lease prevents overlapping sessions across the project; conflicts are enforced at the database level.
 - Session leases: Lease keys include run and step identifiers; expiration and updates are persisted to avoid stale ownership.
 - Cleanup procedures: On failure or cancellation, the reconciler emits cleanup intents; orphan sessions are stopped and charged conservatively if no session is discoverable within reconciliation deadlines.
-- Graceful shutdown: The reconciler’s cursor is persisted after each run, ensuring resumed scans continue beyond the last processed run without starvation.
+- Graceful shutdown: The reconciler's cursor is persisted after each run, ensuring resumed scans continue beyond the last processed run without starvation.
 
 ```mermaid
 classDiagram
@@ -282,7 +329,7 @@ CheckpointStore --> BudgetLedger : "admits & settles"
 
 ### Interaction Between Workflow Instances, Shared Resources, and External Dependencies
 - Isolation: Each role uses distinct agents and environments; artifact scopes are bound to run and step IDs to prevent cross-run leakage.
-- External dependencies: Artifact MCP capabilities write only to the role’s logical step scope; verification runs in a sandbox with restricted network and no MCP.
+- External dependencies: Artifact MCP capabilities write only to the role's logical step scope; verification runs in a sandbox with restricted network and no MCP.
 - Publisher authority: Publication is performed by trusted code with attestation verification; agents never receive repository credentials.
 
 **Section sources**
@@ -325,16 +372,16 @@ Runtime --> DB
 - Cost-aware scheduling: Admission checks incorporate both workflow and daily caps; reservations are included in cap calculations to avoid silent overuse.
 - Cursor-based scanning: Reconciliation uses persistent cursors to avoid rescanning old runs and to scale to large run histories.
 - Usage pricing granularity: Distinct cache buckets and runtime minutes enable accurate cost attribution and optimization signals.
-
-[No sources needed since this section provides general guidance]
+- **Enhanced approval timing**: The decoupling of approval deliberation time from execution budget reduces unnecessary workflow timeouts during extended approval processes, improving overall system efficiency.
 
 ## Troubleshooting Guide
 Common issues and recovery patterns:
 - Duplicate starts: The outbox ensures only one start per run ID; verify idempotency keys and run existence before dispatch.
-- Approval delays: Approvals must be durable before resume intents are emitted; check approval events and scope hashes.
-- Deadline exceeded: Runs past their timeout are marked failed; approvals are expired and cancellation/cleanup are emitted.
+- Approval delays: Approvals must be durable before resume intents are emitted; check approval events and scope hashes. With the new timing, approvals can remain pending for up to 24 hours without affecting execution deadlines.
+- Deadline exceeded: Runs past their timeout are marked failed; approvals are expired and cancellation/cleanup are emitted. With the updated timing, deadlines are now based on approval consumption rather than run creation.
 - Budget exhaustion: If admission denies due to caps or concurrency, adjust limits or reduce estimated costs; monitor usage records.
 - Orphan sessions: If no session is found within reconciliation deadlines, cleanup charges the reservation and releases the global fence.
+- **Approval timing issues**: If workflows appear to timeout unexpectedly, check whether the approval was consumed and verify the consumedAt timestamp is properly set.
 
 **Section sources**
 - [workflow-dispatch.test.ts:133-199](file://apps/control-plane/src/application/workflow-dispatch.test.ts#L133-L199)
@@ -342,9 +389,7 @@ Common issues and recovery patterns:
 - [durable-feature-workflow.md:60-108](file://docs/architecture/durable-feature-workflow.md#L60-L108)
 
 ## Conclusion
-Agent OS Passerine implements a robust, durable workflow lifecycle grounded in event-driven state machines, idempotent outbox semantics, and strong consistency via Postgres-backed checkpoints and leases. The reconciler enforces deadlines and drives recovery, while the trigger runtime ensures safe execution with retries, budget controls, and precise usage accounting. Together, these components provide scalable, observable, and resilient workflow management suitable for high-throughput environments.
-
-[No sources needed since this section summarizes without analyzing specific files]
+Agent OS Passerine implements a robust, durable workflow lifecycle grounded in event-driven state machines, idempotent outbox semantics, and strong consistency via Postgres-backed checkpoints and leases. The recent enhancement to approval workflow timing decouples deliberation time from execution budget, providing more predictable workflow behavior and adequate time for remaining steps after approval consumption. The reconciler enforces deadlines and drives recovery, while the trigger runtime ensures safe execution with retries, budget controls, and precise usage accounting. Together, these components provide scalable, observable, and resilient workflow management suitable for high-throughput environments.
 
 ## Appendices
 
@@ -352,7 +397,8 @@ Agent OS Passerine implements a robust, durable workflow lifecycle grounded in e
 - Create a feature run: Call the control plane to persist a run; the service emits a start intent only after the run exists.
 - Resume on approval: After an approval decision is durable, the reconciler emits a resume intent with the approval ID and scope hash.
 - Cancel a run: Emit a cancellation intent after the run.cancelled event is durable; the reconciler will cancel child runs if applicable.
-- Monitor runs: Use the reconciler’s cursor to scan runs and observe status transitions, approvals, and cleanup intents.
+- Monitor runs: Use the reconciler's cursor to scan runs and observe status transitions, approvals, and cleanup intents.
+- **Monitor approval timing**: Track approval consumedAt timestamps to understand when execution deadlines begin and ensure adequate time remains for workflow completion.
 
 **Section sources**
 - [workflow-dispatch.test.ts:56-199](file://apps/control-plane/src/application/workflow-dispatch.test.ts#L56-L199)

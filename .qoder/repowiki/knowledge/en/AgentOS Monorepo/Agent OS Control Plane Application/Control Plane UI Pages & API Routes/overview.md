@@ -1,0 +1,1 @@
+Next.js App Router pages and server-side route handlers that render the Agent OS control plane dashboard and expose authenticated REST endpoints for projects, runs, inbox, approvals, configuration, and setup.

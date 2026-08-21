@@ -16,7 +16,16 @@
 - [dod.ts](file://packages/core/src/dod.ts)
 - [attestation.test.ts](file://packages/core/src/attestation.test.ts)
 - [commands.test.ts](file://apps/cli/src/commands.test.ts)
+- [workflow.ts](file://packages/adapters/src/trigger/workflow.ts)
+- [types.ts](file://packages/adapters/src/trigger/types.ts)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated approval workflow section to reflect dedicated 24-hour approval TTL independent from workflow timeout
+- Enhanced deadline calculation documentation based on consumedAt timestamp rather than createdAt
+- Added error handling details for approval_consumed_at_missing validation
+- Updated workflow resumption flow to show improved timing logic
 
 ## Table of Contents
 1. Introduction
@@ -32,6 +41,8 @@
 
 ## Introduction
 This document explains how Agent OS Passerine integrates human decision points into automated workflows for critical operations such as specification approval, code review gating, and policy exceptions. It covers the full lifecycle of an approval: creation, notification and inbox presentation, decision recording, audit trails, expiration handling, and workflow resumption. It also documents attestation-based verification to ensure integrity of Definition-of-Done checks, and provides guidance on CLI and web interactions, escalation paths, bulk operations, delegation, expiration policies, and integration with external systems.
+
+**Updated** The approval workflow now features a dedicated 24-hour approval TTL (approvalTtlMs) that is independent from the workflow timeout, providing more predictable approval windows and improved deadline calculation based on the consumedAt timestamp rather than createdAt.
 
 ## Project Structure
 Approvals are part of a broader control plane that orchestrates agent-driven pipelines. The key pieces involved in approvals and human intervention include:
@@ -91,13 +102,15 @@ Reconciler --> Events
 - [neon-repository.ts:906-994](file://packages/adapters/src/persistence/neon-repository.ts#L906-L994)
 
 ## Core Components
-- Approval creation and projection: The service creates approvals with deterministic IDs, fingerprints, and expiry times; it projects status including derived “expired” when past deadline.
+- Approval creation and projection: The service creates approvals with deterministic IDs, fingerprints, and expiry times; it projects status including derived "expired" when past deadline.
 - Decision endpoints: Authenticated POST endpoints accept approve or reject with a scope hash and idempotency key.
 - Inbox listing: Aggregates pending approvals and messages for operator attention.
 - UI actions: Web UI renders approval context and exposes Approve/Reject buttons; CLI supports equivalent commands.
 - Persistence: Repository methods create, list, consume, and expire approvals atomically with time guards.
 - Workflow resumption: Reconciliation scans events and dispatches resume requests carrying decision and scope hash.
 - Attestation: Definition-of-Done verifiers issue signed attestations for criterion results, enabling tamper-evident evidence.
+
+**Updated** The approval workflow now uses a dedicated 24-hour approval TTL (approvalTtlMs) separate from workflow timeout, with improved deadline calculation starting from the consumedAt timestamp rather than createdAt.
 
 **Section sources**
 - [control-plane-service.ts:265-386](file://apps/control-plane/src/application/control-plane-service.ts#L265-L386)
@@ -113,6 +126,8 @@ Reconciler --> Events
 ## Architecture Overview
 The approval flow integrates human intervention between automated steps. A typical feature pipeline triggers a specification step that produces artifacts and then pauses for human approval before implementation proceeds.
 
+**Updated** The workflow now uses a dedicated approval TTL of 24 hours, independent from the workflow execution timeout. After approval consumption, the workflow execution deadline is calculated from the consumedAt timestamp plus the workflow timeout, providing more accurate timing for post-approval execution.
+
 ```mermaid
 sequenceDiagram
 participant Spec as "Specification Agent"
@@ -122,6 +137,7 @@ participant UI as "Inbox UI"
 participant Operator as "Operator"
 participant Reconciler as "Workflow Reconciliation"
 Spec->>Service : Create approval (runId, scope, expiresAt)
+Note over Service : expiresAt = createdAt + approvalTtlMs (24h)
 Service->>Repo : Insert approval (pending, fingerprint, expiresAt)
 Note over Service,Repo : Idempotent by key; conflict if mismatched
 Service-->>UI : Pending approval appears in inbox
@@ -133,13 +149,16 @@ Repo-->>Service : Updated approval with consumedAt
 Service->>Repo : Append event (approval.approved or approval.rejected)
 Reconciler->>Repo : Scan events
 Reconciler->>Service : requestApprovalResume(runId, approvalId, decision, scopeHash)
+Note over Reconciler : Execution deadline = consumedAt + workflowTimeoutMs
 Service-->>Reconciler : Resume intent queued
 ```
 
 **Diagram sources**
 - [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
-- [neon-repository.ts:949-968](file://packages/adapters/src/persistence/neon-repository.ts#L949-L968)
+- [neon-repository.ts:949-968](file://packages/adapters/src/persistence/neon-repository.ts#L949-968)
 - [workflow-reconciliation.ts:472-495](file://apps/control-plane/src/application/workflow-reconciliation.ts#L472-L495)
+- [workflow.ts:1220-1237](file://packages/adapters/src/trigger/workflow.ts#L1220-L1237)
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)
 - [inbox-view.tsx:62-176](file://apps/control-plane/src/ui/inbox-view.tsx#L62-L176)
 - [mutation-forms.tsx:56-92](file://apps/control-plane/src/ui/mutation-forms.tsx#L56-L92)
 
@@ -150,6 +169,8 @@ Service-->>Reconciler : Resume intent queued
 - Expiry is enforced both at read time (projection marks expired) and write time (consume guard).
 - Summary enrichment reads spec artifacts to show title, requirements, and DoD criteria in the inbox.
 
+**Updated** Approval expiration is now calculated as `createdAt + approvalTtlMs` (24 hours), providing a dedicated approval window independent from workflow execution time.
+
 ```mermaid
 flowchart TD
 Start(["createApproval"]) --> Build["Build approval record<br/>id, runId, scope, fingerprint, expiresAt"]
@@ -158,6 +179,7 @@ CheckExisting --> |Yes| ValidateKey{"Keys match?"}
 ValidateKey --> |No| Conflict["Throw idempotency_conflict"]
 ValidateKey --> |Yes| ReturnExisting["Return projected existing"]
 CheckExisting --> |No| Persist["Persist approval"]
+Note over Persist : expiresAt = createdAt + approvalTtlMs (24h)
 Persist --> Project["Project with derived expired status"]
 Project --> End(["ApprovalProjection"])
 ```
@@ -165,16 +187,20 @@ Project --> End(["ApprovalProjection"])
 **Diagram sources**
 - [control-plane-service.ts:1311-1344](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1344)
 - [control-plane-service.ts:368-386](file://apps/control-plane/src/application/control-plane-service.ts#L368-L386)
+- [workflow.ts:1220-1237](file://packages/adapters/src/trigger/workflow.ts#L1220-L1237)
 
 **Section sources**
 - [control-plane-service.ts:1311-1344](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1344)
 - [control-plane-service.ts:368-386](file://apps/control-plane/src/application/control-plane-service.ts#L368-L386)
 - [control-plane-service.ts:1631-1667](file://apps/control-plane/src/application/control-plane-service.ts#L1631-L1667)
+- [workflow.ts:1220-1237](file://packages/adapters/src/trigger/workflow.ts#L1220-L1237)
 
 ### Decision Endpoints (Approve/Reject)
 - Both endpoints require authentication and validate input schemas.
-- They call the service’s consumeApproval with a bounded path ID, decision type, idempotency key, and scope hash.
+- They call the service's consumeApproval with a bounded path ID, decision type, idempotency key, and scope hash.
 - Errors like already decided or invalid/expired approvals surface as client-friendly messages.
+
+**Updated** The approval consumption process now includes enhanced validation for approval_consumed_at_missing scenarios, ensuring data integrity when workflows resume after approval.
 
 ```mermaid
 sequenceDiagram
@@ -188,9 +214,10 @@ Svc->>DB : consumeApproval(request)
 DB-->>Svc : Approval or undefined
 alt success
 Svc->>DB : appendEvent(approval.approved|rejected)
+Note over Svc : consumedAt recorded for timing
 Svc-->>Route : ApprovalProjection
 else failure
-Svc-->>Route : Error (already decided / invalid)
+Svc-->>Route : Error (already decided / invalid / approval_expired)
 end
 ```
 
@@ -198,7 +225,7 @@ end
 - [route.ts (approve):11-32](file://apps/control-plane/app/api/approvals/[id]/approve/route.ts#L11-L32)
 - [route.ts (reject):11-32](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts#L11-L32)
 - [control-plane-service.ts:1392-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1392-L1433)
-- [neon-repository.ts:949-968](file://packages/adapters/src/persistence/neon-repository.ts#L949-L968)
+- [neon-repository.ts:949-968](file://packages/adapters/src/persistence/neon-repository.ts#L949-968)
 
 **Section sources**
 - [route.ts (approve):11-32](file://apps/control-plane/app/api/approvals/[id]/approve/route.ts#L11-L32)
@@ -238,6 +265,8 @@ Submit --> Feedback["Show saved or error message"]
 - After a decision event is appended, reconciliation detects it and dispatches a resume request with the decision and scope hash.
 - If a workflow exceeds its timeout, reconciliation transitions it to failed and expires any pending approvals tied to that run.
 
+**Updated** The workflow now calculates the execution deadline based on the approval's consumedAt timestamp plus the workflow timeout, rather than using the original run creation time. This provides more accurate timing for post-approval execution phases.
+
 ```mermaid
 sequenceDiagram
 participant Repo as "Repository"
@@ -247,15 +276,18 @@ Rec->>Repo : List events for runs
 Rec->>Rec : Filter approval.approved|rejected
 Rec->>Outbox : requestApprovalResume(runId, approvalId, decision, scopeHash)
 Note over Rec : On deadline exceeded : transition run to failed and expire approvals
+Note over Rec : New : deadline = consumedAt + workflowTimeoutMs
 ```
 
 **Diagram sources**
 - [workflow-reconciliation.ts:472-495](file://apps/control-plane/src/application/workflow-reconciliation.ts#L472-L495)
 - [workflow-reconciliation.ts:214-265](file://apps/control-plane/src/application/workflow-reconciliation.ts#L214-L265)
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)
 
 **Section sources**
 - [workflow-reconciliation.ts:214-265](file://apps/control-plane/src/application/workflow-reconciliation.ts#L214-L265)
 - [workflow-reconciliation.ts:472-495](file://apps/control-plane/src/application/workflow-reconciliation.ts#L472-L495)
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)
 
 ### Attestation-Based Verification for DoD Integrity
 - Verifiers produce signed attestations for criterion evaluations, binding verifier identity, criterion ID, evidence ID, and result.
@@ -304,6 +336,8 @@ VerifierAttestation <.. SignedAttestation : "typed payload"
 - Reconciliation depends on event scanning and outbox dispatch to resume workflows based on approval decisions.
 - UI components depend on inbox data models and mutation forms to render actionable items and send decisions.
 
+**Updated** The workflow now has clearer separation between approval TTL (24 hours) and workflow execution timeout, with improved timing calculations based on consumedAt timestamps.
+
 ```mermaid
 graph LR
 ApproveRoute --> Service
@@ -332,31 +366,40 @@ UI --> RejectRoute
 
 ## Performance Considerations
 - Atomic consume operation prevents race conditions and double-decisions.
-- Projection derives “expired” status at read time to avoid stale UI states while reconciliation updates persisted status later.
+- Projection derives "expired" status at read time to avoid stale UI states while reconciliation updates persisted status later.
 - Pagination and bounded limits protect listing endpoints and reconciliation loops.
 - Idempotency keys on decisions prevent duplicate processing under retries or network issues.
+
+**Updated** The dedicated approval TTL provides better performance predictability by separating approval waiting time from execution budget, allowing longer approval windows without affecting workflow timeouts.
 
 [No sources needed since this section provides general guidance]
 
 ## Troubleshooting Guide
 Common errors and their meanings:
 - Already decided: Attempting to approve/reject an approval that has been consumed.
-- Invalid/expired: Attempting to decide after the approval’s expiry window.
+- Invalid/expired: Attempting to decide after the approval's expiry window.
 - Not found: Approval ID does not exist or is not associated with the current run.
 - Idempotency conflict: Duplicate creation attempt with mismatched parameters.
+- **New**: approval_consumed_at_missing: Workflow attempted to resume but approval lacks consumedAt timestamp, indicating data integrity issue.
 
 Operational tips:
 - Use the inbox to view scope previews, expiry times, and decisions.
 - When errors occur, the UI surfaces server messages to guide retry behavior.
 - For automation, always include idempotency keys and verify response codes.
+- Monitor approval consumption timing to ensure workflows start within expected deadlines.
+
+**Updated** Enhanced error handling now provides more specific error messages for approval_consumed_at_missing scenarios, helping identify data integrity issues during workflow resumption.
 
 **Section sources**
 - [control-plane-service.ts:1392-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1392-L1433)
 - [mutation-forms.tsx:5-27](file://apps/control-plane/src/ui/mutation-forms.tsx#L5-L27)
-- [neon-repository.ts:949-994](file://packages/adapters/src/persistence/neon-repository.ts#L949-L994)
+- [neon-repository.ts:949-994](file://packages/adapters/src/persistence/neon-repository.ts#L949-994)
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)
 
 ## Conclusion
 Agent OS Passerine embeds human intervention at critical points through durable, auditable approvals. The system ensures integrity via fingerprints, expiry enforcement, atomic consumption, and signed attestations for Definition-of-Done verification. Operators interact via a clear inbox UI or CLI, while reconciliation safely resumes workflows based on recorded decisions. This design balances automation with accountability, enabling safe execution of changes that affect repositories and policies.
+
+**Updated** The enhanced approval workflow with dedicated 24-hour TTL and improved deadline calculation provides more predictable timing and better separation between approval waiting periods and execution budgets, improving overall workflow reliability and user experience.
 
 [No sources needed since this section summarizes without analyzing specific files]
 
@@ -367,6 +410,8 @@ Agent OS Passerine embeds human intervention at critical points through durable,
 - Code review gating: Review outputs can be paired with DoD verification; approvals may gate merges or deployments depending on policy configuration.
 - Policy exceptions: When a workflow touches protected paths or requires tool/MCP exceptions, an approval can enforce human oversight before execution.
 
+**Updated** With the new approval TTL system, specifications have up to 24 hours for human review regardless of workflow execution timeout, providing more flexibility for complex approval processes.
+
 **Section sources**
 - [passerine.yaml:205-217](file://agentos/passerine.yaml#L205-L217)
 - [passerine.yaml:218-239](file://agentos/passerine.yaml#L218-L239)
@@ -374,6 +419,8 @@ Agent OS Passerine embeds human intervention at critical points through durable,
 ### Escalation Paths
 - If an approval remains pending beyond a threshold, consider escalating to additional reviewers or auto-expiring the request to prevent indefinite stalls.
 - On workflow timeouts, reconciliation fails the run and expires pending approvals, prompting re-initiation after remediation.
+
+**Updated** The dedicated approval TTL allows for longer escalation windows without affecting workflow execution budgets, making it easier to handle complex multi-stage approval processes.
 
 **Section sources**
 - [workflow-reconciliation.ts:214-265](file://apps/control-plane/src/application/workflow-reconciliation.ts#L214-L265)
@@ -388,14 +435,32 @@ Agent OS Passerine embeds human intervention at critical points through durable,
 
 ### Delegation and Expiration Policies
 - Delegation: Assign approvers by configuring project-level policies or roles outside the control plane; the approval UI shows who must act based on access controls.
-- Expiration: Each approval carries an expiresAt timestamp; projections mark expired items, and reconciliation expires pending approvals on workflow timeouts. Configure TTLs appropriate to your team’s SLAs.
+- Expiration: Each approval carries an expiresAt timestamp; projections mark expired items, and reconciliation expires pending approvals on workflow timeouts. Configure TTLs appropriate to your team's SLAs.
+
+**Updated** The approval TTL is now configurable separately from workflow timeout, allowing teams to set appropriate approval windows (default 24 hours) independent of execution budgets.
 
 **Section sources**
 - [control-plane-service.ts:368-386](file://apps/control-plane/src/application/control-plane-service.ts#L368-L386)
 - [workflow-reconciliation.ts:214-265](file://apps/control-plane/src/application/workflow-reconciliation.ts#L214-L265)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-L33)
 
 ### Integration with External Approval Systems
 - Extend the control plane by integrating with external approval providers via outbox hooks or custom adapters. Emit approval events and reconcile them into the same resume flow.
 - Use attestations to carry verified outcomes from external systems back into the workflow, ensuring consistent audit trails.
 
-[No sources needed since this section provides general guidance]
+**Section sources**
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)
+
+### Approval Timing Configuration
+**New Section** The approval workflow now features separate timing configurations:
+
+- **Approval TTL (approvalTtlMs)**: Default 24 hours - maximum time allowed for human approval
+- **Workflow Timeout (workflowTimeoutMs)**: Default 1 hour - execution budget after approval consumption
+- **Deadline Calculation**: Post-approval execution starts from consumedAt + workflowTimeoutMs
+
+This separation provides better predictability and allows for longer approval windows without impacting execution budgets.
+
+**Section sources**
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-L33)
+- [workflow.ts:1220-1237](file://packages/adapters/src/trigger/workflow.ts#L1220-L1237)
+- [workflow.ts:1351-1359](file://packages/adapters/src/trigger/workflow.ts#L1351-L1359)

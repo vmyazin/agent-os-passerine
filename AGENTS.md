@@ -14,6 +14,27 @@
   "Use X because Y fails when Z" survives. Same for config: comment *why* the deploy
   order is app → content → mcp, not just that it is.
 
+## Repository wiki (generated, `.qoder/repowiki/`)
+
+A generated reference covering the whole repo, checked in so an agent can read it
+without running the generator:
+
+- `.qoder/repowiki/en/content/` — prose by topic: Core Concepts, Data Models,
+  Workflow Engine, Control Plane API, CLI Reference, Security Model, Integrations,
+  Testing Strategy. Start at `Project Overview.md`.
+- `.qoder/repowiki/knowledge/en/` — per-module `overview.md`, `architecture_design.md`,
+  `tech_stack.md`, `coding_conventions.md`, indexed by `_index.yaml`.
+
+**Route:** need to orient in an unfamiliar subsystem → read its wiki page first, then
+open the code it names. Skip it for a change you already know the file for; it is
+background, not a step.
+
+**The code wins every disagreement.** This is generated from a snapshot and drifts as
+soon as anything lands — for example, it predates the goal-run UI and the local
+reconciliation loop. Treat a wiki claim as a hint to verify, never as evidence: cite
+the file, not the wiki. Never hand-edit it either, since the next generation silently
+discards the edit; fix the code or the doc it was generated from and regenerate.
+
 ## Session workflow (worktree → smoke-test → ship → wipe)
 
 Assume several agent sessions run against this repo in parallel. The main checkout

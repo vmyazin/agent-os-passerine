@@ -3,11 +3,11 @@ schema_version: 1
 locale: en-US
 branch: main
 nodes_managed: true
-exported_at: "2026-08-21T05:41:28Z"
+exported_at: "2026-08-21T07:18:31Z"
 modules:
     "":
-        dir_name: Agent OS Monorepo
-        title: Agent OS Monorepo
+        dir_name: AgentOS Monorepo
+        title: AgentOS Monorepo
         scope:
             - README.md
             - PRODUCT.md
@@ -43,8 +43,8 @@ modules:
         depends_on: []
         related_to: []
     adapters_package:
-        dir_name: AgentOS Adapters Package
-        title: AgentOS Adapters Package
+        dir_name: AgentOS Pluggable Adapters Package
+        title: AgentOS Pluggable Adapters Package
         scope:
             - packages/adapters/
         source_files: []
@@ -66,7 +66,8 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: adapters_package/kimi
     adapters_package/github:
         dir_name: GitHub Publication & Source Snapshot Adapter
         title: GitHub Publication & Source Snapshot Adapter
@@ -85,6 +86,7 @@ modules:
         children: []
         depends_on: []
         related_to:
+            - path: adapters_package/artifacts
             - path: adapters_package/trigger
     adapters_package/local_git:
         dir_name: Local Git Repository Adapter
@@ -116,8 +118,8 @@ modules:
         related_to:
             - path: control_plane_app/backend_subsystems
     adapters_package/trigger:
-        dir_name: Trigger.dev Workflow Orchestration & Durable Execution
-        title: Trigger.dev Workflow Orchestration & Durable Execution
+        dir_name: Trigger.dev Durable Feature & Goal Workflow Adapters
+        title: Trigger.dev Durable Feature & Goal Workflow Adapters
         scope:
             - packages/adapters/src/trigger/
         source_files: []
@@ -134,7 +136,8 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to: []
+        related_to:
+            - path: cli_app
     cli_app:
         dir_name: Agent OS CLI
         title: Agent OS CLI
@@ -144,6 +147,7 @@ modules:
         children: []
         depends_on: []
         related_to:
+            - path: agentos_config
             - path: control_plane_app/api_routes
     control_plane_app:
         dir_name: Agent OS Control Plane Application
@@ -168,7 +172,6 @@ modules:
         depends_on: []
         related_to:
             - path: cli_app
-            - path: control_plane_app/ui_pages
     control_plane_app/auth_flows:
         dir_name: Authentication Flow Routes (GitHub OAuth, Local Login, Logout)
         title: Authentication Flow Routes (GitHub OAuth, Local Login, Logout)
@@ -199,8 +202,7 @@ modules:
         source_files: []
         children: []
         depends_on: []
-        related_to:
-            - path: control_plane_app/api_routes
+        related_to: []
     core_package:
         dir_name: AgentOS Core Domain & Port Abstractions
         title: AgentOS Core Domain & Port Abstractions

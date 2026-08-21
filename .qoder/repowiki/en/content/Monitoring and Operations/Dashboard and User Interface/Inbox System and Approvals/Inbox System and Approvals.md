@@ -11,8 +11,19 @@
 - [route.ts (approve approval)](file://apps/control-plane/app/api/approvals/[id]/approve/route.ts)
 - [route.ts (reject approval)](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts)
 - [control-plane-service.ts](file://apps/control-plane/src/application/control-plane-service.ts)
+- [workflow-reconciliation.ts](file://apps/control-plane/src/application/workflow-reconciliation.ts)
+- [types.ts](file://packages/adapters/src/trigger/types.ts)
+- [workflow.ts](file://packages/adapters/src/trigger/workflow.ts)
 - [0000_domain_persistence.sql](file://drizzle/0000_domain_persistence.sql)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Updated approval workflow lifecycle section to reflect separate TTL management with 24-hour decision window
+- Added new execution deadline recalculation logic after approval consumption
+- Enhanced testing scenarios for time-sensitive workflows
+- Updated architecture diagrams to show dual-clock system (approval TTL vs execution deadline)
+- Added comprehensive coverage of approval expiration handling and reconciliation processes
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -28,11 +39,11 @@
 
 ## Introduction
 This document explains the Agent OS Passerine inbox system that enables human-in-the-loop interactions with agents. It covers three inbox item types:
-- Approvals: scope approval workflows where a human decides whether to proceed with implementation.
+- Approvals: scope approval workflows where a human decides whether to proceed with implementation using a separate 24-hour TTL window for decision-making.
 - Questions: interactive agent conversations where operators reply to agent prompts, including suggested options.
 - Notifications: run completion status messages summarizing outcomes and costs.
 
-It details how items are created, how state is managed, and how users interact with each type. It also documents the approval lifecycle from request to decision, including scope preview generation, expiration handling, and audit trails via domain events. Guidance is provided for customizing notifications, extending approvals, and integrating external channels. Accessibility considerations for screen readers and keyboard navigation are included.
+The system now implements a dual-clock approach where approval decisions have their own 24-hour time-to-live (TTL) window, separate from the execution deadline that begins only after approval consumption. This provides operators with adequate time to review and decide while ensuring execution budgets are properly bounded.
 
 ## Project Structure
 The inbox spans server routes, a service layer, UI components, and persistence:
@@ -40,6 +51,7 @@ The inbox spans server routes, a service layer, UI components, and persistence:
 - The control plane service aggregates approvals, messages, and synthesized notifications into an inbox digest.
 - The UI renders queues, reading panes, forms, and actions.
 - Persistence stores approvals, inbox messages, runs, and domain events.
+- Workflow reconciliation handles approval expiration and execution deadline management.
 
 ```mermaid
 graph TB
@@ -49,6 +61,7 @@ API_Approve["API: POST /api/approvals/:id/approve"]
 API_Reject["API: POST /api/approvals/:id/reject"]
 API_Reply["API: POST /api/inbox/:id/reply"]
 Service["ControlPlaneService"]
+Reconciler["Workflow Reconciliation"]
 Repo["DomainRepository"]
 DB["Database"]
 Events["DomainEvents"]
@@ -61,6 +74,7 @@ API_Approve --> Service
 API_Reject --> Service
 API_Reply --> Service
 Service --> Repo
+Reconciler --> Repo
 Repo --> DB
 Service --> Events
 ```
@@ -72,6 +86,7 @@ Service --> Events
 - [route.ts (reject approval):11-32](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts#L11-L32)
 - [control-plane-service.ts:1435-1584](file://apps/control-plane/src/application/control-plane-service.ts#L1435-L1584)
 - [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-L266)
 
 **Section sources**
 - [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-L59)
@@ -83,6 +98,7 @@ Service --> Events
 - [route.ts (reject approval):11-32](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts#L11-L32)
 - [control-plane-service.ts:1435-1584](file://apps/control-plane/src/application/control-plane-service.ts#L1435-L1584)
 - [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-L266)
 - [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-L15)
 - [0000_domain_persistence.sql:110-119](file://drizzle/0000_domain_persistence.sql#L110-L119)
 
@@ -91,12 +107,14 @@ Service --> Events
 - Inbox view model unifies approvals, questions, and notifications into a single list with attention/history split and display helpers.
 - Mutation forms provide approve/reject actions and reply forms with idempotency and user feedback.
 - Control plane service implements inbox aggregation, approval creation/consumption, message replies, and notification synthesis.
+- Workflow reconciliation manages approval expiration and execution deadline enforcement.
 - Database schema defines tables for approvals, inbox messages, runs, and domain events.
 
 Key responsibilities:
-- Approvals: create, expire, consume, summarize, and persist decisions with audit events.
+- Approvals: create with 24-hour TTL, expire based on clock time, consume with decision, summarize, and persist decisions with audit events.
 - Questions: store agent prompts, operator replies, and thread context; support suggested options.
 - Notifications: synthesize terminal run outcomes and optional cost summaries.
+- Execution deadlines: recalculated after approval consumption using consumedAt timestamp plus workflow timeout.
 
 **Section sources**
 - [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-L59)
@@ -107,11 +125,15 @@ Key responsibilities:
 - [control-plane-service.ts:246-317](file://apps/control-plane/src/application/control-plane-service.ts#L246-L317)
 - [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
 - [control-plane-service.ts:1435-1584](file://apps/control-plane/src/application/control-plane-service.ts#L1435-L1584)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-L266)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-L33)
 - [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-L15)
 - [0000_domain_persistence.sql:110-119](file://drizzle/0000_domain_persistence.sql#L110-L119)
 
 ## Architecture Overview
-The inbox architecture combines durable records with read-time projections:
+The inbox architecture combines durable records with read-time projections and a dual-clock system:
+- **Approval TTL**: Separate 24-hour window for human decision-making, independent of execution budget.
+- **Execution Deadline**: Recalculated after approval consumption as `consumedAt + workflowTimeoutMs`.
 - Approvals are durable intents stored as rows with timestamps and fingerprints. Expiry is enforced both at read time and at decision time.
 - Messages are durable conversation threads with optional replies.
 - Notifications are derived from terminal runs, enabling retroactive history without extra emissions.
@@ -125,6 +147,8 @@ participant S as "ControlPlaneService"
 participant R as "DomainRepository"
 participant D as "Database"
 participant E as "DomainEvents"
+participant W as "Workflow"
+participant RC as "Reconciliation"
 U->>UI : Open Inbox
 UI->>API : GET /api/inbox
 API->>S : inboxDigest(limit, projectId)
@@ -143,6 +167,8 @@ R-->>S : usage totals
 S-->>API : {approvals, messages, notifications}
 API-->>UI : InboxDigest
 UI-->>U : Render mailbox
+Note over S : Approval expiresAt = createdAt + 24h TTL
+Note over S : Execution deadline = consumedAt + workflowTimeoutMs
 U->>UI : Approve/Reject or Reply
 UI->>API : POST /api/approvals/ : id/{approve|reject} or POST /api/inbox/ : id/reply
 API->>S : consumeApproval(...) or replyInbox(...)
@@ -151,6 +177,8 @@ R-->>S : updated record
 S-->>API : result
 API-->>UI : success
 UI-->>U : Refreshed inbox
+RC->>R : Check pending approvals
+RC->>R : Expire overdue approvals
 ```
 
 **Diagram sources**
@@ -161,6 +189,8 @@ UI-->>U : Refreshed inbox
 - [route.ts (inbox reply):13-33](file://apps/control-plane/app/api/inbox/[id]/reply/route.ts#L13-L33)
 - [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
 - [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-L1764)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-L266)
+- [workflow.ts:1311-1359](file://packages/adapters/src/trigger/workflow.ts#L1311-L1359)
 
 ## Detailed Component Analysis
 
@@ -168,6 +198,7 @@ UI-->>U : Refreshed inbox
 - Unified InboxItem discriminates between approval, question, and notification kinds.
 - Subject, preview, sender, chip labels, and attention splitting are computed in the view model.
 - Conversation threading for questions is built from message body and optional reply.
+- Approval projection includes real-time expiry checking against current time.
 
 ```mermaid
 classDiagram
@@ -217,20 +248,21 @@ InboxItem --> RunNotificationProjection : "kind=notification"
 ```
 
 **Diagram sources**
-- [inbox-view-model.ts:8-37](file://apps/control-plane/src/ui/inbox-view-model.ts#L8-L37)
-- [control-plane-service.ts:246-317](file://apps/control-plane/src/application/control-plane-service.ts#L246-L317)
+- [inbox-view-model.ts:8-37](file://apps/control-plane/src/ui/inbox-view-model.ts#L8-37)
+- [control-plane-service.ts:246-317](file://apps/control-plane/src/application/control-plane-service.ts#L246-317)
 
 **Section sources**
-- [inbox-view-model.ts:8-37](file://apps/control-plane/src/ui/inbox-view-model.ts#L8-L37)
-- [inbox-view-model.ts:39-64](file://apps/control-plane/src/ui/inbox-view-model.ts#L39-L64)
-- [inbox-view-model.ts:99-181](file://apps/control-plane/src/ui/inbox-view-model.ts#L99-L181)
-- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-L256)
+- [inbox-view-model.ts:8-37](file://apps/control-plane/src/ui/inbox-view-model.ts#L8-37)
+- [inbox-view-model.ts:39-64](file://apps/control-plane/src/ui/inbox-view-model.ts#L39-64)
+- [inbox-view-model.ts:99-181](file://apps/control-plane/src/ui/inbox-view-model.ts#L99-181)
+- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-256)
 
 ### Inbox UI and Interaction Patterns
 - The inbox page fetches a digest and projects pending counts using attention logic.
-- The mailbox splits items into “Needs you” and “History”.
+- The mailbox splits items into "Needs you" and "History".
 - Each item shows a marker, subject, preview, status chip, and run attribution.
 - Reading pane renders approval details, question threads with options, or notification summaries.
+- Approval actions are disabled for expired items based on real-time expiry checking.
 
 ```mermaid
 flowchart TD
@@ -244,29 +276,35 @@ Select --> Detail{"Kind?"}
 Detail --> |Approval| ShowApproval["Show scope, summary, actions"]
 Detail --> |Question| ShowThread["Show thread, options, reply form"]
 Detail --> |Notification| ShowNotify["Show outcome, links, spend"]
-ShowApproval --> Actions["Approve/Reject if pending"]
+ShowApproval --> Actions{"Is approval still valid?"}
+Actions --> |No| End(["Done"])
+Actions --> |Yes| ApproveReject["Approve/Reject if pending"]
 ShowThread --> Reply["Send reply"]
-ShowNotify --> End(["Done"])
-Actions --> End
+ShowNotify --> End
+ApproveReject --> End
 Reply --> End
 ```
 
 **Diagram sources**
-- [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-L59)
-- [inbox-view.tsx:287-423](file://apps/control-plane/src/ui/inbox-view.tsx#L287-L423)
-- [inbox-view-model.ts:242-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L242-L256)
+- [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-59)
+- [inbox-view.tsx:287-423](file://apps/control-plane/src/ui/inbox-view.tsx#L287-423)
+- [inbox-view-model.ts:242-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L242-256)
 
 **Section sources**
-- [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-L59)
-- [inbox-view.tsx:38-285](file://apps/control-plane/src/ui/inbox-view.tsx#L38-L285)
-- [inbox-view.tsx:287-423](file://apps/control-plane/src/ui/inbox-view.tsx#L287-L423)
+- [page.tsx:12-59](file://apps/control-plane/app/inbox/page.tsx#L12-59)
+- [inbox-view.tsx:38-285](file://apps/control-plane/src/ui/inbox-view.tsx#L38-285)
+- [inbox-view.tsx:287-423](file://apps/control-plane/src/ui/inbox-view.tsx#L287-423)
 
 ### Approval Workflow Lifecycle
-- Creation: services create approvals with a fingerprinted scope and expiry timestamp.
-- Preview: scope previews are redacted and truncated for safe display.
-- Expiration: approvals are considered expired when the current time passes expiresAt; this is enforced both in projection and at consumption.
-- Decision: approve or reject consumes the approval, writes a domain event, and optionally resumes the workflow.
-- Audit trail: decisions are recorded as domain events with payloads containing approval identifiers and scope hashes.
+
+**Updated** The approval workflow now uses a separate TTL management system with distinct approval and execution clocks:
+
+- **Creation**: Services create approvals with a fingerprinted scope and 24-hour expiry timestamp (`createdAt + approvalTtlMs`).
+- **Preview**: Scope previews are redacted and truncated for safe display.
+- **Expiration**: Approvals are considered expired when the current time passes expiresAt; this is enforced both in projection and at consumption.
+- **Decision**: Approve or reject consumes the approval, writes a domain event, and optionally resumes the workflow.
+- **Execution Deadline**: After approval consumption, the execution deadline is recalculated as `consumedAt + workflowTimeoutMs` (typically 60 minutes).
+- **Audit trail**: Decisions are recorded as domain events with payloads containing approval identifiers and scope hashes.
 
 ```mermaid
 sequenceDiagram
@@ -277,6 +315,7 @@ participant E as "DomainEvents"
 participant U as "User"
 participant A as "API"
 W->>S : createApproval(runId, scope, expiresAt)
+Note over S : expiresAt = createdAt + 24h approvalTtlMs
 S->>R : createApproval(approval)
 R-->>S : persisted approval
 Note over S : Scope fingerprinted and preview generated
@@ -284,22 +323,28 @@ U->>A : POST /api/approvals/ : id/approve or /reject
 A->>S : consumeApproval(id, decision, idempotencyKey, scopeHash)
 S->>R : consumeApprovalWithEvent(...)
 R-->>S : consumed approval
+Note over S : Execution deadline = consumedAt + workflowTimeoutMs
 S->>E : append event (approval.approved or approval.rejected)
 S-->>A : updated approval
 A-->>U : success
 Note over S,R : Expiry checked against clock before decision
+Note over W,S : Workflow continues with new execution deadline
 ```
 
 **Diagram sources**
-- [control-plane-service.ts:1311-1344](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1344)
-- [control-plane-service.ts:1355-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1355-L1433)
-- [route.ts (approve approval):11-32](file://apps/control-plane/app/api/approvals/[id]/approve/route.ts#L11-L32)
-- [route.ts (reject approval):11-32](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts#L11-L32)
+- [control-plane-service.ts:1311-1344](file://apps/control-plane/src/application/control-plane-service.ts#L1311-1344)
+- [control-plane-service.ts:1355-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1355-1433)
+- [route.ts (approve approval):11-32](file://apps/control-plane/app/api/approvals/[id]/approve/route.ts#L11-32)
+- [route.ts (reject approval):11-32](file://apps/control-plane/app/api/approvals/[id]/reject/route.ts#L11-32)
+- [workflow.ts:1311-1359](file://packages/adapters/src/trigger/workflow.ts#L1311-1359)
 
 **Section sources**
-- [control-plane-service.ts:368-387](file://apps/control-plane/src/application/control-plane-service.ts#L368-L387)
-- [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
-- [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-L15)
+- [control-plane-service.ts:368-387](file://apps/control-plane/src/application/control-plane-service.ts#L368-387)
+- [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-1433)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-266)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-33)
+- [workflow.ts:123-133](file://packages/adapters/src/trigger/workflow.ts#L123-133)
+- [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-15)
 
 ### Question-Answer Conversation Model
 - Messages store agent prompts and optional replies.
@@ -329,14 +374,14 @@ API-->>UI : success
 ```
 
 **Diagram sources**
-- [route.ts (inbox reply):13-33](file://apps/control-plane/app/api/inbox/[id]/reply/route.ts#L13-L33)
-- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-L1764)
+- [route.ts (inbox reply):13-33](file://apps/control-plane/app/api/inbox/[id]/reply/route.ts#L13-33)
+- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-1764)
 
 **Section sources**
-- [inbox-view.tsx:179-234](file://apps/control-plane/src/ui/inbox-view.tsx#L179-L234)
-- [inbox-view-model.ts:39-64](file://apps/control-plane/src/ui/inbox-view-model.ts#L39-L64)
-- [mutation-forms.tsx:152-179](file://apps/control-plane/src/ui/mutation-forms.tsx#L152-L179)
-- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-L1764)
+- [inbox-view.tsx:179-234](file://apps/control-plane/src/ui/inbox-view.tsx#L179-234)
+- [inbox-view-model.ts:39-64](file://apps/control-plane/src/ui/inbox-view-model.ts#L39-64)
+- [mutation-forms.tsx:152-179](file://apps/control-plane/src/ui/mutation-forms.tsx#L152-179)
+- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-1764)
 
 ### Notification Synthesis
 - Notifications are derived from terminal runs, not emitted by workers, ensuring retroactive coverage.
@@ -356,12 +401,12 @@ Project --> Notify
 ```
 
 **Diagram sources**
-- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-L1562)
+- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-1562)
 
 **Section sources**
-- [control-plane-service.ts:292-317](file://apps/control-plane/src/application/control-plane-service.ts#L292-L317)
-- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-L1562)
-- [inbox-view.tsx:236-285](file://apps/control-plane/src/ui/inbox-view.tsx#L236-L285)
+- [control-plane-service.ts:292-317](file://apps/control-plane/src/application/control-plane-service.ts#L292-317)
+- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-1562)
+- [inbox-view.tsx:236-285](file://apps/control-plane/src/ui/inbox-view.tsx#L236-285)
 
 ### Persistence Schema
 - Approvals table stores scope, fingerprint, status, timestamps, and consumption time.
@@ -369,14 +414,15 @@ Project --> Notify
 - Domain events table provides an immutable audit log for all decisions and replies.
 
 **Section sources**
-- [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-L15)
-- [0000_domain_persistence.sql:62-73](file://drizzle/0000_domain_persistence.sql#L62-L73)
-- [0000_domain_persistence.sql:110-119](file://drizzle/0000_domain_persistence.sql#L110-L119)
+- [0000_domain_persistence.sql:6-15](file://drizzle/0000_domain_persistence.sql#L6-15)
+- [0000_domain_persistence.sql:62-73](file://drizzle/0000_domain_persistence.sql#L62-73)
+- [0000_domain_persistence.sql:110-119](file://drizzle/0000_domain_persistence.sql#L110-119)
 
 ## Dependency Analysis
 - UI depends on the inbox view model for unified rendering and on mutation forms for actions.
 - API routes depend on authentication, input/output schemas, and the control plane service.
 - Control plane service depends on repository abstractions and optional artifacts integration for approval summaries.
+- Workflow reconciliation depends on repository for approval expiration and execution deadline management.
 - Database schema enforces referential integrity and indexes for performance.
 
 ```mermaid
@@ -387,86 +433,110 @@ API["API Routes"] --> SVC["ControlPlaneService"]
 SVC --> REPO["DomainRepository"]
 REPO --> DB["Database"]
 SVC --> ART["Artifacts (optional)"]
+RECONCILER["Workflow Reconciliation"] --> REPO
 ```
 
 **Diagram sources**
-- [inbox-view.tsx:341-423](file://apps/control-plane/src/ui/inbox-view.tsx#L341-L423)
-- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-L256)
-- [mutation-forms.tsx:56-92](file://apps/control-plane/src/ui/mutation-forms.tsx#L56-L92)
-- [route.ts (inbox listing):11-32](file://apps/control-plane/app/api/inbox/route.ts#L11-L32)
-- [control-plane-service.ts:1637-1717](file://apps/control-plane/src/application/control-plane-service.ts#L1637-L1717)
+- [inbox-view.tsx:341-423](file://apps/control-plane/src/ui/inbox-view.tsx#L341-423)
+- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-256)
+- [mutation-forms.tsx:56-92](file://apps/control-plane/src/ui/mutation-forms.tsx#L56-92)
+- [route.ts (inbox listing):11-32](file://apps/control-plane/app/api/inbox/route.ts#L11-32)
+- [control-plane-service.ts:1637-1717](file://apps/control-plane/src/application/control-plane-service.ts#L1637-1717)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-266)
 
 **Section sources**
-- [inbox-view.tsx:341-423](file://apps/control-plane/src/ui/inbox-view.tsx#L341-L423)
-- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-L256)
-- [mutation-forms.tsx:56-92](file://apps/control-plane/src/ui/mutation-forms.tsx#L56-L92)
-- [route.ts (inbox listing):11-32](file://apps/control-plane/app/api/inbox/route.ts#L11-L32)
-- [control-plane-service.ts:1637-1717](file://apps/control-plane/src/application/control-plane-service.ts#L1637-L1717)
+- [inbox-view.tsx:341-423](file://apps/control-plane/src/ui/inbox-view.tsx#L341-423)
+- [inbox-view-model.ts:205-256](file://apps/control-plane/src/ui/inbox-view-model.ts#L205-256)
+- [mutation-forms.tsx:56-92](file://apps/control-plane/src/ui/mutation-forms.tsx#L56-92)
+- [route.ts (inbox listing):11-32](file://apps/control-plane/app/api/inbox/route.ts#L11-32)
+- [control-plane-service.ts:1637-1717](file://apps/control-plane/src/application/control-plane-service.ts#L1637-1717)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-266)
 
 ## Performance Considerations
 - Concurrency limits: inbox digest and run listings cap concurrent queries to avoid database connection saturation.
 - Spend lookups are bounded to a limited number of terminal runs to reduce load.
 - Project name resolution is fail-soft to keep the inbox responsive even if project metadata is unavailable.
 - Redaction and truncation minimize payload sizes and protect sensitive data.
-
-[No sources needed since this section provides general guidance]
+- Approval expiry checking is performed at read time to avoid stale state issues.
+- Workflow reconciliation batches approval expiration checks to minimize database load.
 
 ## Troubleshooting Guide
 Common issues and resolutions:
-- Approval expired: attempting to decide after expiresAt fails with a conflict; the UI avoids offering actions on expired items.
-- Already decided: duplicate approvals or replies are rejected due to idempotency checks.
-- Not found: missing inbox messages or approvals return appropriate errors.
-- Network or transient failures: mutation forms surface friendly messages and avoid infinite retry loops.
+- **Approval expired**: attempting to decide after expiresAt fails with a conflict; the UI avoids offering actions on expired items due to real-time expiry checking.
+- **Already decided**: duplicate approvals or replies are rejected due to idempotency checks.
+- **Not found**: missing inbox messages or approvals return appropriate errors.
+- **Network or transient failures**: mutation forms surface friendly messages and avoid infinite retry loops.
+- **Execution deadline exceeded**: workflows fail when execution time exceeds the post-consumption deadline.
 
 Operational tips:
 - Use domain events to trace approval decisions and inbox replies.
 - Inspect inbox projections to confirm expiry logic and attention counts.
 - Validate that artifact reads for approval summaries degrade gracefully when unavailable.
+- Monitor workflow reconciliation logs for approval expiration events.
+- Verify that approval TTL (24 hours) and execution timeout (60 minutes) are configured appropriately.
 
 **Section sources**
-- [mutation-forms.tsx:11-27](file://apps/control-plane/src/ui/mutation-forms.tsx#L11-L27)
-- [control-plane-service.ts:1355-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1355-L1433)
-- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-L1764)
+- [mutation-forms.tsx:11-27](file://apps/control-plane/src/ui/mutation-forms.tsx#L11-27)
+- [control-plane-service.ts:1355-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1355-1433)
+- [control-plane-service.ts:1719-1764](file://apps/control-plane/src/application/control-plane-service.ts#L1719-1764)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-266)
 
 ## Conclusion
-The inbox system provides a robust, auditable, and user-friendly interface for human-in-the-loop operations. Approvals enforce expiry and idempotent decisions with clear audit trails. Questions enable threaded conversations with suggested options. Notifications offer concise, reliable summaries of run outcomes. The design balances durability with efficient projections and safeguards against performance pitfalls.
-
-[No sources needed since this section summarizes without analyzing specific files]
+The inbox system provides a robust, auditable, and user-friendly interface for human-in-the-loop operations with enhanced time management. The new dual-clock system separates approval decision windows (24 hours) from execution budgets (60 minutes), providing operators adequate time to review while maintaining strict execution controls. Approvals enforce expiry and idempotent decisions with clear audit trails. Questions enable threaded conversations with suggested options. Notifications offer concise, reliable summaries of run outcomes. The design balances durability with efficient projections and safeguards against performance pitfalls.
 
 ## Appendices
 
 ### Customizing Notification Formats
-- Notifications are synthesized from terminal runs; adjust headline generation and outcome mapping in the service’s projection logic to tailor messages.
+- Notifications are synthesized from terminal runs; adjust headline generation and outcome mapping in the service's projection logic to tailor messages.
 - Add or refine fields such as reason, outcome links, or spend formatting while preserving safety checks for URLs and strings.
 
 **Section sources**
-- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-L1562)
-- [inbox-view-model.ts:66-97](file://apps/control-plane/src/ui/inbox-view-model.ts#L66-L97)
+- [control-plane-service.ts:1500-1562](file://apps/control-plane/src/application/control-plane-service.ts#L1500-1562)
+- [inbox-view-model.ts:66-97](file://apps/control-plane/src/ui/inbox-view-model.ts#L66-97)
 
 ### Extending Approval Workflows
 - Introduce new approval types by adding distinct scope markers or summaries and updating the UI to render additional details.
 - Ensure expiry enforcement remains consistent across projection and consumption paths.
 - Emit domain events for new decision types to maintain auditability.
+- Configure appropriate approval TTL values based on workflow complexity and operator response time requirements.
 
 **Section sources**
-- [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-L1433)
-- [inbox-view.tsx:62-177](file://apps/control-plane/src/ui/inbox-view.tsx#L62-L177)
+- [control-plane-service.ts:1311-1433](file://apps/control-plane/src/application/control-plane-service.ts#L1311-1433)
+- [inbox-view.tsx:62-177](file://apps/control-plane/src/ui/inbox-view.tsx#L62-177)
+- [types.ts:22-33](file://packages/adapters/src/trigger/types.ts#L22-33)
 
 ### Integrating External Communication Channels
 - Use domain events to publish approval decisions and inbox replies to external systems via webhooks or message brokers.
 - Leverage the outbox pattern through workflow dispatch interfaces to decouple event emission from immediate delivery.
 - Ensure idempotency keys propagate to prevent duplicate deliveries.
+- Monitor approval expiration events for external notification systems.
 
 **Section sources**
-- [control-plane-service.ts:62-87](file://apps/control-plane/src/application/control-plane-service.ts#L62-L87)
-- [control-plane-service.ts:1766-1811](file://apps/control-plane/src/application/control-plane-service.ts#L1766-L1811)
+- [control-plane-service.ts:62-87](file://apps/control-plane/src/application/control-plane-service.ts#L62-87)
+- [control-plane-service.ts:1766-1811](file://apps/control-plane/src/application/control-plane-service.ts#L1766-1811)
 
 ### Accessibility Considerations
 - Screen readers: use semantic headings, aria-labels for sections, and live regions for status updates.
 - Keyboard navigation: ensure buttons and forms are focusable and operable via keyboard; provide visible focus states.
 - Content structure: group related controls and messages under meaningful landmarks; avoid relying solely on color for status.
+- Approval status indicators should be accessible to screen readers, clearly indicating pending, approved, rejected, or expired states.
 
 **Section sources**
-- [inbox-view.tsx:302-338](file://apps/control-plane/src/ui/inbox-view.tsx#L302-L338)
-- [mutation-forms.tsx:87-90](file://apps/control-plane/src/ui/mutation-forms.tsx#L87-L90)
-- [mutation-forms.tsx:152-179](file://apps/control-plane/src/ui/mutation-forms.tsx#L152-L179)
+- [inbox-view.tsx:302-338](file://apps/control-plane/src/ui/inbox-view.tsx#L302-338)
+- [mutation-forms.tsx:87-90](file://apps/control-plane/src/ui/mutation-forms.tsx#L87-90)
+- [mutation-forms.tsx:152-179](file://apps/control-plane/src/ui/mutation-forms.tsx#L152-179)
+
+### Time-Sensitive Workflow Testing Scenarios
+
+**Updated** The system now supports comprehensive testing scenarios for time-sensitive workflows:
+
+- **Approval TTL Testing**: Verify approvals expire after 24 hours regardless of workflow execution status.
+- **Execution Deadline Testing**: Confirm execution deadlines start from approval consumption time, not creation time.
+- **Concurrent Operations**: Test multiple approval decisions and workflow executions within tight time windows.
+- **Clock Drift Handling**: Ensure approval expiry works correctly with different system clocks and timezone configurations.
+- **Reconciliation Testing**: Validate that workflow reconciliation properly expires pending approvals and handles edge cases.
+
+**Section sources**
+- [control-plane-service.test.ts:1350-1427](file://apps/control-plane/src/application/control-plane-service.test.ts#L1350-1427)
+- [lifecycle.test.ts:147-169](file://packages/core/src/lifecycle.test.ts#L147-169)
+- [workflow-reconciliation.ts:229-266](file://apps/control-plane/src/application/workflow-reconciliation.ts#L229-266)

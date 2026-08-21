@@ -16,7 +16,15 @@
 - [database-config.test.ts](file://packages/adapters/src/persistence/database-config.test.ts)
 - [drizzle.config.ts](file://drizzle.config.ts)
 - [setup-routes.test.ts](file://apps/control-plane/src/http/setup-routes.test.ts)
+- [workflow.test.ts](file://packages/adapters/src/trigger/workflow.test.ts)
 </cite>
+
+## Update Summary
+**Changes Made**
+- Enhanced fixture() function documentation with optional createdAt parameter support
+- Added new section on advanced timestamp control for approval deadline testing
+- Updated test data management section with time-sensitive workflow scenarios
+- Expanded troubleshooting guide with timestamp-related debugging strategies
 
 ## Table of Contents
 1. Introduction
@@ -33,7 +41,7 @@
 This document explains the test infrastructure for Agent OS Passerine. It covers unit testing with Vitest, end-to-end testing with Playwright, environment setup, dependency management, database configuration for tests, mocking strategies, fixtures, file organization and naming conventions, CI/CD integration, reporting, coverage options, performance optimization techniques, and debugging strategies.
 
 ## Project Structure
-The repository uses a monorepo layout with per-package scripts orchestrated by Turborepo. Unit tests live alongside source files using the .test.ts suffix under each package’s src directory. End-to-end tests are centralized under tests/e2e and driven by Playwright.
+The repository uses a monorepo layout with per-package scripts orchestrated by Turborepo. Unit tests live alongside source files using the .test.ts suffix under each package's src directory. End-to-end tests are centralized under tests/e2e and driven by Playwright.
 
 ```mermaid
 graph TB
@@ -50,18 +58,22 @@ CP["@agentos/control-plane (unit + e2e support)"]
 end
 subgraph "Packages"
 ADP["@agentos/adapters (DB config)"]
+TRG["@agentos/adapters (workflow tests)"]
 end
 P --> T
 P --> V
 P --> PW
 T --> CLI
 T --> CP
+T --> TRG
 V --> CLI
 V --> CP
+V --> TRG
 PW --> CP
 CI --> P
 CI --> PW
 CP --> ADP
+TRG --> ADP
 ```
 
 **Diagram sources**
@@ -168,6 +180,42 @@ E2E test examples:
 - [playwright.config.ts:1-18](file://playwright.config.ts#L1-L18)
 - [scaffold.spec.ts:1-149](file://tests/e2e/scaffold.spec.ts#L1-L149)
 
+### Advanced Fixture Functions with Timestamp Control
+**Updated** Enhanced fixture functions now support optional createdAt parameters for creating runs with specific timestamps independent of current clock time.
+
+The workflow test fixture function has been enhanced with an optional second parameter that allows tests to specify custom creation timestamps for runs. This enables comprehensive testing of approval deadline behavior and time-sensitive workflow scenarios.
+
+Key capabilities:
+- **Custom Creation Timestamps**: Tests can create runs with arbitrary timestamps using `await fixture('approve', '2026-08-17T10:00:00.000Z')`
+- **Approval Deadline Testing**: Verify that workflows respect approval TTLs and execution deadlines independently of when runs were created
+- **Time-Sensitive Scenarios**: Test edge cases where approval consumption happens significantly after run creation
+- **Deterministic Time Control**: Mock clock functions to simulate time progression during workflow execution
+
+Example usage patterns:
+```typescript
+// Default behavior - uses current test time
+const f = await fixture();
+
+// Custom creation time for approval deadline testing  
+const f = await fixture('approve', '2026-08-17T10:00:00.000Z');
+
+// Combined with clock mocking for complex time scenarios
+const created = isoTimestamp('2026-08-17T10:00:00.000Z');
+const consumed = isoTimestamp('2026-08-17T12:00:00.000Z');
+const late = isoTimestamp('2026-08-17T12:30:00.000Z');
+const f = await fixture('approve', created);
+```
+
+This enhancement enables testing of critical workflow behaviors such as:
+- Approval expiration based on creation time vs consumption time
+- Workflow timeout calculations starting from approval consumption
+- Edge cases where approval wait periods exceed expected durations
+- Deterministic testing of time-dependent business logic
+
+**Section sources**
+- [workflow.test.ts:186-191](file://packages/adapters/src/trigger/workflow.test.ts#L186-L191)
+- [workflow.test.ts:1155-1244](file://packages/adapters/src/trigger/workflow.test.ts#L1155-L1244)
+
 ### Test Databases and Persistence
 - Drizzle configuration: Targets PostgreSQL schema and outputs migrations under drizzle/.
 - Database URL validation: A helper enforces valid PostgreSQL URLs and fails closed if missing or malformed.
@@ -208,14 +256,17 @@ Best practices:
 - Seeding: E2E tests call /api/test/seed to populate initial data before assertions.
 - Local temp directories: Unit tests create temporary directories for file-based operations and clean them up afterward.
 - Deterministic configs: Inline YAML strings define minimal configurations for runtime and repository head resolution tests.
+- **Enhanced**: Time-controlled test data creation using fixture functions with custom timestamps for approval deadline scenarios.
 
 Recommendations:
 - Centralize seed data generation behind a single route or utility to keep tests fast and predictable.
 - Prefer ephemeral filesystems for file I/O tests and ensure cleanup in afterEach hooks.
+- Use fixture functions with custom timestamps to test time-sensitive workflow behaviors deterministically.
 
 **Section sources**
 - [scaffold.spec.ts:32-35](file://tests/e2e/scaffold.spec.ts#L32-L35)
 - [runtime.test.ts:194-214](file://apps/control-plane/src/application/runtime.test.ts#L194-L214)
+- [workflow.test.ts:1155-1244](file://packages/adapters/src/trigger/workflow.test.ts#L1155-L1244)
 
 ### Organizing Test Files and Naming Conventions
 - Co-location: Place tests next to the code they exercise using the .test.ts suffix.
@@ -286,28 +337,29 @@ CI --> PW
 - Minimal mocks: Reduce mock complexity to speed up test execution and improve determinism.
 - E2E efficiency: Seed data once per test context and reuse authenticated sessions where appropriate.
 - Browser caching: Avoid unnecessary reloads; navigate directly to relevant routes within tests.
-
-[No sources needed since this section provides general guidance]
+- **Enhanced**: Use fixture functions with pre-set timestamps to avoid expensive time-based computations in tests.
 
 ## Troubleshooting Guide
 Common issues and resolutions:
 - Missing DATABASE_URL: Validation throws a clear error indicating a valid PostgreSQL URL is required. Ensure environment variables are set for integration tests.
 - Unsupported repository mode: Only memory and neon modes are supported; ensure AGENTOS_REPOSITORY is set correctly in tests.
-- E2E server startup: Verify Playwright’s webServer command matches local environment and ports; confirm credentials and secrets match expectations.
+- E2E server startup: Verify Playwright's webServer command matches local environment and ports; confirm credentials and secrets match expectations.
 - Flaky tests: Enable retries in CI and reduce reliance on timing-sensitive assertions; prefer role-based queries and stable selectors.
+- **New**: Timestamp-related issues: When testing approval deadlines, ensure fixture createdAt values are properly set and clock mocks are configured correctly.
 
 Debugging tips:
 - Inspect captured stdout/stderr in unit tests to validate error messages and exit codes.
-- Use Playwright’s built-in tracing and screenshots for failing E2E tests.
+- Use Playwright's built-in tracing and screenshots for failing E2E tests.
 - Validate environment variables with readiness checks exposed by the control plane.
+- **Enhanced**: For time-sensitive workflow tests, log both fixture createdAt values and clock mock return values to understand timing relationships.
+- **Enhanced**: When debugging approval deadline failures, verify that consumedAt timestamps are properly set in approval consumption events.
 
 **Section sources**
 - [database-config.ts:5-26](file://packages/adapters/src/persistence/database-config.ts#L5-L26)
 - [repository-factory.ts:9-28](file://apps/control-plane/src/persistence/repository-factory.ts#L9-L28)
 - [playwright.config.ts:11-16](file://playwright.config.ts#L11-L16)
 - [setup-routes.test.ts:17-41](file://apps/control-plane/src/http/setup-routes.test.ts#L17-L41)
+- [workflow.test.ts:1155-1244](file://packages/adapters/src/trigger/workflow.test.ts#L1155-L1244)
 
 ## Conclusion
-Agent OS Passerine’s test infrastructure combines Vitest for fast, isolated unit tests and Playwright for robust end-to-end verification. Turboreho orchestrates tasks across the monorepo, while CI provisions Postgres for integration testing. By following the established patterns for mocking, environment setup, and test organization, teams can maintain reliable, performant, and maintainable test suites.
-
-[No sources needed since this section summarizes without analyzing specific files]
+Agent OS Passerine's test infrastructure combines Vitest for fast, isolated unit tests and Playwright for robust end-to-end verification. Turboreho orchestrates tasks across the monorepo, while CI provisions Postgres for integration testing. The enhanced fixture functions with timestamp control enable comprehensive testing of approval deadline behavior and time-sensitive workflow scenarios. By following the established patterns for mocking, environment setup, and test organization, teams can maintain reliable, performant, and maintainable test suites.

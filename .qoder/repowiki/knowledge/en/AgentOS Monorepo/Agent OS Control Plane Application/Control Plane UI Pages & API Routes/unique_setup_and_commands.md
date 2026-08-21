@@ -1,0 +1,1 @@
+Pages opt out of static generation via `export const dynamic = 'force-dynamic'` so they always render at runtime; no additional build or test commands beyond standard Next.js development.

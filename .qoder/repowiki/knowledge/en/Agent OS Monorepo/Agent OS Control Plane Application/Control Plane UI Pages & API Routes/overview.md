@@ -1,1 +1,0 @@
-Next.js App Router pages and API routes that render the Agent OS control plane dashboard and expose authenticated endpoints for projects, runs, inbox, approvals, configuration, and setup.
