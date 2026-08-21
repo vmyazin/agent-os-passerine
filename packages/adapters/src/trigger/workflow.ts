@@ -125,7 +125,7 @@ function triggerWaitDuration(deadlineMs: number, now: string): string {
   if (
     !Number.isSafeInteger(remainingSeconds) ||
     remainingSeconds < 1 ||
-    remainingSeconds > FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs / 1_000
+    remainingSeconds > FEATURE_WORKFLOW_DEFAULTS.approvalTtlMs / 1_000
   ) {
     throw new WorkflowPermanentError('approval wait duration is out of bounds');
   }
@@ -1158,7 +1158,7 @@ export function createDurableFeatureWorkflow(
       if (run === undefined)
         throw new WorkflowPermanentError('workflow run does not exist');
       if (isTerminalRun(run.status)) return terminalResult(run);
-      const deadlineMs =
+      let deadlineMs =
         Date.parse(run.createdAt) + FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
       const started = await dependencies.repository.transitionRun(
         runId,
@@ -1218,6 +1218,9 @@ export function createDurableFeatureWorkflow(
           definitionOfDoneDigest: specification.definitionOfDone.digest,
         });
         const approvalId = `approval_${scopeHash.slice(0, 32)}`;
+        const approvalExpiresAt = new Date(
+          Date.parse(run.createdAt) + FEATURE_WORKFLOW_DEFAULTS.approvalTtlMs,
+        );
         if (
           (await dependencies.repository.getApproval(
             persistenceId('approval', approvalId),
@@ -1230,7 +1233,7 @@ export function createDurableFeatureWorkflow(
             fingerprint: scopeHash,
             status: 'pending',
             createdAt: at(dependencies.clock()),
-            expiresAt: at(new Date(deadlineMs).toISOString()),
+            expiresAt: at(approvalExpiresAt.toISOString()),
           });
         }
         const waitEffectKey = `waitpoint:${workflow.runId}:${approvalId}`;
@@ -1241,7 +1244,7 @@ export function createDurableFeatureWorkflow(
           {
             approvalId,
             scopeHash,
-            deadline: new Date(deadlineMs).toISOString(),
+            deadline: approvalExpiresAt.toISOString(),
           },
           dependencies.clock(),
         );
@@ -1262,7 +1265,10 @@ export function createDurableFeatureWorkflow(
           try {
             waitpoint = await dependencies.approval.create({
               idempotencyKey: waitEffectKey,
-              timeout: triggerWaitDuration(deadlineMs, dependencies.clock()),
+              timeout: triggerWaitDuration(
+                approvalExpiresAt.getTime(),
+                dependencies.clock(),
+              ),
               tags: [`run:${workflow.runId}`, `approval:${approvalId}`],
             });
           } catch {
@@ -1298,7 +1304,7 @@ export function createDurableFeatureWorkflow(
               runId,
               scope: 'feature-spec-and-dod',
               fingerprint: scopeHash,
-              at: at(new Date(deadlineMs).toISOString()),
+              at: at(approvalExpiresAt.toISOString()),
             },
           );
           const result: FeatureWorkflowResult = { status: 'expired' };
@@ -1341,6 +1347,17 @@ export function createDurableFeatureWorkflow(
           });
           return result;
         }
+
+        const consumed = await dependencies.repository.getApproval(
+          persistenceId('approval', approvalId),
+        );
+        if (consumed?.consumedAt === undefined) {
+          throw new WorkflowPermanentError('approval_consumed_at_missing');
+        }
+        deadlineMs =
+          Date.parse(consumed.consumedAt) +
+          FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
+
         if (
           (await transitionCurrentRun(dependencies, runId, ['waiting'], {
             status: 'running',

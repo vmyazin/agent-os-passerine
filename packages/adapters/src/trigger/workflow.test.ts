@@ -183,7 +183,12 @@ async function put(
   });
 }
 
-async function fixture(decision: 'approve' | 'reject' = 'approve') {
+async function fixture(
+  decision: 'approve' | 'reject' = 'approve',
+  // Some tests need a run that was created long before the clock they drive,
+  // and createdAt is immutable once written -- WorkflowRunUpdate cannot set it.
+  createdAt = now,
+) {
   const repository = new InMemoryDomainRepository();
   await repository.createProject({
     id: persistenceId('project', 'project-1'),
@@ -198,8 +203,8 @@ async function fixture(decision: 'approve' | 'reject' = 'approve') {
       pipeline: 'feature',
       status: 'pending',
       input: { title: 'Add a status endpoint' },
-      createdAt: now,
-      updatedAt: now,
+      createdAt,
+      updatedAt: createdAt,
     },
     digest('run-input'),
   );
@@ -524,7 +529,7 @@ describe('durable feature workflow', () => {
     );
     expect(published).toHaveLength(1);
     expect(f.waitpointCreates).toEqual([
-      expect.objectContaining({ timeout: '3600s' }),
+      expect.objectContaining({ timeout: '86400s' }),
     ]);
     expect(f.runtime.cleaned).toHaveLength(5);
     expect(accessRequests.map((request) => request.logicalStepId)).toEqual([
@@ -1145,6 +1150,97 @@ describe('durable feature workflow', () => {
       draftPullRequestUrl: 'https://github.test/pr/retried',
     });
     expect(calls).toBe(2);
+  });
+
+  it('starts the execution deadline at approval consume, not run creation', async () => {
+    const created = isoTimestamp('2026-08-17T10:00:00.000Z');
+    const consumed = isoTimestamp('2026-08-17T12:00:00.000Z');
+    const late = isoTimestamp('2026-08-17T12:30:00.000Z');
+    const f = await fixture('approve', created);
+
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const clock = vi.fn();
+    
+    const dependencies = {
+      repository: f.repository,
+      checkpoints,
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: clock,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/late-deadline',
+        }),
+      },
+    };
+
+    // Override waiter.wait to consume at 'consumed' time
+    f.waiter.wait = async () => {
+      const approvals = await f.repository.listApprovals(
+        persistenceId('run', 'run-1'),
+      );
+      const approval = approvals[0]!;
+      
+      // Keep clock at 'consumed' for the consumption and subsequent immediate updates
+      clock.mockReturnValue(consumed);
+
+      await f.repository.consumeApprovalWithEvent(
+        {
+          approvalId: approval.id,
+          runId: approval.runId,
+          scope: approval.scope,
+          fingerprint: approval.fingerprint,
+          consumedAt: consumed,
+        },
+        {
+          runId: approval.runId,
+          eventId: persistenceId('event', 'decision-approve'),
+          fingerprint: digest('decision-approve'),
+          type: 'approval.approved',
+          payload: { approvalId: approval.id, scopeHash: approval.fingerprint },
+          occurredAt: consumed,
+        },
+      );
+      
+      return { status: 'completed' as const };
+    };
+
+    // We need to move the clock to 'late' ONLY AFTER deadlineMs is updated.
+    // Since we can't easily hook into that, we'll make the first few calls after wait return 'consumed'
+    // and then switch to 'late'.
+    // Or better, we can mock clock to return 'consumed' and then 'late' in sequence.
+    
+    // Let's use a smarter mock for clock.
+    let clockCallCount = 0;
+    clock.mockImplementation(() => {
+      clockCallCount++;
+      // Specification and setup for wait: use 'created' (up to ~50 calls to be safe)
+      if (clockCallCount < 50) return created;
+      // Post-wait until deadline update: use 'consumed'
+      if (clockCallCount < 60) return consumed;
+      // rest: use 'late'
+      return late;
+    });
+
+    const result = await createDurableFeatureWorkflow(dependencies).run(input);
+
+    // With the fix, deadlineMs = consumed + 1h = 13:00:00.
+    // 'late' is 12:30:00, which is < 13:00:00, so it should succeed.
+    expect(result.status).toBe('succeeded');
   });
 
   it('reconciles an ambiguous publisher call through trusted idempotent publication', async () => {

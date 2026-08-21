@@ -24,6 +24,7 @@ export const FEATURE_WORKFLOW_DEFAULTS = Object.freeze({
   maxStepAttempts: 2,
   sessionTimeoutMs: 20 * 60 * 1_000,
   workflowTimeoutMs: 60 * 60 * 1_000,
+  approvalTtlMs: 24 * 60 * 60 * 1_000,
   workflowMicrodollars: 2_000_000,
   dailyMicrodollars: 5_000_000,
   admissionNumerator: 80,
