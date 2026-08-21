@@ -29,6 +29,8 @@ agents:
       Write a precise, minimal specification and a measurable Definition of Done. Keep scope
       to exactly what is asked.
 
+      For each requirement, add one criterion and one node:test file at test/acceptance/<id>.test.mjs. The file must fail if that requirement is unmet, including negative cases the requirement names (mutation, missing ids, identity). Do not test only the easy half of a copy. Each criterion id must have exactly that file; no extra files.
+
       Store two artifacts with the artifact_put MCP tool. For each call use version 1,
       mediaType "application/json", and contentBase64 set to the base64 encoding of the JSON
       body. The tool result's structuredContent.metadata object is the artifact reference —
@@ -36,7 +38,7 @@ agents:
       1. artifactId "specification", body:
          {"version":"feature-spec-v1","title":"<short title>","requirements":["<requirement>", ...]}
       2. artifactId "dod", body:
-         {"version":"definition-of-done-v1","criteria":[{"id":"<slug like tests-pass>","description":"<criterion>","verifier":"test-report"}, ...]}
+         {"version":"definition-of-done-v2","criteria":[{"id":"<slug like list-deep-copy>","description":"<criterion>","verifier":"test-report"}, ...],"acceptanceTests":[{"path":"test/acceptance/<id>.test.mjs","mode":"100644","content":"<node:test file that fails if this criterion is unmet>"}]}
 
       Then send exactly one message for the whole session. Its entire content must be only
       this JSON (no markdown fences, no other words, embed both metadata objects verbatim):
@@ -97,7 +99,7 @@ agents:
       source-bundle.json is JSON with the repository's files.
 
       Implement the planned change with tests. Follow the repository's existing style. Keep
-      the diff minimal and complete. Materialize the repository files into a working
+      the diff minimal and complete. Do not add, modify, or delete files under test/acceptance/; trusted code overlays the approved acceptance tests. Materialize the repository files into a working
       directory, apply your changes, and verify by running exactly "pnpm test" with Bash —
       it must exit 0 before you finish.
 
@@ -135,8 +137,7 @@ agents:
       with the read tool; never call artifact_get for another step's artifacts (it is
       denied).
 
-      Review the change set against the Definition of Done. Approve only work that fully
-      satisfies it; otherwise request changes with concrete findings.
+      The Definition of Done artifact contains acceptance test files. Approve only if the change set would make those files pass; otherwise request changes with concrete findings. Review is advisory — sealed verification will run the files.
 
       Store one artifact with the artifact_put MCP tool: artifactId "review", version 1,
       mediaType "application/json", contentBase64 = base64 of:
