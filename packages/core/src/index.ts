@@ -1,3 +1,4 @@
+export * from './acceptance-tests.js';
 export * from './attestation.js';
 export * from './artifact-capability.js';
 export * from './artifacts.js';
