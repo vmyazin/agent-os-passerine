@@ -684,7 +684,6 @@ export function SetupWizard() {
               <input
                 onChange={(event) => setLocalName(event.target.value)}
                 pattern="[a-z0-9][a-z0-9-]{0,63}"
-                style={{ width: '100%' }}
                 type="text"
                 value={localName}
               />
@@ -750,10 +749,10 @@ export function SetupWizard() {
         ) : null}
         <textarea
           aria-label="Project configuration YAML"
+          className="code-field"
           onChange={(event) => setYaml(event.target.value)}
           rows={24}
           spellCheck={false}
-          style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.8rem' }}
           value={yaml}
         />
         <div className="button-row">
@@ -832,7 +831,6 @@ export function SetupWizard() {
           <input
             maxLength={200}
             onChange={(event) => setTitle(event.target.value)}
-            style={{ width: '100%' }}
             type="text"
             value={title}
           />
@@ -843,7 +841,6 @@ export function SetupWizard() {
             maxLength={10_000}
             onChange={(event) => setDescription(event.target.value)}
             rows={5}
-            style={{ width: '100%' }}
             value={description}
           />
         </label>
@@ -895,7 +892,6 @@ export function SetupWizard() {
                         description: event.target.value,
                       })
                     }
-                    style={{ width: '100%' }}
                     type="text"
                     value={criterion.description}
                   />
@@ -908,7 +904,6 @@ export function SetupWizard() {
                         command: event.target.value,
                       })
                     }
-                    style={{ width: '100%' }}
                     value={criterion.command}
                   >
                     {trustedCommands.map((command) => (

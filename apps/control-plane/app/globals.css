@@ -600,6 +600,8 @@ button:disabled {
 }
 
 button:focus-visible,
+input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
@@ -631,16 +633,35 @@ form {
   gap: 0.7rem;
 }
 label {
+  /* Stack the control under its label text so wrapping inputs never sit
+     inline with it; every form in the app relies on this layout. */
+  display: grid;
+  gap: 0.35rem;
   font-weight: 700;
 }
+/* One shared vocabulary for form controls: previously only textarea was
+   styled, so wizard inputs and selects fell back to raw browser defaults
+   next to it. */
+input,
+select,
 textarea {
   width: 100%;
-  resize: vertical;
-  min-height: 96px;
   border: 1px solid var(--line-emphasis);
   border-radius: 0.55rem;
+  background: var(--surface-sheet);
+  color: var(--ink-command);
   padding: 0.75rem;
   font: inherit;
+}
+textarea {
+  resize: vertical;
+  min-height: 96px;
+}
+/* Monospace variant for controls holding code or YAML. */
+.code-field {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 .notice {
   border-radius: 0.6rem;
