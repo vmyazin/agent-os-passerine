@@ -1315,6 +1315,85 @@ runtime: { provider: local }
     ).resolves.toMatchObject({ status: 'pending' });
   });
 
+  it('settles an approval by the clock even while its stored status says pending', async () => {
+    // Reconciliation writes 'expired' on a cron. Until it does, the row still
+    // says 'pending' -- and every read path used to believe it, so the inbox
+    // offered a decision that the SQL guard would refuse.
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'lapsed');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Project',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'lapsed'),
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'lapsed-scope-hash',
+      status: 'pending',
+      createdAt: isoTimestamp('2026-08-17T10:00:00.000Z'),
+      expiresAt: isoTimestamp('2026-08-17T11:00:00.000Z'),
+    });
+    const service = createService(repository);
+
+    await expect(service.listPendingApprovals()).resolves.toEqual([]);
+
+    const digest = await service.inboxDigest();
+    expect(digest.approvals).toMatchObject([
+      { id: persistenceId('approval', 'lapsed'), status: 'expired' },
+    ]);
+
+    await expect(
+      service.consumeApproval('lapsed', 'approve', 'decision-key'),
+    ).rejects.toMatchObject({ code: 'approval_expired', status: 409 });
+  });
+
+  it('still allows a decision while the approval is inside its window', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'live-approval');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Project',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'live-approval'),
+      runId,
+      scope: 'merge:42',
+      fingerprint: 'live-scope-hash',
+      status: 'pending',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+    const service = createService(repository);
+
+    await expect(service.listPendingApprovals()).resolves.toMatchObject([
+      { id: persistenceId('approval', 'live-approval'), status: 'pending' },
+    ]);
+    await expect(
+      service.consumeApproval('live-approval', 'approve', 'decision-key'),
+    ).resolves.toMatchObject({ status: 'consumed' });
+  });
+
   it('assembles an inbox digest that keeps decided approvals and reports terminal runs', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({

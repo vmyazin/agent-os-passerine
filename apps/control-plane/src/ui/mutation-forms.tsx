@@ -2,6 +2,30 @@
 
 import { useRef, useState } from 'react';
 
+/**
+ * Prefer the server's explanation over a generic retry prompt. A 409 here
+ * means the decision can never succeed -- the approval expired, or someone
+ * already decided it -- and telling the operator to try again sends them
+ * into a loop that cannot end.
+ */
+async function failureMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as {
+      error?: { message?: string };
+    };
+    const message = body.error?.message;
+    if (typeof message === 'string' && message !== '')
+      return response.status === 409
+        ? `Could not save: ${message}.`
+        : `Could not save: ${message}. Please try again.`;
+  } catch {
+    // Fall through to the generic message below.
+  }
+  return response.status === 409
+    ? 'Could not save. This request is no longer open.'
+    : 'Could not save. Please try again.';
+}
+
 function useMutation() {
   const [message, setMessage] = useState('');
   const [pending, setPending] = useState(false);
@@ -19,7 +43,7 @@ function useMutation() {
         },
         body: JSON.stringify(body),
       });
-      setMessage(response.ok ? 'Saved.' : 'Could not save. Please try again.');
+      setMessage(response.ok ? 'Saved.' : await failureMessage(response));
       statusRef.current?.focus();
       if (response.ok) location.reload();
     } finally {

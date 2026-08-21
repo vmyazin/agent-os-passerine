@@ -198,7 +198,9 @@ describe('configuration API routes', () => {
       fingerprint: 'scope-hash-42',
       status: 'pending',
       createdAt: now,
-      expiresAt: '2026-08-18T12:00:00.000Z' as never,
+      // Relative to the real clock the route runs on: a fixed literal here
+      // silently became a past date, and the approval stopped being pending.
+      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() as never,
     });
 
     const response = await getInbox(request('/api/inbox'));

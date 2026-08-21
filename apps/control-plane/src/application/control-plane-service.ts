@@ -353,13 +353,31 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function projectApproval(approval: Approval): ApprovalProjection {
+/**
+ * Expiry is a deadline, not a stored fact. `status` only becomes 'expired'
+ * when workflow reconciliation gets around to writing it, and that runs on a
+ * cron -- so between the deadline passing and the next sweep, a dead approval
+ * still reads as 'pending'. The inbox then offers Approve/Reject on it, and
+ * the click fails in SQL, where the guard *does* compare the clock.
+ *
+ * Deriving it here puts every reader on the same footing as that guard:
+ * the inbox stops offering an impossible decision, and the attention count
+ * stops counting it. Reconciliation still writes the column; this just stops
+ * the read path from trusting it while it is stale.
+ */
+function projectApproval(
+  approval: Approval,
+  now: IsoTimestamp,
+): ApprovalProjection {
+  const expired =
+    approval.status === 'pending' &&
+    Date.parse(approval.expiresAt) <= Date.parse(now);
   return {
     id: approval.id,
     runId: approval.runId,
     scopeHash: approval.fingerprint,
     scopePreview: redactText(approval.scope).slice(0, 240),
-    status: approval.status,
+    status: expired ? 'expired' : approval.status,
     createdAt: approval.createdAt,
     expiresAt: approval.expiresAt,
     ...(approval.consumedAt === undefined
@@ -1296,9 +1314,12 @@ export class ControlPlaneService {
           409,
         );
       }
-      return projectApproval(existing);
+      return projectApproval(existing, this.clock());
     }
-    return projectApproval(await this.repository.createApproval(approval));
+    return projectApproval(
+      await this.repository.createApproval(approval),
+      this.clock(),
+    );
   }
 
   private async getApprovalRecord(id: string): Promise<Approval> {
@@ -1327,12 +1348,24 @@ export class ControlPlaneService {
         409,
       );
     }
-    if (approval.status === 'expired') {
-      throw new ServiceError('approval_expired', 'approval expired', 409);
+    const consumedAt = this.clock();
+    // The stored status is only half the test: the SQL guard also refuses a
+    // decision once expires_at has passed. Checking the column alone let an
+    // expired-but-not-yet-swept approval reach that guard, fail there, and
+    // surface as the meaningless 'approval is invalid' instead of saying it
+    // ran out of time.
+    if (
+      approval.status === 'expired' ||
+      Date.parse(approval.expiresAt) <= Date.parse(consumedAt)
+    ) {
+      throw new ServiceError(
+        'approval_expired',
+        'approval expired before a decision was recorded',
+        409,
+      );
     }
     const decisionType =
       decision === 'approve' ? 'approval.approved' : 'approval.rejected';
-    const consumedAt = this.clock();
     let consumed: Approval | undefined;
     try {
       consumed = await this.repository.consumeApprovalWithEvent(
@@ -1375,7 +1408,7 @@ export class ControlPlaneService {
     } catch {
       // The atomic approval event is the durable outbox intent.
     }
-    return projectApproval(consumed);
+    return projectApproval(consumed, consumedAt);
   }
 
   async listInbox(
@@ -1408,6 +1441,7 @@ export class ControlPlaneService {
    * covers every run that ever finished, not just future ones.
    */
   async inboxDigest(limit = 50, projectId?: string): Promise<InboxDigest> {
+    const now = this.clock();
     const runs = await this.repository.listRuns({
       limit,
       order: 'desc',
@@ -1467,16 +1501,18 @@ export class ControlPlaneService {
       ),
       DIGEST_QUERY_CONCURRENCY,
       async ({ approval, run }): Promise<InboxApprovalItem> => {
-        const projected = projectApproval(approval);
+        const projected = projectApproval(approval, now);
         const projectName = projectNames.get(run.projectId);
         const base =
           projectName === undefined ? projected : { ...projected, projectName };
-        if (approval.status === 'consumed') {
+        if (projected.status === 'consumed') {
           const rejected =
             safeString(record(run.output), 'status') === 'rejected';
           return { ...base, decision: rejected ? 'rejected' : 'approved' };
         }
-        if (approval.status === 'pending')
+        // Summaries exist to help someone decide. Skip the artifact reads for
+        // an approval that has already run out of time.
+        if (projected.status === 'pending')
           return { ...base, ...(await this.approvalSummary(projected)) };
         return base;
       },
@@ -1542,10 +1578,16 @@ export class ControlPlaneService {
       DIGEST_QUERY_CONCURRENCY,
       (run) => this.repository.listApprovals(run.id, { status: 'pending', limit }),
     );
+    const now = this.clock();
+    // "Pending" has to mean actionable. The repository filters on the stored
+    // status, which stays 'pending' past the deadline until reconciliation
+    // rewrites it, so drop the ones the clock has already settled -- both the
+    // attention badge and the inbox list read this.
     const projected = pages
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map(projectApproval);
+      .map((approval) => projectApproval(approval, now))
+      .filter((approval) => approval.status === 'pending');
     if (!includeSummaries) return projected;
     return mapWithConcurrency(
       projected,
