@@ -91,6 +91,64 @@ export function ApprovalActions({
   );
 }
 
+/**
+ * Stopping a run that will not finish on its own. The cancel endpoint writes
+ * the terminal status and its event before it tells the worker, so this works
+ * even when no worker is connected -- which is exactly when a run needs it.
+ *
+ * Two-step on purpose: cancelling is not reversible, and the runs list puts
+ * this one click away from runs that are working fine.
+ */
+export function CancelRunAction({ runId }: { readonly runId: string }) {
+  const { message, mutate, pending, statusRef } = useMutation();
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        {confirming ? (
+          <>
+            <button
+              disabled={pending}
+              onClick={() => void mutate(`/api/runs/${runId}/cancel`, {})}
+              type="button"
+            >
+              {pending ? 'Cancelling…' : 'Confirm cancel'}
+            </button>
+            <button
+              className="secondary"
+              disabled={pending}
+              onClick={() => setConfirming(false)}
+              type="button"
+            >
+              Keep run
+            </button>
+          </>
+        ) : (
+          <button
+            className="secondary"
+            onClick={() => setConfirming(true)}
+            type="button"
+          >
+            Cancel run
+          </button>
+        )}
+      </div>
+      {confirming && message === '' ? (
+        <p>
+          <small>
+            This records the run as cancelled and stops any further work on it.
+            Its history and provenance are kept. An approval still inside its
+            window stays in the inbox until it lapses.
+          </small>
+        </p>
+      ) : null}
+      <p aria-live="polite" ref={statusRef} tabIndex={-1}>
+        {message}
+      </p>
+    </div>
+  );
+}
+
 export function ReplyForm({ messageId }: { readonly messageId: string }) {
   const { message, mutate, pending, statusRef } = useMutation();
   const [reply, setReply] = useState('');

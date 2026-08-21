@@ -2,9 +2,14 @@ import { loadRunPageModel } from '../../../src/application/run-page-model';
 import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
+import { CancelRunAction } from '../../../src/ui/mutation-forms';
 import { UndispatchedRunNotice } from '../../../src/ui/undispatched-run-notice';
 
 export const dynamic = 'force-dynamic';
+
+// A run that has already stopped has nothing to cancel; the endpoint rejects
+// it with 409, so the button must not be offered in the first place.
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 
 export default async function RunPage({
   params,
@@ -26,6 +31,9 @@ export default async function RunPage({
         <p className="eyebrow">{run.pipeline} run</p>
         <h1 id="run-title">{run.input?.title ?? run.id}</h1>
         <RunStatusBadge status={run.status} />
+        {TERMINAL_STATUSES.has(run.status) ? null : (
+          <CancelRunAction runId={run.id} />
+        )}
       </section>
       {awaitingDispatch ? <UndispatchedRunNotice /> : null}
       <dl className="metadata">
