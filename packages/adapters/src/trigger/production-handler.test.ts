@@ -69,6 +69,10 @@ describe('production feature workflow composition', () => {
     expect(command.indexOf('pnpm install')).toBeLessThan(
       command.indexOf("'pnpm' 'test'"),
     );
+    expect(command).toContain("'pnpm' 'test' && node --test test/acceptance/");
+    expect(command.indexOf("'pnpm' 'test'")).toBeLessThan(
+      command.indexOf('node --test test/acceptance/'),
+    );
     expect(command).toContain('AGENTOS_EXIT_CODE');
   });
 

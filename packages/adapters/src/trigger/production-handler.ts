@@ -236,7 +236,7 @@ export function exactTrustedCommand(definition: {
   const invocation = [definition.executable, ...definition.arguments]
     .map(shellQuote)
     .join(' ');
-  return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation}; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
+  return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation} && node --test test/acceptance/; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
 }
 
 function priceUsage(
@@ -731,7 +731,7 @@ export async function createProductionFeatureWorkflowFromEnv(
               bytes: Uint8Array.from(value.bytes),
               mountPath:
                 request.role === 'verification' &&
-                metadata.artifactId === 'changes'
+                metadata.artifactId === 'sealed-changes'
                   ? '/workspace/inputs/changes.json'
                   : `/workspace/inputs/${metadata.stepId}-${metadata.artifactId}.json`,
             });
