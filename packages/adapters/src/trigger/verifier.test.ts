@@ -48,9 +48,16 @@ const base = {
   workflow,
   producingStepId: 'implementation',
   definitionOfDone: {
-    version: 'definition-of-done-v1',
+    version: 'definition-of-done-v2',
     criteria: [
       { id: 'tests', description: 'Tests pass', verifier: 'test-report' },
+    ],
+    acceptanceTests: [
+      {
+        path: 'test/acceptance/tests.test.mjs',
+        mode: '100644',
+        content: "import { test } from 'node:test';\n",
+      },
     ],
   },
   testEvidence: {

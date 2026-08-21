@@ -2,6 +2,8 @@ import {
   PUBLICATION_MAX_FILE_BYTES,
   PUBLICATION_MAX_FILES,
   PUBLICATION_MAX_TOTAL_BYTES,
+  acceptanceTestsPairingError,
+  isAcceptanceTestPath,
 } from '@agentos/core';
 import { z } from 'zod';
 
@@ -132,7 +134,7 @@ export const featureSpecificationSchema = z
   .strict();
 export const definitionOfDoneSchema = z
   .object({
-    version: z.literal('definition-of-done-v1'),
+    version: z.literal('definition-of-done-v2'),
     criteria: z
       .array(
         z
@@ -145,8 +147,48 @@ export const definitionOfDoneSchema = z
       )
       .min(1)
       .max(100),
+    acceptanceTests: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(1_024),
+            mode: z.literal('100644'),
+            content: z.string().min(1).max(PUBLICATION_MAX_FILE_BYTES),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(20),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const bytes = value.acceptanceTests.reduce(
+      (sum, file) => sum + Buffer.byteLength(file.content),
+      0,
+    );
+    if (bytes > PUBLICATION_MAX_TOTAL_BYTES) {
+      context.addIssue({
+        code: 'custom',
+        message: 'acceptance tests exceed aggregate size',
+      });
+    }
+    for (const file of value.acceptanceTests) {
+      if (!isAcceptanceTestPath(file.path) || file.content.includes('\0')) {
+        context.addIssue({
+          code: 'custom',
+          path: ['acceptanceTests'],
+          message: `invalid acceptance test path: ${file.path}`,
+        });
+      }
+    }
+    const pairing = acceptanceTestsPairingError(
+      value.criteria.map((criterion) => criterion.id),
+      value.acceptanceTests.map((file) => file.path),
+    );
+    if (pairing !== undefined) {
+      context.addIssue({ code: 'custom', message: pairing });
+    }
+  });
 export const implementationPlanSchema = z
   .object({
     version: z.literal('implementation-plan-v1'),

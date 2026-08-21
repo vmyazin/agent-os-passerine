@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  definitionOfDoneSchema,
   draftPublicationResultSchema,
   localPublicationResultSchema,
   publicationResultSchema,
@@ -108,5 +109,68 @@ describe('draftPublicationResultSchema', () => {
     expect(draftPublicationResultSchema.safeParse(validDraft).success).toBe(
       true,
     );
+  });
+});
+
+describe('definitionOfDoneSchema', () => {
+  const valid = {
+    version: 'definition-of-done-v2',
+    criteria: [
+      {
+        id: 'list-deep-copy',
+        description: 'Mutating a returned todo does not change the store',
+        verifier: 'test-report',
+      },
+    ],
+    acceptanceTests: [
+      {
+        path: 'test/acceptance/list-deep-copy.test.mjs',
+        mode: '100644',
+        content: "import { test } from 'node:test';\n",
+      },
+    ],
+  };
+
+  it('accepts a paired v2 document', () => {
+    expect(definitionOfDoneSchema.safeParse(valid).success).toBe(true);
+  });
+
+  it('rejects v1', () => {
+    expect(
+      definitionOfDoneSchema.safeParse({
+        version: 'definition-of-done-v1',
+        criteria: valid.criteria,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a criterion without a matching file', () => {
+    expect(
+      definitionOfDoneSchema.safeParse({
+        ...valid,
+        acceptanceTests: [
+          {
+            path: 'test/acceptance/other.test.mjs',
+            mode: '100644',
+            content: 'x',
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects a path outside test/acceptance/', () => {
+    expect(
+      definitionOfDoneSchema.safeParse({
+        ...valid,
+        acceptanceTests: [
+          {
+            path: 'test/list-deep-copy.test.mjs',
+            mode: '100644',
+            content: 'x',
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 });
