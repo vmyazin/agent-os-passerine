@@ -15,12 +15,14 @@ session leases.
    that revision. A durable outbox effect then reads the exact base commit,
    validates and writes a bounded `source/bundle-v1` artifact, and only then
    requests the versioned Trigger task.
-2. The specification role writes separately hashed specification and measurable
-   Definition-of-Done artifacts.
+2. The specification role writes a separately hashed specification plus
+   `definition-of-done-v2` with one `test/acceptance/<id>.test.mjs` per
+   criterion.
 3. The workflow creates a scope hash over the run, configuration, specification,
    and DoD. It stores a domain approval and a Trigger waitpoint reference. The
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
+   The inbox shows the acceptance test file bodies.
 4. Planning, implementation/testing, review, and trusted verification use
    distinct agents, environments, and runtime sessions. Each role receives the
    exact source bundle (at most one MiB for the current POC runtime transport)
@@ -29,11 +31,14 @@ session leases.
    step scope. A requested fix gets one fresh
    implementation session followed by a fresh final-review session; a final
    `changes_requested` decision cannot publish.
-5. Verification runs a trusted frozen-lockfile `pnpm` install followed by the
-   allowlisted test command in a separate, secretless Managed sandbox with only
-   source/change inputs and Bash. It can reach only server-configured package
-   registry hosts; lifecycle scripts are disabled. The provider-observed exact
-   install/test sequence and result are bound into a signed, bounded report.
+5. After implementation, trusted code seals the acceptance test files onto the
+   change set (`sealed-changes`). Verification materializes the sealed set and
+   runs the allowlisted project command and `node --test test/acceptance/` in a
+   separate, secretless Managed sandbox with only source/change inputs and Bash.
+   An implementer change under `test/acceptance/` is a permanent error. It can
+   reach only server-configured package registry hosts; lifecycle scripts are
+   disabled. The provider-observed exact install/test sequence and result are
+   bound into a signed, bounded report.
 6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
    protected-path policy. A trusted publication authority—not an agent—creates
    the publisher input. The GitHub App publisher revalidates the stale base and
@@ -114,7 +119,12 @@ The proof-of-concept defaults are fixed in trusted code:
 - one global live agent-session lease;
 - two attempts per step (one classified transient retry);
 - 20 minutes per runtime session;
-- an absolute 60-minute domain deadline, including approval waits;
+- approvals wait up to 24 hours (`approvalTtlMs`); the 60-minute execution
+  budget starts when the spec/DoD approval is consumed;
+- a run in `waiting` with a live approval is not failed for the execution
+  deadline;
+- a goal parent with a non-terminal child is not failed for the execution
+  deadline;
 - $2 per workflow and $5 per rolling 24-hour project window, represented as
   integer microdollars;
 - no new session at 80% of either cap.
