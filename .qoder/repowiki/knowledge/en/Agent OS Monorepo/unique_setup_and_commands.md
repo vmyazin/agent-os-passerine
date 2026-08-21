@@ -1,0 +1,1 @@
+`pnpm build` runs Turborepo to build every package respecting `^build` dependencies; `pnpm test` and `pnpm typecheck` cascade through the workspace; `pnpm agentos` builds the CLI and launches it; `pnpm db:migrate`/`db:generate`/`db:check` drive Drizzle migrations; `pnpm trigger:dev`/`trigger:deploy` manage Trigger.dev workflows; `pnpm test:e2e` builds then runs Playwright.

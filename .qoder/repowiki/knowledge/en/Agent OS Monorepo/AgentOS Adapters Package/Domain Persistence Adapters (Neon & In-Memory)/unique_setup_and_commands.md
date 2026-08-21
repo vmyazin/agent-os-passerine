@@ -1,0 +1,1 @@
+The Neon adapter requires a `DATABASE_URL` environment variable containing a valid `postgres:` or `postgresql:` URL with hostname, username, and database path; invalid URLs throw during repository construction via `databaseUrlFromEnv`.

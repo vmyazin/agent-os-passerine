@@ -1,0 +1,8 @@
+- Public interfaces are defined in dedicated files and re-exported wholesale from `src/index.ts`, keeping each concern in its own module while presenting a flat API surface.
+- Configuration and request shapes are validated declaratively with Zod schemas (e.g. `AgentOsConfigSchema`, `PipelineDefinitionSchema`) and parsed via a thin `parse*` / `load*` wrapper function.
+- Cross-field validation uses Zod's `superRefine` to enforce referential integrity (e.g. agent.model must exist in models, pipeline steps cannot reference unknown agents/environments, no dependency cycles).
+- State machines are implemented as pure reducer functions (`reduceLifecycleState`, `reduceApproval`) that take an immutable state and an event and return a new frozen state, with transitions declared in a lookup table rather than if/else chains.
+- Event processing is made idempotent by computing a SHA-256 fingerprint of a canonicalized payload and tracking processed IDs within a bounded `EVENT_DEDUPE_WINDOW` list.
+- Persisted identifiers use branded string types (`PersistenceId<Kind>`, `IsoTimestamp`) created via factory functions (`persistenceId`, `isoTimestamp`) that validate inputs at construction time.
+- Artifact and attestation values are constructed through explicit `prepare*` / `createHmacAttestationIssuer` factories that normalize, validate, and freeze outputs before returning them.
+- Constants defining allowed sets (event types, lifecycle statuses, media types, retention classes) are declared as `as const` tuples and derived into union types via `(typeof X)[number]`.

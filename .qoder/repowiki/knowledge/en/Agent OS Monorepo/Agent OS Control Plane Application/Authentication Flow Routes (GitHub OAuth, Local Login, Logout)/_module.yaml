@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: control_plane_app/auth_flows
+title: Authentication Flow Routes (GitHub OAuth, Local Login, Logout)
+scope:
+    - apps/control-plane/app/auth/
+source_files: []
+depends_on: []
+related_to: []

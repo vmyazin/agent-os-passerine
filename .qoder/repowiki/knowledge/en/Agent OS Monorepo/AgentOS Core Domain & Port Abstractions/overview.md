@@ -1,0 +1,1 @@
+Defines the shared domain types, configuration schemas, event/state machines, attestation, artifacts, and provider ports that all AgentOS runtime components implement against.

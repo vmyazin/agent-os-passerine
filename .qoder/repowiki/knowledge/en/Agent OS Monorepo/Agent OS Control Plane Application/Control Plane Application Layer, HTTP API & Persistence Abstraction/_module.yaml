@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: control_plane_app/backend_subsystems
+title: Control Plane Application Layer, HTTP API & Persistence Abstraction
+scope:
+    - apps/control-plane/src/application/
+    - apps/control-plane/src/http/
+    - apps/control-plane/src/persistence/
+    - apps/control-plane/src/config/
+source_files: []
+depends_on: []
+related_to:
+    - path: adapters_package/persistence

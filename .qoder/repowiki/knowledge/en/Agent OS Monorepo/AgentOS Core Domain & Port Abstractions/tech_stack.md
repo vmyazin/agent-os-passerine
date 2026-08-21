@@ -1,0 +1,1 @@
+TypeScript ESM package built with `tsc` (separate `tsconfig.build.json`); schema validation via Zod; YAML parsing via `yaml`; cryptographic operations via Node `node:crypto` (sha256, hmac, timingSafeEqual).

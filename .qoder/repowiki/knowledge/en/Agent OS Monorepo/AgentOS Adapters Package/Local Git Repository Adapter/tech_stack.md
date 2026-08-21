@@ -1,0 +1,1 @@
+Node.js `child_process.spawn` for subprocess execution with stdin piping (required for `hash-object --stdin` and `mktree`), `node:crypto` SHA-256 for publication key hashing, and direct `git` plumbing commands invoked through a strict allowlist rather than any git library.

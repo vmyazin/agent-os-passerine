@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: agentos_config
+title: Agent OS Workspace Configuration
+scope:
+    - agentos/
+source_files: []
+depends_on: []
+related_to: []

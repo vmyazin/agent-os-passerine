@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: adapters_package
+title: AgentOS Adapters Package
+scope:
+    - packages/adapters/
+source_files: []
+depends_on: []
+related_to: []

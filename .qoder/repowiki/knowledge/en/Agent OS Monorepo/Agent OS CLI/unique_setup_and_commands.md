@@ -1,0 +1,1 @@
+Built with `npm run build` (or `turbo build` at workspace root) producing `dist/index.js`, which is exposed as the `agentos` binary via `package.json#bin`. Tests use `npm run test` (Vitest), linting via `eslint .`, and typechecking via `tsc -p tsconfig.json --noEmit`.

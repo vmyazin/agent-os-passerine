@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: adapters_package/persistence
+title: Domain Persistence Adapters (Neon & In-Memory)
+scope:
+    - packages/adapters/src/persistence/
+source_files: []
+depends_on: []
+related_to:
+    - path: control_plane_app/backend_subsystems

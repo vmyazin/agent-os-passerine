@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: adapters_package/local_git
+title: Local Git Repository Adapter
+scope:
+    - packages/adapters/src/local-git/
+source_files: []
+depends_on: []
+related_to: []

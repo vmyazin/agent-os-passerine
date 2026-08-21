@@ -1,0 +1,1 @@
+Implements durable, idempotent feature and goal workflows on top of Trigger.dev, orchestrating agent sessions, budgeting, approvals, verification, and publication with effect-based checkpointing.

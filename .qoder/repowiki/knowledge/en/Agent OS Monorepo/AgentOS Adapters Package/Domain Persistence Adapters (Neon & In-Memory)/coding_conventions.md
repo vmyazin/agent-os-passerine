@@ -1,0 +1,6 @@
+- Each persisted entity has a paired selection set and `mapXxxRow` function in `row-mapping.ts` that converts raw Drizzle rows into domain objects, and every repository method applies the same mapper to returned rows.
+- List operations use a cursor-based pagination pattern combining an `after` timestamp/id cursor with `boundedListLimit` to cap page sizes, ordered by `(createdAt, id collate "C")` for deterministic ordering.
+- JSON fields are written through `jsonbValue`/`optionalJsonbValue`/`nullableJsonbValue` helpers that stringify values to `::jsonb`, keeping JSON serialization consistent across insert/update queries.
+- Concurrency and idempotency are enforced at the database layer using unique constraints and explicit conflict checks, raising `IdempotencyConflictError` when a stored fingerprint differs from the requested one.
+- Domain-specific failure modes are modeled as distinct Error subclasses in `errors.ts` (e.g., `StaleConfigurationError`, `EventFingerprintConflictError`) rather than generic exceptions.
+- Both adapters validate inputs via shared helpers in `validation.ts` (e.g., `assertValidConfigRevision`, `assertValidStepRun`, `assertNonNegativeSafeInteger`) before performing any mutation.

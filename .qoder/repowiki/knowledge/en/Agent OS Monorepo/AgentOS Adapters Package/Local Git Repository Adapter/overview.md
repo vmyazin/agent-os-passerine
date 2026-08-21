@@ -1,0 +1,1 @@
+Provides a containment-validated, plumbing-only adapter for creating, reading, and publishing to local git repositories used as ephemeral experiment workspaces.

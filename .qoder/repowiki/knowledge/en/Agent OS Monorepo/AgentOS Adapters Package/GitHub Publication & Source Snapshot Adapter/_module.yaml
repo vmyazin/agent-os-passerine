@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: adapters_package/github
+title: GitHub Publication & Source Snapshot Adapter
+scope:
+    - packages/adapters/src/github/
+source_files: []
+depends_on: []
+related_to: []

@@ -1,0 +1,1 @@
+Next.js App Router file-based routing with Route Handlers; Zod schemas for request/response validation; `@agentos/core` for YAML config parsing in setup routes.

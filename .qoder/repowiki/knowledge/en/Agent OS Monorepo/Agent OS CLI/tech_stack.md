@@ -1,0 +1,1 @@
+TypeScript ESM package targeting Node.js; argument parsing via `node:util.parseArgs`; HTTP client via `@agentos/core`'s `ApiClient`; build via `tsc -p tsconfig.build.json`; tests run with Vitest.

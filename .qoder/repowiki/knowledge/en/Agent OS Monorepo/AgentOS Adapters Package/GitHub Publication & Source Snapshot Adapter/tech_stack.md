@@ -1,0 +1,1 @@
+TypeScript adapter over the GitHub REST API via a GitHub App installation token, with Neon Serverless Postgres (`@neondatabase/serverless`) used as a durable, transactional checkpoint store through stored procedures; SHA-256 hashing via Node `node:crypto` for publication keys and branch names.

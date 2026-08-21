@@ -1,0 +1,1 @@
+YAML-based declarative config (versioned as `version: 1`) consumed by the Node.js `agentos` CLI; supports multiple model providers (local, anthropic, kimi) and runtime providers (process, cloud, managed).

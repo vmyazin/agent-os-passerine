@@ -1,0 +1,6 @@
+- Public errors are thrown as `ServiceError` instances carrying a machine-readable `code`, human message, and HTTP `status` code, which the API layer translates into `{error:{code,message}}` JSON responses.
+- User-visible string fields are passed through `redactText` / `safeString` / `safeStrings` helpers that strip credentials matching known token patterns before serialization.
+- API endpoints are declared as `ApiContract` objects describing `authorize`, `body`, `output`, `successStatus`, and `maxBodyBytes`, then executed through `handleApi` rather than ad-hoc try/catch blocks.
+- Configuration inputs are validated as canonical JSON by re-parsing and comparing against `canonicalConfigJson`/`canonicalConfigHash` before any persistence write.
+- Project selection accepts multiple selectors (`projectId`, `repository`, `localPath`, `name`) resolved via `resolveProjectId`, falling back to listing when none is provided.
+- Heavy read paths that fan out per-item database calls are wrapped in `mapWithConcurrency` with a bounded concurrency constant instead of unbounded `Promise.all`.

@@ -1,0 +1,1 @@
+Requires a Neon database URL configured via `databaseUrlFromEnv` (from `../persistence/database-config.js`) and a GitHub App `appId` + `privateKey` supplied at construction; the Postgres backend must expose the `agentos_claim_publication`, `agentos_save_publication`, `publication_records`, and `publication_events` schema.

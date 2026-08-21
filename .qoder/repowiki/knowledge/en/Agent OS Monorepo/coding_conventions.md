@@ -1,0 +1,4 @@
+- All packages extend the root `tsconfig.base.json` to share strict TypeScript compiler options (ES2022 target, Bundler resolution, noUncheckedIndexedAccess, verbatimModuleSyntax).
+- Workspace scripts delegate to Turborepo tasks so each child only declares its own `build`/`lint`/`test`/`typecheck` targets without re-implementing orchestration.
+- Package names follow the `@agentos/*` scope (`@agentos/core`, `@agentos/adapters`, `@agentos/cli`, `@agentos/config`) and are resolved via pnpm workspace hoisting.
+- Configuration files (Drizzle, Trigger.dev, Playwright, Vitest) live at the workspace root so all children reference a single source of truth.

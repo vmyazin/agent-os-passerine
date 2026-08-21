@@ -1,0 +1,1 @@
+Implements the control plane's domain service (projects, runs, configuration, inbox), Next.js API routes, in-memory/Neon repository factory, and local configuration loading.

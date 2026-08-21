@@ -1,0 +1,1 @@
+PostgreSQL persistence via `@neondatabase/serverless` HTTP client and `drizzle-orm` query builder/schema; in-memory persistence uses native Node `Map` plus `structuredClone`; timestamps use ISO 8601 strings validated by `@agentos/core`'s `isoTimestamp`.

@@ -1,0 +1,1 @@
+TypeScript adapter over `@anthropic-ai/sdk` 0.117.1 targeting the `managed-agents-2026-04-01` beta family under `client.beta`; relies on Node `crypto` for HMAC-based session capabilities and SHA-256 digests.

@@ -1,0 +1,1 @@
+Declarative YAML workspace definitions for the Agent OS CLI that configure models, agents, environments, pipelines, policies, budgets, and runtime routing.

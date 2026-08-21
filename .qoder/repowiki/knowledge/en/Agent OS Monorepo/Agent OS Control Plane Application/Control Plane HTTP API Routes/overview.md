@@ -1,0 +1,1 @@
+Next.js App Router route handlers that expose the control plane's REST-like HTTP API for projects, runs, goals, approvals, inbox, configuration, setup, and internal operations.

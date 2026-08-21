@@ -1,0 +1,1 @@
+Package-level smoke tests (`pnpm run smoke:kimi`, `smoke:managed-agents`, `smoke:r2`) build then execute one-off scripts in `scripts/` against live third-party services; integration tests for Postgres are isolated behind `pnpm run test:integration` with extended timeouts.

@@ -1,0 +1,3 @@
+- Feature evolution artifacts are named with an ISO date prefix (YYYY-MM-DD-) followed by a descriptive slug, separating plans from specs under `superpowers/plans/` and `superpowers/specs/`.
+- Architecture documents in `architecture/` are cross-referenced from `architecture/README.md`, which also enumerates monorepo package boundaries and dependency direction.
+- `progress.md` uses numbered sections for completed foundation steps and bullet lists for remaining product stages, with each step summarizing a cohesive slice of implemented capability.

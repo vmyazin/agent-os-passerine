@@ -1,0 +1,1 @@
+Next.js App Router (server components, route handlers), React Server Components, Zod schemas for API contract validation, GitHub OAuth for authentication, cookie-based sessions.

@@ -1,0 +1,30 @@
+schema_version: 1
+module_path: ""
+title: Agent OS Monorepo
+scope:
+    - README.md
+    - PRODUCT.md
+    - AGENTS.md
+    - CLAUDE.md
+    - .gitignore
+    - .mcp.json
+    - .prettierignore
+    - eslint.config.mjs
+    - package.json
+    - pnpm-workspace.yaml
+    - pnpm-lock.yaml
+    - turbo.json
+    - tsconfig.base.json
+    - drizzle.config.ts
+    - trigger.config.ts
+    - playwright.config.ts
+    - vitest.config.ts
+    - vercel.json
+    - .github/
+    - .agents/
+    - .claude/
+    - .env.example
+    - prettier.config.mjs
+source_files: []
+depends_on: []
+related_to: []

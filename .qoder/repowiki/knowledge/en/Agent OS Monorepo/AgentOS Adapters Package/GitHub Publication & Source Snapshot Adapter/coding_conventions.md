@@ -1,0 +1,6 @@
+- Each long-running operation is checkpointed after every phase transition by calling `store.save` with an explicit `phase` and `updatedAt`, enabling safe restart and idempotent retries.
+- External inputs are validated against tight schemas using helper functions (`validateSha`, `safeInteger`, `requiredString`, `mapRecord`) that throw typed `GitHubPublisherError` instances on malformed data.
+- Concurrent safety is enforced by passing `expectedRevision` to `store.save` and mapping PostgreSQL conflict code `P0001` to `publication_collision` / `publication_store_conflict` errors.
+- GitHub access is always performed through scoped factories (`withClient(scope, ...)`) that bind a specific repository's installation ID and a minimal permission set (`contents: 'write' | 'read'`, `pullRequests: 'write'`).
+- Public APIs are constructed via factory functions returning `Object.freeze(...)` plain objects, exposing only the intended methods and preventing mutation of service instances.
+- Errors are raised via the centralized `rejected(...)` / `collision(...)` helpers wrapping `GitHubPublisherError` with domain-specific codes rather than throwing raw exceptions.

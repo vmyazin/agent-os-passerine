@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: adapters_package/managed_agents
+title: Anthropic Managed Agents Runtime Provider Adapter
+scope:
+    - packages/adapters/src/managed-agents/
+source_files: []
+depends_on: []
+related_to:
+    - path: adapters_package/trigger

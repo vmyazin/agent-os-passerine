@@ -1,0 +1,1 @@
+Node.js with `node:crypto`; Cloudflare R2 accessed via `@aws-sdk/client-s3` configured with `forcePathStyle` and custom endpoints derived from account ID and jurisdiction (`default|eu|fedramp`); MCP server implements JSON-RPC 2.0 over HTTP pinned to protocol version `2025-06-18`; Postgres persistence through the `DomainRepository` interface from `@agentos/core`.

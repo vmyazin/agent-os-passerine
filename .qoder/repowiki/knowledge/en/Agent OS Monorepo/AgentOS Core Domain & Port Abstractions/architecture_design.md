@@ -1,0 +1,10 @@
+The package is a flat TypeScript module (`@agentos/core`) whose `src/index.ts` re-exports every domain sub-module as a single public surface. It has no runtime dependencies beyond `yaml` and `zod`, and no internal sub-packages — instead it organizes concerns by file:
+- `ports.ts` declares the provider-neutral interfaces (`RuntimeProvider`, `RepositoryPublisher`, `UsageMeter`, `Clock`) that concrete runtimes and publishers must implement.
+- `config.ts` defines the full `AgentOsConfigSchema` via Zod with cross-field `superRefine` validation (model/environment references, pipeline dependency cycles) plus canonicalization/diffing helpers for config hashing and change planning.
+- `lifecycle.ts` implements pure state machines (`reduceLifecycleState`, `reduceApproval`) driven by typed events with a transition table and terminal-state guards.
+- `events.ts` provides idempotent event deduplication using fingerprinted SHA-256 hashes over canonicalized payloads within a bounded window.
+- `attestation.ts` exposes an HMAC-based signed attestation protocol (`AttestationIssuer`/`AttestationVerifier`/`AttestationAuthority`) with purpose-derived keys and constant-time signature comparison.
+- `artifacts.ts` defines artifact key schemes, media-type allowlists, retention classes, and a manifest store interface with write leases and deletion reservations.
+- `persistence.ts` defines the `DomainRepository` interface and all persisted entity shapes (Project, WorkflowRun, StepRun, Approval, InboxMessage, DomainEvent, ArtifactRecord, UsageRecord, GoalCriterion/Progress) together with branded `PersistenceId<Kind>` and `IsoTimestamp` types.
+- `feature-workflow.ts`, `goal-workflow.ts`, `dod.ts`, `patch-policy.ts`, `verification-policy.ts`, `publication.ts`, `budget.ts`, `artifact-capability.ts` each model a specific workflow or policy domain on top of these primitives.
+Dependency direction is strictly inward: higher-level workflow/policy modules depend on `ports`, `lifecycle`, `events`, `config`, `artifacts`, and `persistence`; none of those primitives import back from workflows.

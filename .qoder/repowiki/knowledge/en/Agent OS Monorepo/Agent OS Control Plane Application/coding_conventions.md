@@ -1,0 +1,4 @@
+- HTTP endpoints are implemented as Next.js Route Handlers under `app/api/**/route.ts` and delegate business logic to `src/application` services rather than containing it inline.
+- Authentication state is accessed through shared `src/auth` utilities (`auth.ts`, `guard.ts`) rather than per-route session parsing.
+- Persistence access goes through the repository factory in `src/persistence/repository-factory.ts`, keeping services agnostic of whether data is in-memory or Neon-backed.
+- Shared UI logic is factored into `src/ui` components/view models and imported by both page routes and API response builders instead of being duplicated per route.

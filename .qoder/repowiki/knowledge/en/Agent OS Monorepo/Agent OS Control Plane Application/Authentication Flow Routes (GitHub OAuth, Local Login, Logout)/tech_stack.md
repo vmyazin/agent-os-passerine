@@ -1,0 +1,1 @@
+Next.js App Router Route Handlers (RSC-compatible `Request`/`Response`), GitHub OAuth2 code flow, secure HTTP-only cookies for `SESSION_COOKIE` and `OAUTH_COOKIE`.

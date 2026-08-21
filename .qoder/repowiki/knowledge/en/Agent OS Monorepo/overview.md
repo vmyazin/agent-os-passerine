@@ -1,0 +1,1 @@
+pnpm + Turborepo monorepo that composes the AgentOS core domain, pluggable adapters, Next.js control-plane app, CLI, and workspace config into a single build/test/lint pipeline.

@@ -1,0 +1,221 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en-US
+branch: main
+nodes_managed: true
+exported_at: "2026-08-21T05:41:28Z"
+modules:
+    "":
+        dir_name: Agent OS Monorepo
+        title: Agent OS Monorepo
+        scope:
+            - README.md
+            - PRODUCT.md
+            - AGENTS.md
+            - CLAUDE.md
+            - .gitignore
+            - .mcp.json
+            - .prettierignore
+            - eslint.config.mjs
+            - package.json
+            - pnpm-workspace.yaml
+            - pnpm-lock.yaml
+            - turbo.json
+            - tsconfig.base.json
+            - drizzle.config.ts
+            - trigger.config.ts
+            - playwright.config.ts
+            - vitest.config.ts
+            - vercel.json
+            - .github/
+            - .agents/
+            - .claude/
+            - .env.example
+            - prettier.config.mjs
+        source_files: []
+        children:
+            - adapters_package
+            - agentos_config
+            - cli_app
+            - control_plane_app
+            - core_package
+            - docs
+        depends_on: []
+        related_to: []
+    adapters_package:
+        dir_name: AgentOS Adapters Package
+        title: AgentOS Adapters Package
+        scope:
+            - packages/adapters/
+        source_files: []
+        children:
+            - adapters_package/artifacts
+            - adapters_package/github
+            - adapters_package/kimi
+            - adapters_package/local_git
+            - adapters_package/managed_agents
+            - adapters_package/persistence
+            - adapters_package/trigger
+        depends_on: []
+        related_to: []
+    adapters_package/artifacts:
+        dir_name: Scoped Artifact Storage Adapters & MCP Server
+        title: Scoped Artifact Storage Adapters & MCP Server
+        scope:
+            - packages/adapters/src/artifacts/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    adapters_package/github:
+        dir_name: GitHub Publication & Source Snapshot Adapter
+        title: GitHub Publication & Source Snapshot Adapter
+        scope:
+            - packages/adapters/src/github/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    adapters_package/kimi:
+        dir_name: Kimi (Moonshot) Runtime Provider Adapter
+        title: Kimi (Moonshot) Runtime Provider Adapter
+        scope:
+            - packages/adapters/src/kimi/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: adapters_package/trigger
+    adapters_package/local_git:
+        dir_name: Local Git Repository Adapter
+        title: Local Git Repository Adapter
+        scope:
+            - packages/adapters/src/local-git/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    adapters_package/managed_agents:
+        dir_name: Anthropic Managed Agents Runtime Provider Adapter
+        title: Anthropic Managed Agents Runtime Provider Adapter
+        scope:
+            - packages/adapters/src/managed-agents/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: adapters_package/trigger
+    adapters_package/persistence:
+        dir_name: Domain Persistence Adapters (Neon & In-Memory)
+        title: Domain Persistence Adapters (Neon & In-Memory)
+        scope:
+            - packages/adapters/src/persistence/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: control_plane_app/backend_subsystems
+    adapters_package/trigger:
+        dir_name: Trigger.dev Workflow Orchestration & Durable Execution
+        title: Trigger.dev Workflow Orchestration & Durable Execution
+        scope:
+            - packages/adapters/src/trigger/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: adapters_package/kimi
+            - path: adapters_package/managed_agents
+    agentos_config:
+        dir_name: Agent OS Workspace Configuration
+        title: Agent OS Workspace Configuration
+        scope:
+            - agentos/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    cli_app:
+        dir_name: Agent OS CLI
+        title: Agent OS CLI
+        scope:
+            - apps/cli/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: control_plane_app/api_routes
+    control_plane_app:
+        dir_name: Agent OS Control Plane Application
+        title: Agent OS Control Plane Application
+        scope:
+            - apps/control-plane/
+        source_files: []
+        children:
+            - control_plane_app/api_routes
+            - control_plane_app/auth_flows
+            - control_plane_app/backend_subsystems
+            - control_plane_app/ui_pages
+        depends_on: []
+        related_to: []
+    control_plane_app/api_routes:
+        dir_name: Control Plane HTTP API Routes
+        title: Control Plane HTTP API Routes
+        scope:
+            - apps/control-plane/app/api/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: cli_app
+            - path: control_plane_app/ui_pages
+    control_plane_app/auth_flows:
+        dir_name: Authentication Flow Routes (GitHub OAuth, Local Login, Logout)
+        title: Authentication Flow Routes (GitHub OAuth, Local Login, Logout)
+        scope:
+            - apps/control-plane/app/auth/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    control_plane_app/backend_subsystems:
+        dir_name: Control Plane Application Layer, HTTP API & Persistence Abstraction
+        title: Control Plane Application Layer, HTTP API & Persistence Abstraction
+        scope:
+            - apps/control-plane/src/application/
+            - apps/control-plane/src/http/
+            - apps/control-plane/src/persistence/
+            - apps/control-plane/src/config/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: adapters_package/persistence
+    control_plane_app/ui_pages:
+        dir_name: Control Plane UI Pages & API Routes
+        title: Control Plane UI Pages & API Routes
+        scope:
+            - apps/control-plane/app/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: control_plane_app/api_routes
+    core_package:
+        dir_name: AgentOS Core Domain & Port Abstractions
+        title: AgentOS Core Domain & Port Abstractions
+        scope:
+            - packages/core/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    docs:
+        dir_name: Agent OS Architecture & Progress Documentation
+        title: Agent OS Architecture & Progress Documentation
+        scope:
+            - docs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

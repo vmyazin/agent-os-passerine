@@ -1,0 +1,1 @@
+Implements the AgentOS RuntimeProvider contract by orchestrating Anthropic's beta Managed Agents API to provision agents, environments, and sessions with bounded streaming events.

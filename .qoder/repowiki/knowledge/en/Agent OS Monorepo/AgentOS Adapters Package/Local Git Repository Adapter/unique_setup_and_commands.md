@@ -1,0 +1,1 @@
+Every `git` invocation in this module runs with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at `/dev/null` (via `gitExecEnv()` or `ALLOWED_ENV_KEYS` filtering) so operator-level git config cannot influence behavior; initialization additionally sets a fixed `user.email` / `user.name` scoped to the new repo.

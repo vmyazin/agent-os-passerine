@@ -1,0 +1,1 @@
+Build via `npm run build` (runs `tsc -p tsconfig.build.json`), typecheck via `npm run typecheck` (`tsc --noEmit`), lint via `eslint .`, and tests via `vitest run`. The package is marked `private` and only exposes `./dist/index.js` / `./dist/index.d.ts` through `package.json` `exports`.

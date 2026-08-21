@@ -1,0 +1,6 @@
+- Each agent binds to a named model profile and a named environment, and declares its toolset, MCP list, retry count, and timeout in a flat map under `agents`.
+- Environments declare `runtime` (process/cloud), optional `variables`, tool/MCP allowlists, and a `networking.type` of `limited` for sandboxed execution.
+- Pipelines compose ordered steps where each step references an `agent` by name and carries an `id` used for artifact mounting.
+- Inline prompts are embedded directly in agent definitions using YAML block scalars (`prompt: |`) rather than external files.
+- Security-sensitive paths (`.git*`, `.github/workflows`, `CODEOWNERS`, `.env*`, `agentos/**`) are listed in `policies.protectedPaths` to prevent mutation.
+- Budgets and goals use micro-dollar units (`workflowMicrodollars`, `dailyMicrodollars`) and explicit caps on `concurrency`, `admissionReservePercent`, `maxSteps`, and `timeoutMs`.

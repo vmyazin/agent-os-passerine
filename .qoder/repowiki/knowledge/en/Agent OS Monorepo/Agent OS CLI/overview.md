@@ -1,0 +1,1 @@
+Node.js command-line interface that parses agentos subcommands, reads local configuration, and drives the Agent OS control-plane API for features, goals, runs, and inbox operations.

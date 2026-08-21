@@ -1,0 +1,6 @@
+- Each store implementation returns `Object.freeze({ store, admin })` pairs so the public API surfaces immutable surface objects.
+- Errors are raised as `ArtifactStoreAdapterError` with a stable string `code` (e.g. `artifact_conflict`, `artifact_scope_denied`, `artifact_integrity_error`, `artifact_too_large`) rather than ad-hoc Error subclasses.
+- All read paths verify integrity by recomputing SHA-256 on consumed bytes and comparing against stored metadata before returning data.
+- Scope enforcement is performed by calling `artifactKeyMatchesScope` / `normalizeArtifactScope` from `@agentos/core` on every key or request before any storage lookup.
+- Cursor values are always produced and consumed through `createArtifactCursorCodec` with a query descriptor containing `{ scope, artifactPrefix?, limit }` so cursors cannot be replayed across scopes or prefixes.
+- Configuration options are validated at construction time (account IDs, bucket names, jurisdictions, origin URLs, byte limits) and throw plain `Error`s with descriptive messages before any I/O occurs.

@@ -1,0 +1,6 @@
+- Server-component pages declare `export const dynamic = 'force-dynamic'` to force runtime rendering instead of static generation.
+- API route handlers wrap their logic in `handleApi(request, { authorize, output }, handler)` to centralize auth, schema validation, and error serialization.
+- Route handlers obtain authorization via `requireApiAuthentication(request)` and pages enforce access via `requirePageSession()` before rendering.
+- Dynamic path parameters are sanitized through `boundedPathId(id)` before being forwarded to domain services.
+- Data fetching in pages uses `Promise.all` to parallelize independent service calls (e.g., listing runs and projects together).
+- UI fragments are composed from shared components under `src/ui/*` (EmptyState, RunStatusBadge, ProjectsTable, PageToolbar) rather than inline markup.

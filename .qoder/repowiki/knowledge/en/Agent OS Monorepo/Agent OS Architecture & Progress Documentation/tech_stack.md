@@ -1,0 +1,1 @@
+Markdown-based documentation; no executable code or build tooling.

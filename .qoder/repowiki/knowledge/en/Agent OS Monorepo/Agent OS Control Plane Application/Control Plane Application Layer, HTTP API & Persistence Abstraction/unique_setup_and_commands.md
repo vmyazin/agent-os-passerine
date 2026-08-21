@@ -1,0 +1,1 @@
+Repository mode is chosen by `AGENTOS_REPOSITORY=neon|memory` plus `DATABASE_URL`; memory mode is explicitly blocked in production. In production, `AGENTOS_CONFIG_PATH` must be set to locate the agent config YAML. The global repository instance can be reset only when `NODE_ENV=test` via `resetRepositoryForTests()`.

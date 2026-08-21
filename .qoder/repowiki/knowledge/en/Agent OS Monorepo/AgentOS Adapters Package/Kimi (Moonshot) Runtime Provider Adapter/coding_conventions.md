@@ -1,0 +1,6 @@
+- Public interfaces are defined once in `types.ts` and imported by all other modules, keeping the loop, transport, and provider decoupled.
+- Errors are thrown as domain-specific classes (`KimiRuntimeProviderError`, `KimiTransportError`, `KimiSandboxError`) with a custom `name` property instead of plain `Error`.
+- Input validation uses Zod `.strict()` schemas per tool, rejecting unknown fields before execution.
+- Long-running work (transport requests, artifact MCP calls, bash commands) is gated by an `AbortSignal` propagated from the session controller so cancellation always releases resources promptly.
+- Per-session mutable state is guarded by a Promise-chain mutex (`withMutex`) so concurrent tool calls, `observeCommand`, and cleanup cannot race on the same workdir.
+- Immutable results and responses are returned via `Object.freeze(...)` to prevent accidental mutation of session data, events, and transport payloads.

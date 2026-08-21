@@ -1,0 +1,1 @@
+Adapts Agent OS publication and source-snapshot workflows to GitHub via a GitHub App, persisting durable state in Neon Postgres and enforcing policy-validated, idempotent Git operations.

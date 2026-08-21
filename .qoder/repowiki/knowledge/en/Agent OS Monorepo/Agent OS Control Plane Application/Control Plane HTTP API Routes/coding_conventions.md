@@ -1,0 +1,6 @@
+- Authenticated routes wrap their handler in `handleApi(request, { authorize, body?, output?, successStatus? }, async () => ...)` and obtain the service via `controlPlaneService()` rather than importing it directly.
+- Path parameters are validated through `boundedPathId(id)` from `src/http/contracts` before being passed to service methods.
+- Mutations accept idempotency keys extracted via `idempotencyKey(request)` and pass them to service calls that support retry-safe execution.
+- Request bodies are declared with Zod schemas imported from `src/http/contracts` (e.g. `createGoalRunSchema`, `approvalDecisionSchema`, `emptyMutationSchema`) instead of ad-hoc validation.
+- Internal or long-running routes opt out of Edge runtime by exporting `runtime = 'nodejs'` and `dynamic = 'force-dynamic'` at the top of the file.
+- Resource sub-actions live in nested directories (e.g. `runs/[id]/cancel`, `approvals/[id]/approve|reject`) with separate `route.ts` files per action rather than branching on method inside a single handler.

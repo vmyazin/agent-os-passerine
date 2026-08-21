@@ -1,0 +1,1 @@
+Architectural design docs, staged build progress log, and feature planning/spec artifacts for the Agent OS TypeScript monorepo.

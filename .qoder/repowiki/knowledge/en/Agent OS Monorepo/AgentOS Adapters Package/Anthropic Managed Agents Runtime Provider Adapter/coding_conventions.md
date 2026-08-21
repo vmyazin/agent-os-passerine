@@ -1,0 +1,6 @@
+- Remote resources are identified by project-scoped local IDs and config digests stored in `agentos.*` metadata keys, and ownership is asserted before any mutation.
+- All network I/O goes through a shared `#wrap` helper that enforces configured limits (max event bytes, max output bytes, max stream duration, reconnect count) and wraps failures as typed `ManagedAgents*Error` subclasses.
+- The SDK surface is isolated behind the `ManagedAgentsClient` interface in `sdk-contract.ts`; production code never imports `@anthropic-ai/sdk` directly, keeping beta type changes contained to the adapter.
+- Streaming event collection deduplicates by event id using an in-memory `Set`, caps total listed events, and bounds accumulated message text against `maxOutputBytes`.
+- Session start supports idempotent reconciliation via an HMAC'd `idempotencyKey` hash stored in session metadata, enabling safe retry across process restarts.
+- Policy gates (`allowUnrestrictedNetworking`, `allowBuiltInWebEgress`) are checked eagerly during sync/start rather than deferring to the provider, rejecting disallowed configurations with `ManagedAgentsConfigurationError`.

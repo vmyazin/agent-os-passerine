@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: adapters_package/artifacts
+title: Scoped Artifact Storage Adapters & MCP Server
+scope:
+    - packages/adapters/src/artifacts/
+source_files: []
+depends_on: []
+related_to: []

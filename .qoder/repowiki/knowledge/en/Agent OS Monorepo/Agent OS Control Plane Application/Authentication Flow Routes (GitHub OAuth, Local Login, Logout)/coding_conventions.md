@@ -1,0 +1,5 @@
+- Routes declare `export const dynamic = 'force-dynamic'` so they are always evaluated server-side.
+- Configuration is resolved per-request via `authConfigFromEnv(process.env)` rather than imported once at module scope.
+- Session and OAuth cookies are set using the shared `secureCookie` helper with explicit expiration (8h for session, 10m for OAuth) and cleared with `clearCookie` after use.
+- `returnTo` URLs are always passed through `sanitizeReturnTo` before redirecting to prevent open-redirect vulnerabilities.
+- Cross-origin mutations (logout) are gated by `enforceBrowserMutationOrigin` against `config.publicUrl` before performing state changes.

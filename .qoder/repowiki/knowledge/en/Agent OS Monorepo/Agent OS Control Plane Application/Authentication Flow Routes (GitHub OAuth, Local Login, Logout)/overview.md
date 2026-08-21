@@ -1,0 +1,1 @@
+Next.js App Router endpoints that orchestrate GitHub OAuth login, local development login bypass, and session logout by issuing or clearing cookies via shared auth utilities.

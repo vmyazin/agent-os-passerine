@@ -1,0 +1,1 @@
+Aggregates pluggable backend adapters for AgentOS—artifact storage, GitHub/local Git publishing, Neon persistence, Trigger.dev workflows, and runtime providers for Kimi and Managed Agents—behind a single re-exported surface.

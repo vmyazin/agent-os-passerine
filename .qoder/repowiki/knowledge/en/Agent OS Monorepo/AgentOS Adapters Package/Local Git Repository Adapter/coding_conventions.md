@@ -1,0 +1,6 @@
+- External inputs are rejected before use via explicit allowlists: subcommands, flags, environment variable keys, and repository names are each checked against hard-coded sets or regexes rather than trusted implicitly.
+- All git operations go through `runGit` (except repo bootstrapping in `initialize.ts`), which wraps `spawn` and surfaces failures as typed `LocalGitError` instances carrying a `code` discriminator.
+- Path safety is enforced by resolving realpaths against a configured `workspacesRoot` root and rejecting anything outside it, including symlink escapes.
+- Durable state transitions follow a phase-order pattern (`phaseAtLeast` checks) so retries resume from the last persisted phase without recomputing already-committed steps.
+- Deterministic output is achieved by fixing author/committer identity and dates to values derived from the manifest's authorization timestamp, making identical inputs always produce identical commit SHAs.
+- Public APIs are exposed via factory functions returning frozen objects (`Object.freeze({ publish })`, `Object.freeze({ ensure })`) rather than classes.

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: adapters_package/trigger
+title: Trigger.dev Workflow Orchestration & Durable Execution
+scope:
+    - packages/adapters/src/trigger/
+source_files: []
+depends_on: []
+related_to:
+    - path: adapters_package/kimi
+    - path: adapters_package/managed_agents

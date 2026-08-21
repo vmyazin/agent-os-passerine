@@ -1,0 +1,1 @@
+Next.js server-side API routes using `NextResponse`; Zod for request/response schema validation; YAML parsing via `yaml` package; persistence backed by Neon Postgres via `createNeonDomainRepository` or an in-memory implementation selected at runtime through `AGENTOS_REPOSITORY` env.

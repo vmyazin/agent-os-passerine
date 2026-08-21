@@ -1,0 +1,1 @@
+`pnpm agentos init` creates the approved v1 starter without overwriting an existing `agent-os.yaml`; `pnpm agentos config validate` / `plan` / `apply --idempotency-key ...` drive validation, dry-run planning, and idempotent application. Remote invocations require `AGENTOS_URL` + `AGENTOS_API_TOKEN` (or `--url`/`--token` flags), and non-local URLs must be HTTPS.

@@ -1,0 +1,1 @@
+Configuration is supplied either through `createKimiRuntimeProviderFromEnv(environment, options)` reading `KIMI_API_KEY`, `KIMI_BASE_URL`, and `AGENTOS_KIMI_SANDBOX_ROOT`, or directly via `createKimiRuntimeProvider({ apiKey, ownershipSecret, sandboxRoot, ... })`; the default sandbox root falls back to `<os.tmpdir()>/agentos-kimi` when not set.

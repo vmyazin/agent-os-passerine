@@ -1,0 +1,4 @@
+- Each adapter subdirectory exports a cohesive public surface via its own `index.ts`, which the package root re-exports wholesale.
+- External service interactions are wrapped as thin adapters over SDKs, with errors normalized into domain-specific error types per adapter.
+- Postgres-backed adapters (persistence, github, trigger checkpoint/outbox) share schema, row mapping, and validation utilities defined in `persistence/` rather than duplicating Drizzle tables.
+- Tests coexist alongside source files using Vitest and provide per-adapter `test-support.ts` fixtures for mocking backends.

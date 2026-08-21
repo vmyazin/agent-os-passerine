@@ -1,0 +1,1 @@
+Implements content-addressed, scope-enforced artifact storage over in-memory and Cloudflare R2 backends with a Postgres-backed manifest layer and an MCP JSON-RPC server for agent artifact access.

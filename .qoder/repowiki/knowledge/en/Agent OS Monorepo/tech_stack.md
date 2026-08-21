@@ -1,0 +1,1 @@
+pnpm 11 workspace with Turborepo 2 for task orchestration; TypeScript 6 with shared strict compiler options; Drizzle ORM for schema/migrations; Trigger.dev for background workflows; Vitest for unit tests and Playwright for E2E; ESLint/Prettier for linting/formatting across all packages.

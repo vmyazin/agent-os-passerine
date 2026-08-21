@@ -1,0 +1,1 @@
+Tests are run with Vitest (see `*.test.ts` files). The R2 adapter accepts a pluggable `R2SdkClient` so tests can mock S3 calls without network access; the in-memory store accepts injected `now`, `maxBytes`, and cursor signing keys for deterministic test runs.

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: control_plane_app
+title: Agent OS Control Plane Application
+scope:
+    - apps/control-plane/
+source_files: []
+depends_on: []
+related_to: []

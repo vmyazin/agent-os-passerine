@@ -1,0 +1,6 @@
+- Commands are represented as a discriminated union of objects keyed by a `kind` string literal, and every branch in `main.ts` and `commands.ts` switches exhaustively over these kinds.
+- Argument validation throws a typed `CliError` (with optional `exitCode`) rather than returning error codes, so callers can uniformly distinguish usage errors (exit code 2) from request/internal failures.
+- Global flags (`--url`, `--token`, `--json`) are extracted once via `globals()` and spread into every command object, keeping per-command option handling focused on command-specific flags.
+- Unknown or disallowed flags are rejected early by `assertAllowed`, which maintains a whitelist of permitted flag names per command group.
+- User-supplied identifiers are validated with `assertId`, enforcing the `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` pattern before being used in API paths.
+- All user input entering the system (stdin, file replies, flag values) is bounded by `MAX_INPUT_BYTES` (64 KiB) and decoded strictly via UTF-8 with `fatal: true`.

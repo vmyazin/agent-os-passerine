@@ -1,0 +1,1 @@
+Implements the DomainRepository interface with a Neon PostgreSQL adapter backed by Drizzle ORM and an in-memory Map-backed adapter, sharing schema, row mapping, validation, and error types.

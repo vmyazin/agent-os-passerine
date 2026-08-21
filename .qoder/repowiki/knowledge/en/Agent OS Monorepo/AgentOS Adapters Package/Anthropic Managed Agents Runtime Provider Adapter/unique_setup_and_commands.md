@@ -1,0 +1,1 @@
+Smoke tests require both `ANTHROPIC_API_KEY` and `AGENTOS_LIVE_TESTS=1` and are run via `pnpm --filter @agentos/adapters smoke:managed-agents`; they must not be executed in routine CI because contract tests use an in-memory fake SDK instead of live calls.

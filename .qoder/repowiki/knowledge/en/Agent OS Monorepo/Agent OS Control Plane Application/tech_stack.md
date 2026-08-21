@@ -1,0 +1,1 @@
+Next.js App Router (Route Handlers + Pages), TypeScript, in-memory repositories for development and Neon PostgreSQL for persistence via a shared repository factory.
