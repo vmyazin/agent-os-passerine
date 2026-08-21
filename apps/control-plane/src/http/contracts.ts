@@ -316,6 +316,17 @@ export const approvalSchema = z
           )
           .max(20)
           .optional(),
+        acceptanceTests: z
+          .array(
+            z
+              .object({
+                path: z.string().max(1_024),
+                content: z.string().max(8_000),
+              })
+              .strict(),
+          )
+          .max(20)
+          .optional(),
       })
       .strict()
       .optional(),

@@ -121,6 +121,21 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
             )}
             . Approving lets implementation start; rejecting ends the run.
           </p>
+          {summary.acceptanceTests === undefined ? null : (
+            <>
+              <p>
+                <strong>It is done when these tests pass:</strong>
+              </p>
+              {summary.acceptanceTests.map((file) => (
+                <div className="inbox-acceptance-test" key={file.path}>
+                  <p>
+                    <code>{file.path}</code>
+                  </p>
+                  <pre className="inbox-acceptance-test-body">{file.content}</pre>
+                </div>
+              ))}
+            </>
+          )}
           {summary.requirements === undefined ? null : (
             <>
               <p>

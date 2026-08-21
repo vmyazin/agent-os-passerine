@@ -269,6 +269,10 @@ export interface ApprovalSummary {
     readonly id: string;
     readonly description: string;
   }[];
+  readonly acceptanceTests?: readonly {
+    readonly path: string;
+    readonly content: string;
+  }[];
 }
 
 export interface ApprovalProjection {
@@ -1668,13 +1672,13 @@ export class ControlPlaneService {
         return JSON.parse(new TextDecoder().decode(value.bytes));
       };
       const bounded = (value: unknown): string | undefined =>
-        typeof value === 'string'
-          ? redactText(value).slice(0, 500)
-          : undefined;
+        typeof value === 'string' ? redactText(value).slice(0, 500) : undefined;
       const specification = (await bodyOf('specification')) as
         | { requirements?: unknown }
         | undefined;
-      const dod = (await bodyOf('dod')) as { criteria?: unknown } | undefined;
+      const dod = (await bodyOf('dod')) as
+        | { criteria?: unknown; acceptanceTests?: unknown }
+        | undefined;
       const requirements = Array.isArray(specification?.requirements)
         ? specification.requirements
             .slice(0, 20)
@@ -1682,22 +1686,35 @@ export class ControlPlaneService {
             .filter((entry): entry is string => entry !== undefined)
         : undefined;
       const criteria = Array.isArray(dod?.criteria)
-        ? dod.criteria
-            .slice(0, 20)
-            .flatMap((entry: unknown) => {
-              if (entry === null || typeof entry !== 'object') return [];
-              const candidate = entry as { id?: unknown; description?: unknown };
-              const id = bounded(candidate.id);
-              const description = bounded(candidate.description);
-              return id !== undefined && description !== undefined
-                ? [{ id, description }]
-                : [];
-            })
+        ? dod.criteria.slice(0, 20).flatMap((entry: unknown) => {
+            if (entry === null || typeof entry !== 'object') return [];
+            const candidate = entry as { id?: unknown; description?: unknown };
+            const id = bounded(candidate.id);
+            const description = bounded(candidate.description);
+            return id !== undefined && description !== undefined
+              ? [{ id, description }]
+              : [];
+          })
         : undefined;
+
+      const ACC_BOUND = 8_000;
+      const acceptanceTests = Array.isArray(dod?.acceptanceTests)
+        ? dod.acceptanceTests.slice(0, 20).flatMap((entry) => {
+            if (entry === null || typeof entry !== 'object') return [];
+            const candidate = entry as { path?: unknown; content?: unknown };
+            const path = bounded(candidate.path);
+            if (typeof candidate.content !== 'string' || path === undefined)
+              return [];
+            const content = redactText(candidate.content).slice(0, ACC_BOUND);
+            return [{ path, content }];
+          })
+        : undefined;
+
       if (
         title === undefined &&
         requirements === undefined &&
-        criteria === undefined
+        criteria === undefined &&
+        (acceptanceTests === undefined || acceptanceTests.length === 0)
       )
         return {};
       return {
@@ -1709,6 +1726,9 @@ export class ControlPlaneService {
           ...(criteria === undefined || criteria.length === 0
             ? {}
             : { criteria }),
+          ...(acceptanceTests === undefined || acceptanceTests.length === 0
+            ? {}
+            : { acceptanceTests }),
         },
       };
     } catch {

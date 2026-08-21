@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { InMemoryDomainRepository } from '@agentos/adapters';
+import { InMemoryDomainRepository, createInMemoryArtifactStorage } from '@agentos/adapters';
 import {
   canonicalConfigHash,
   canonicalConfigJson,
@@ -14,8 +14,11 @@ import { ControlPlaneService, ServiceError } from './control-plane-service';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const ids = (kind: string, key: string) =>
-  persistenceId(kind as never, `${kind}-${key}`);
-const createService = (repository: InMemoryDomainRepository) =>
+  persistenceId(kind as never, `${kind}-${key.replaceAll(':', '-')}`);
+const createService = (
+  repository: InMemoryDomainRepository,
+  artifacts?: ControlPlaneService['artifacts'],
+) =>
   new ControlPlaneService(
     repository,
     () => now,
@@ -23,6 +26,8 @@ const createService = (repository: InMemoryDomainRepository) =>
     undefined,
     undefined,
     goalCommands,
+    [],
+    artifacts,
   );
 
 const feature = {
@@ -1541,6 +1546,71 @@ runtime: { provider: local }
     expect(
       digest.notifications.find((entry) => entry.runId === rejected.id),
     ).toMatchObject({ runStatus: 'failed', resultStatus: 'rejected' });
+  });
+
+  it('includes frozen acceptance tests in the spec approval summary', async () => {
+    const repository = new InMemoryDomainRepository();
+    const artifacts = createInMemoryArtifactStorage();
+    const service = createService(repository, artifacts.store);
+
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const run = await service.createFeatureRun('spec-with-tests', feature);
+    await repository.createApproval({
+      id: persistenceId('approval', 'spec-approval'),
+      runId: persistenceId('run', run.id),
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f'.repeat(64),
+      status: 'pending',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+
+    const scope = {
+      projectId: 'project-1',
+      runId: run.id,
+      stepId: 'specification',
+    };
+    const encoder = new TextEncoder();
+    await artifacts.store.put({
+      scope,
+      artifactId: 'specification',
+      version: 1,
+      mediaType: 'application/json',
+      bytes: encoder.encode(
+        JSON.stringify({ requirements: ['Must show tests'] }),
+      ),
+    });
+    await artifacts.store.put({
+      scope,
+      artifactId: 'dod',
+      version: 1,
+      mediaType: 'application/json',
+      bytes: encoder.encode(
+        JSON.stringify({
+          criteria: [{ id: 'done', description: 'All done' }],
+          acceptanceTests: [
+            {
+              path: 'test/acceptance/status-test.test.mjs',
+              content: 'import test from "node:test";',
+            },
+          ],
+        }),
+      ),
+    });
+
+    const pending = await service.listPendingApprovals();
+    expect(pending[0]?.summary?.acceptanceTests).toEqual([
+      {
+        path: 'test/acceptance/status-test.test.mjs',
+        content: 'import test from "node:test";',
+      },
+    ]);
   });
 });
 
