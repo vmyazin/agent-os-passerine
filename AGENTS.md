@@ -19,7 +19,7 @@
 Assume several agent sessions run against this repo in parallel. The main checkout
 must stay clean — never accumulate uncommitted work there.
 
-1. **Start every task in a fresh worktree:** `git worktree add .worktrees/<task-slug> -b <branch> <main-branch>`.
+1. **Start every task by asking about creating/using a worktree:** `git worktree add .worktrees/<task-slug> -b <branch> <main-branch>`.
    All edits, typechecks, tests, and dev servers happen inside it. The path matters:
    `.worktrees/` is the entry in `.gitignore`, so any other location makes the main
    checkout dirty and trips rule 6 for the next session.
