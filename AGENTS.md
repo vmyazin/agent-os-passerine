@@ -19,8 +19,10 @@
 Assume several agent sessions run against this repo in parallel. The main checkout
 must stay clean — never accumulate uncommitted work there.
 
-1. **Start every task in a fresh worktree:** `git worktree add .claude/worktrees/<task-slug> <main-branch>`.
-   All edits, typechecks, tests, and dev servers happen inside it.
+1. **Start every task in a fresh worktree:** `git worktree add .worktrees/<task-slug> -b <branch> <main-branch>`.
+   All edits, typechecks, tests, and dev servers happen inside it. The path matters:
+   `.worktrees/` is the entry in `.gitignore`, so any other location makes the main
+   checkout dirty and trips rule 6 for the next session.
 2. **Pick non-default ports** so parallel sessions don't collide. Keep a registry of
    run configurations (`.claude/launch.json` or equivalent) with a named entry per
    scenario, including the worktree ports.
@@ -35,16 +37,34 @@ must stay clean — never accumulate uncommitted work there.
 6. **If `git status` in the main checkout is dirty, that's another session mid-task.**
    Leave those hunks alone.
 
-If a fresh worktree lacks `node_modules` (hoisted deps) or gitignored dev vars,
-document the exact symlink/copy commands to wire it up — an agent should not have to
-rediscover them. For this repo, from inside the new worktree:
+If a fresh worktree lacks `node_modules` or gitignored dev vars, document the exact
+commands to wire it up — an agent should not have to rediscover them. For this repo,
+from inside the new worktree:
 
 ```sh
-ln -s ../../../node_modules node_modules   # deps are installed only in the main checkout
-cp ../../../.env.local .env.local          # gitignored dev keys
-cp ../../../next-env.d.ts .                # gitignored; without it tsc can't type image imports
-cp ../../../public/thumbnails/*.jpg public/thumbnails/ 2>/dev/null || true  # gitignored local assets
+CI=true pnpm install --frozen-lockfile   # see below; CI=true skips the no-TTY purge prompt
+pnpm turbo run build --filter=@agentos/core --filter=@agentos/adapters  # app imports dist/, not src/
+cp ../../.env.local .env.local           # gitignored dev keys
+ln -s ../../.env.local apps/control-plane/.env.local  # Next only reads env from the app dir
+cp ../../apps/control-plane/next-env.d.ts apps/control-plane/  # gitignored; tsc needs it
 ```
+
+**Install, don't symlink.** Symlinking the main checkout's `node_modules` into a
+worktree looks cheaper and does not work: Turbopack resolves the link, sees a target
+above the project root, and fails every import with `Symlink ... points out of the
+filesystem root`. `pnpm install` in the worktree hardlinks from the shared store, so a
+second checkout costs seconds and almost no disk. Running `pnpm` *through* those
+symlinks is worse — it decides `node_modules` is corrupt and tries to purge a directory
+the main checkout is using.
+
+Turbo's build cache is shared across worktrees, so the package build above is normally
+a cache hit.
+
+**Dev server:** run `next` directly (`cd apps/control-plane && ./node_modules/.bin/next
+dev --port <port>`), not `pnpm --filter ... dev`, which re-runs a dependency check on
+every start. Note that `AGENTOS_PUBLIC_URL` still points at the main checkout's port, so
+`/auth/local` redirects there; session cookies ignore the port, so signing in on either
+port authenticates both.
 
 ## Local development must be full-fidelity and credential-free
 

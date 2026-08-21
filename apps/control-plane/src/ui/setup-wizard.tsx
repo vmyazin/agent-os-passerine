@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { ProjectListProjection } from '../application/control-plane-service';
+import { publishProjectCount } from './project-count-signal';
 import { renderSetupConfig } from './setup-template-render';
 
 interface ReadinessItem {
@@ -175,7 +176,11 @@ export function SetupWizard() {
     try {
       const response = await fetch('/api/projects');
       if (!response.ok) return;
-      setProjects((await response.json()) as readonly ProjectListProjection[]);
+      const loaded = (await response.json()) as readonly ProjectListProjection[];
+      setProjects(loaded);
+      // Applying a configuration can create a project; tell the rail so its
+      // badge stops disagreeing with the switcher right next to it.
+      publishProjectCount(loaded.length);
     } catch {
       // Project listing is decoration for the switcher; never block setup.
     }
@@ -515,6 +520,19 @@ export function SetupWizard() {
                 );
               })}
             </ul>
+            {readiness.groups.some(
+              (group) => group.id === 'dispatch' && group.ready,
+            ) ? (
+              <p className="notice">
+                Workflow dispatch is configured, but these variables only
+                enqueue work. Runs stay <strong>Pending</strong> until a
+                Trigger.dev worker is connected: locally run{' '}
+                <code>npx trigger.dev@latest dev</code> in a second terminal,
+                and deploy one with <code>pnpm trigger:deploy</code>. Nothing
+                on this page can detect that worker, so a fully green check
+                above does not by itself mean a run will execute.
+              </p>
+            ) : null}
             <button className="secondary" onClick={() => void loadReadiness()} type="button">
               Check again
             </button>

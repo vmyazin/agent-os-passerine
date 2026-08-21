@@ -2,6 +2,7 @@
 import { controlPlaneService } from '../../src/application/runtime';
 import { requirePageSession } from '../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../src/ui/components';
+import { isAwaitingDispatch } from '../../src/ui/dispatch-stall';
 import { formatDisplayDate } from '../../src/ui/format-timestamp';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
@@ -21,6 +22,7 @@ export default async function RunsPage({
     service.listProjects(),
   ]);
   const projectNameById = new Map(projects.map((project) => [project.id, project.name]));
+  const now = new Date().toISOString();
 
   return (
     <div className="page-stack">
@@ -53,6 +55,14 @@ export default async function RunsPage({
                   <small>
                     {projectNameById.get(run.projectId) ?? run.projectId} ·{' '}
                     {run.id} · updated {formatDisplayDate(run.updatedAt)}
+                    {isAwaitingDispatch({
+                      status: run.status,
+                      stepCount: run.steps.length,
+                      createdAt: run.createdAt,
+                      now,
+                    })
+                      ? ' · no worker picked this up'
+                      : ''}
                   </small>
                 </span>
                 <RunStatusBadge status={run.status} />

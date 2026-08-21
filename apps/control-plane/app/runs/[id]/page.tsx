@@ -1,6 +1,8 @@
 import { loadRunPageModel } from '../../../src/application/run-page-model';
 import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
+import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
+import { UndispatchedRunNotice } from '../../../src/ui/undispatched-run-notice';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +14,12 @@ export default async function RunPage({
   await requirePageSession();
   const { id } = await params;
   const run = await loadRunPageModel(id);
+  const awaitingDispatch = isAwaitingDispatch({
+    status: run.status,
+    stepCount: run.steps.length,
+    createdAt: run.createdAt,
+    now: new Date().toISOString(),
+  });
   return (
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="run-title">
@@ -19,6 +27,7 @@ export default async function RunPage({
         <h1 id="run-title">{run.input?.title ?? run.id}</h1>
         <RunStatusBadge status={run.status} />
       </section>
+      {awaitingDispatch ? <UndispatchedRunNotice /> : null}
       <dl className="metadata">
         <div>
           <dt>Repository SHA</dt>
@@ -79,8 +88,12 @@ export default async function RunPage({
       <section aria-labelledby="steps-title">
         <h2 id="steps-title">Steps</h2>
         {run.steps.length === 0 ? (
-          <EmptyState title="No steps recorded">
-            Step state will appear as the run progresses.
+          <EmptyState
+            title={awaitingDispatch ? 'Never started' : 'No steps recorded'}
+          >
+            {awaitingDispatch
+              ? 'No worker claimed this run, so no step ever ran.'
+              : 'Step state will appear as the run progresses.'}
           </EmptyState>
         ) : (
           <ol className="timeline">

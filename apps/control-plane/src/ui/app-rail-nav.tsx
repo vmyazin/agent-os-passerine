@@ -1,8 +1,10 @@
 // src/ui/app-rail-nav.tsx
 'use client';
 
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
+
+import { subscribeToProjectCount } from './project-count-signal';
 
 const NAV_ITEMS = [
   { href: '/', label: 'Overview' },
@@ -31,6 +33,12 @@ export function AppRailNav({
   readonly projectCount?: number;
 }) {
   const pathname = usePathname();
+  // Seeded by the server layout, then kept live by anything that creates a
+  // project without a navigation (the setup wizard). A later server render
+  // re-seeds it through the effect below, so the server stays authoritative.
+  const [liveProjectCount, setLiveProjectCount] = useState(projectCount);
+  useEffect(() => setLiveProjectCount(projectCount), [projectCount]);
+  useEffect(() => subscribeToProjectCount(setLiveProjectCount), []);
 
   return (
     <nav aria-label="Primary navigation">
@@ -43,8 +51,8 @@ export function AppRailNav({
               ? inboxCount
               : undefined
             : 'countKey' in item && item.countKey === 'projects'
-              ? projectCount > 0
-                ? projectCount
+              ? liveProjectCount > 0
+                ? liveProjectCount
                 : undefined
               : undefined;
 

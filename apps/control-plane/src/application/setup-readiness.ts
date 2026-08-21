@@ -106,7 +106,7 @@ export function deploymentSetupReadiness(
         environment,
         'TRIGGER_SECRET_KEY',
         'Trigger.dev secret key',
-        'Enables durable dispatch; the dev worker must also be running.',
+        'Enqueues durable dispatch. A connected worker still has to execute it: `npx trigger.dev@latest dev` locally, `pnpm trigger:deploy` for a deployment. This check cannot see that worker.',
       ),
       item(
         environment,
