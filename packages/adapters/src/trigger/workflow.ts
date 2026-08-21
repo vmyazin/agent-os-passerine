@@ -1,10 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import {
+  AcceptancePathReservedError,
   canonicalJsonValue,
   isRuntimeEventType,
   isoTimestamp,
   persistenceId,
+  sealChangeSet,
   USAGE_PRICING_VERSION,
   type ArtifactMetadata,
   type ExternalSessionId,
@@ -250,6 +252,29 @@ async function parseArtifact<T>(
       'artifact did not match its required schema',
     );
   return result.data;
+}
+
+async function putSealedChanges(
+  dependencies: DurableFeatureWorkflowDependencies,
+  workflow: FeatureWorkflowInput,
+  producingStepId: string,
+  changeSet: {
+    readonly version: 'change-set-v1';
+    readonly changes: ReturnType<typeof sealChangeSet>;
+  },
+): Promise<ArtifactMetadata> {
+  return dependencies.artifacts.put({
+    scope: {
+      projectId: workflow.projectId,
+      runId: workflow.runId,
+      stepId: producingStepId,
+    },
+    artifactId: 'sealed-changes',
+    version: 1,
+    bytes: new TextEncoder().encode(canonicalJsonValue(asJson(changeSet))),
+    mediaType: 'application/json',
+    retentionClass: 'working',
+  });
 }
 
 function effectDraft(
@@ -1527,6 +1552,29 @@ export function createDurableFeatureWorkflow(
             );
           }
         }
+        let sealedChanges;
+        try {
+          sealedChanges = {
+            version: 'change-set-v1' as const,
+            changes: sealChangeSet(changeSet.changes, dodBody.acceptanceTests),
+          };
+        } catch (error) {
+          if (error instanceof AcceptancePathReservedError) {
+            throw new WorkflowPermanentError(error.message);
+          }
+          throw error;
+        }
+        const parsedSealed = changeSetSchema.safeParse(sealedChanges);
+        if (!parsedSealed.success) {
+          throw new WorkflowPermanentError('sealed change set is invalid');
+        }
+        changeSet = parsedSealed.data;
+        const sealedMeta = await putSealedChanges(
+          dependencies,
+          workflow,
+          producingStepId,
+          changeSet,
+        );
         await assertContinuable(dependencies, workflow, deadlineMs);
         if (
           dependencies.resolveTestCommand === undefined ||
@@ -1554,7 +1602,7 @@ export function createDurableFeatureWorkflow(
               'Run exactly this command once with Bash. Do not invoke any other tool or command.',
             sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
             changeSetDigest,
-            changeSetArtifact: implementation.changeSet,
+            changeSetArtifact: sealedMeta,
             configDigest: workflow.digests.config,
           }),
           trustedCommandObservationSchema,
@@ -1614,6 +1662,7 @@ export function createDurableFeatureWorkflow(
             testEvidence: asJson(testEvidence),
             verification,
             artifacts: [
+              sealedMeta,
               implementation.changeSet,
               implementation.testEvidence,
               specification.definitionOfDone,

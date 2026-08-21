@@ -215,12 +215,20 @@ async function fixture(
     requirements: ['GET /status returns a bounded response'],
   });
   const dod = JSON.stringify({
-    version: 'definition-of-done-v1',
+    version: 'definition-of-done-v2',
     criteria: [
       {
         id: 'status-test',
         description: 'Status route test passes',
         verifier: 'test-report',
+      },
+    ],
+    acceptanceTests: [
+      {
+        path: 'test/acceptance/status-test.test.mjs',
+        mode: '100644',
+        content:
+          "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('status', () => { assert.ok(true); });\n",
       },
     ],
   });
@@ -551,6 +559,62 @@ describe('durable feature workflow', () => {
       changeSetArtifact: { stepId: 'implementation' },
       testEvidenceArtifact: { stepId: 'implementation' },
       definitionOfDoneArtifact: { stepId: 'specification' },
+    });
+    expect(accessRequests[4]?.logicalStepId).toBe('verification');
+    expect(accessRequests[4]?.stepInput).toMatchObject({
+      changeSetArtifact: {
+        stepId: 'implementation',
+        artifactId: 'sealed-changes',
+      },
+    });
+  });
+
+  it('seals frozen acceptance tests onto the published change set', async () => {
+    const f = await fixture();
+    const authorized: Array<{ changeSet: unknown }> = [];
+    await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: {
+        authorize: async (request) => {
+          authorized.push({ changeSet: request.changeSet });
+          return { authorized: request };
+        },
+      },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+    expect(authorized[0]?.changeSet).toMatchObject({
+      version: 'change-set-v1',
+      changes: expect.arrayContaining([
+        expect.objectContaining({
+          path: 'src/status.ts',
+        }),
+        expect.objectContaining({
+          path: 'test/acceptance/status-test.test.mjs',
+          mode: '100644',
+          content: expect.stringContaining('node:test'),
+        }),
+      ]),
     });
   });
 
