@@ -5,3 +5,7 @@ packages:
 allowBuilds:
   '@depot/cli': false
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@trigger.dev/core@4.5.12'
+  - '@trigger.dev/sdk@4.5.12'
