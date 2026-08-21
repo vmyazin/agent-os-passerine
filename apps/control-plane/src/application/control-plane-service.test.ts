@@ -1315,6 +1315,38 @@ runtime: { provider: local }
     ).resolves.toMatchObject({ status: 'pending' });
   });
 
+  it('offers exactly the goal commands a goal run would accept', async () => {
+    // The picker and the 422 check must not drift apart: a command offered
+    // here and rejected on submit is the failure this shares code to avoid.
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+
+    const offered = await service.listTrustedGoalCommands();
+
+    expect(offered).toEqual([...goalCommands].sort());
+    await expect(
+      service.createGoalRun('rejected-command-key', {
+        projectId: 'project-1',
+        title: 'Goal',
+        description: 'Goal description',
+        repositorySha: 'a'.repeat(40),
+        configDigest: 'cfg',
+        modelDigest: 'model',
+        promptDigest: 'prompt',
+        environmentDigest: 'env',
+        policyDigest: 'policy',
+        criteria: [
+          {
+            id: 'not-allowed',
+            type: 'command',
+            description: 'runs something off the allowlist',
+            command: 'rm -rf /',
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_goal_criteria', status: 422 });
+  });
+
   it('settles an approval by the clock even while its stored status says pending', async () => {
     // Reconciliation writes 'expired' on a cron. Until it does, the row still
     // says 'pending' -- and every read path used to believe it, so the inbox

@@ -1040,7 +1040,19 @@ export class ControlPlaneService {
     return this.createRun('feature', idempotencyKey, input);
   }
 
-  async createGoalRun(idempotencyKey: string, input: CreateGoalRunInput) {
+  /**
+   * The commands a goal criterion may name for this project: the deployment
+   * allowlist, narrowed by the project's verification policy.
+   *
+   * Exposed because a goal is only worth authoring against commands that will
+   * actually be accepted -- createGoalRun rejects anything else with a 422,
+   * and discovering that by submitting a form is a poor way to learn the
+   * list. Both callers resolve it the same way, so the picker cannot drift
+   * from the check.
+   */
+  async listTrustedGoalCommands(
+    projectId?: string,
+  ): Promise<readonly string[]> {
     if (this.trustedGoalCommands === undefined)
       throw new ServiceError(
         'goal_commands_unavailable',
@@ -1048,26 +1060,35 @@ export class ControlPlaneService {
         503,
       );
     let allowedCommands: ReadonlySet<string> = this.trustedGoalCommands;
-    const latest = await this.repository.getLatestConfigRevision(
-      persistenceId('project', input.projectId),
-    );
-    if (latest !== undefined) {
-      try {
-        const policy = resolveProjectVerificationPolicy(
-          parseAgentOsConfig(latest.config),
-          {
-            trustedTestCommands: this.trustedGoalCommands,
-            registryHosts: this.deploymentRegistryHosts,
-          },
-        );
-        allowedCommands = new Set(policy.trustedTestCommands);
-      } catch {
-        // A project policy can only ever narrow the deployment allowlist, so
-        // an unreadable revision falls back to that allowlist rather than
-        // failing the run with a raw parse error. Widening is impossible here.
-        allowedCommands = this.trustedGoalCommands;
+    if (projectId !== undefined) {
+      const latest = await this.repository.getLatestConfigRevision(
+        persistenceId('project', projectId),
+      );
+      if (latest !== undefined) {
+        try {
+          const policy = resolveProjectVerificationPolicy(
+            parseAgentOsConfig(latest.config),
+            {
+              trustedTestCommands: this.trustedGoalCommands,
+              registryHosts: this.deploymentRegistryHosts,
+            },
+          );
+          allowedCommands = new Set(policy.trustedTestCommands);
+        } catch {
+          // A project policy can only ever narrow the deployment allowlist,
+          // so an unreadable revision falls back to that allowlist rather
+          // than failing with a raw parse error. Widening is impossible here.
+          allowedCommands = this.trustedGoalCommands;
+        }
       }
     }
+    return [...allowedCommands].sort();
+  }
+
+  async createGoalRun(idempotencyKey: string, input: CreateGoalRunInput) {
+    const allowedCommands = new Set(
+      await this.listTrustedGoalCommands(input.projectId),
+    );
     for (const criterion of input.criteria) {
       if (!allowedCommands.has(criterion.command))
         throw new ServiceError(

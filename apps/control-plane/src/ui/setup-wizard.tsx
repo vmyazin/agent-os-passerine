@@ -48,6 +48,14 @@ interface AppliedConfiguration {
   };
 }
 
+type Pipeline = 'feature' | 'goal';
+
+interface GoalCriterionDraft {
+  readonly key: string;
+  readonly description: string;
+  readonly command: string;
+}
+
 interface RepositoryHead {
   readonly repository: string;
   readonly branch: string;
@@ -143,6 +151,10 @@ export function SetupWizard() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
   const [runId, setRunId] = useState('');
+  const [pipeline, setPipeline] = useState<Pipeline>('feature');
+  const [trustedCommands, setTrustedCommands] = useState<readonly string[]>([]);
+  const [commandsError, setCommandsError] = useState('');
+  const [criteria, setCriteria] = useState<readonly GoalCriterionDraft[]>([]);
 
   const snapshotWizard = (): WizardSnapshot => ({
     mode,
@@ -214,15 +226,22 @@ export function SetupWizard() {
       };
       projectId?: string;
     };
-    if (body.active?.canonicalConfig === undefined) {
+    if (body.active === undefined) {
       const empty = defaultWizardSnapshot('github');
       restoreWizard(empty);
       return empty;
     }
-    const nextMode = modeFromYaml(body.active.canonicalConfig);
+    // The configuration endpoint returns provenance but not the canonical
+    // YAML, so the editor cannot be repopulated from an existing project.
+    // Provenance is the part the remaining steps actually need -- it is what
+    // pins a run to an applied revision -- so keep it and leave the editor on
+    // whatever is loaded. Treating a missing config as "no project" reset the
+    // wizard instead, which made the switcher look like it did nothing.
     const loaded: WizardSnapshot = {
-      mode: nextMode,
-      yaml: body.active.canonicalConfig,
+      mode: body.active.canonicalConfig === undefined
+        ? mode
+        : modeFromYaml(body.active.canonicalConfig),
+      yaml: body.active.canonicalConfig ?? yaml,
       localName: '',
       applied: {
         projectId: body.projectId ?? projectId,
@@ -264,6 +283,15 @@ export function SetupWizard() {
     void loadReadiness();
     void loadProjects();
   }, []);
+
+  // The allowlist is per project, so it has to follow the applied project --
+  // switching projects mid-session must not leave the picker offering
+  // commands the new project's policy rejects.
+  const appliedProjectId = applied?.projectId;
+  useEffect(() => {
+    if (pipeline !== 'goal' || appliedProjectId === undefined) return;
+    void loadTrustedCommands(appliedProjectId);
+  }, [pipeline, appliedProjectId]);
 
   const selectMode = (nextMode: ProjectMode) => {
     if (nextMode === mode) return;
@@ -416,12 +444,53 @@ export function SetupWizard() {
     }
   };
 
+  /**
+   * The allowlist is resolved per project, so it is only meaningful once a
+   * configuration has been applied. Loaded on demand rather than up front:
+   * most runs are features and never need it.
+   */
+  const loadTrustedCommands = async (projectId: string) => {
+    setCommandsError('');
+    try {
+      const response = await fetch(
+        `/api/goals/commands?projectId=${encodeURIComponent(projectId)}`,
+      );
+      if (!response.ok) throw new Error(await readError(response));
+      const body = (await response.json()) as { commands: readonly string[] };
+      setTrustedCommands(body.commands);
+      if (body.commands.length > 0 && criteria.length === 0)
+        setCriteria([
+          { key: crypto.randomUUID(), description: '', command: body.commands[0]! },
+        ]);
+    } catch (error) {
+      setTrustedCommands([]);
+      setCommandsError(
+        error instanceof Error ? error.message : 'command allowlist unavailable',
+      );
+    }
+  };
+
+  const selectPipeline = (next: Pipeline) => {
+    if (next === pipeline) return;
+    setPipeline(next);
+    setStartError('');
+  };
+
+  const updateCriterion = (key: string, patch: Partial<GoalCriterionDraft>) =>
+    setCriteria((current) =>
+      current.map((criterion) =>
+        criterion.key === key ? { ...criterion, ...patch } : criterion,
+      ),
+    );
+
   const startRun = async () => {
     if (starting || applied === undefined || head === undefined) return;
     setStarting(true);
     setStartError('');
     try {
-      const response = await fetch('/api/features', {
+      const response = await fetch(
+        pipeline === 'goal' ? '/api/goals' : '/api/features',
+        {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -437,8 +506,21 @@ export function SetupWizard() {
           promptDigest: applied.provenance.promptDigest,
           environmentDigest: applied.provenance.environmentDigest,
           policyDigest: applied.provenance.policyDigest,
+          ...(pipeline === 'goal'
+            ? {
+                criteria: criteria.map((criterion, ordinal) => ({
+                  // Stable, readable, and unique within the goal; the draft
+                  // key is a UUID that would only clutter the run record.
+                  id: `criterion-${ordinal + 1}`,
+                  type: 'command' as const,
+                  description: criterion.description.trim(),
+                  command: criterion.command,
+                })),
+              }
+            : {}),
         }),
-      });
+        },
+      );
       if (!response.ok) throw new Error(await readError(response));
       const run = (await response.json()) as { id: string };
       setRunId(run.id);
@@ -721,10 +803,29 @@ export function SetupWizard() {
 
       <section aria-labelledby="setup-step-4">
         <StepHeading step={4} title="Start the first run" done={runId !== ''} />
+        <div className="button-row" role="group" aria-label="Run type">
+          <button
+            aria-pressed={pipeline === 'feature'}
+            className={pipeline === 'feature' ? undefined : 'secondary'}
+            onClick={() => selectPipeline('feature')}
+            type="button"
+          >
+            Feature
+          </button>
+          <button
+            aria-pressed={pipeline === 'goal'}
+            className={pipeline === 'goal' ? undefined : 'secondary'}
+            disabled={applied === undefined}
+            onClick={() => selectPipeline('goal')}
+            type="button"
+          >
+            Goal
+          </button>
+        </div>
         <p>
-          Describe one small feature with clear, testable requirements. The
-          specification agent writes the spec; you approve its scope in the
-          inbox before any code is written.
+          {pipeline === 'feature'
+            ? 'Describe one small feature with clear, testable requirements. The specification agent writes the spec; you approve its scope in the inbox before any code is written.'
+            : 'A goal adds acceptance criteria you write yourself. Each attempt is checked against them, and the goal retries — up to the project\u2019s step limit — until they pass. Because the criteria are yours, an attempt cannot pass by grading its own work.'}
         </p>
         <label>
           Title
@@ -746,6 +847,116 @@ export function SetupWizard() {
             value={description}
           />
         </label>
+        {pipeline === 'goal' ? (
+          <div>
+            <h3>Acceptance criteria</h3>
+            <p>
+              <small>
+                Each criterion runs a command from this project&rsquo;s trusted
+                test allowlist. Commands are chosen, not typed: a goal naming
+                anything outside the allowlist is rejected.
+              </small>
+            </p>
+            {commandsError !== '' ? (
+              <p role="alert">
+                {commandsError}{' '}
+                <button
+                  className="secondary"
+                  onClick={() =>
+                    applied === undefined
+                      ? undefined
+                      : void loadTrustedCommands(applied.projectId)
+                  }
+                  type="button"
+                >
+                  Retry
+                </button>
+              </p>
+            ) : null}
+            {commandsError === '' && trustedCommands.length === 0 ? (
+              <p>
+                <small>
+                  No trusted test commands are configured, so a goal has
+                  nothing to verify against. Set
+                  AGENTOS_TRUSTED_TEST_COMMANDS_JSON, or narrow it per project
+                  under <code>verification</code> in the configuration.
+                </small>
+              </p>
+            ) : null}
+            {criteria.map((criterion, ordinal) => (
+              <fieldset key={criterion.key}>
+                <legend>Criterion {ordinal + 1}</legend>
+                <label>
+                  What it proves
+                  <input
+                    maxLength={1_000}
+                    onChange={(event) =>
+                      updateCriterion(criterion.key, {
+                        description: event.target.value,
+                      })
+                    }
+                    style={{ width: '100%' }}
+                    type="text"
+                    value={criterion.description}
+                  />
+                </label>
+                <label>
+                  Command
+                  <select
+                    onChange={(event) =>
+                      updateCriterion(criterion.key, {
+                        command: event.target.value,
+                      })
+                    }
+                    style={{ width: '100%' }}
+                    value={criterion.command}
+                  >
+                    {trustedCommands.map((command) => (
+                      <option key={command} value={command}>
+                        {command}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="button-row">
+                  <button
+                    className="secondary"
+                    disabled={criteria.length === 1}
+                    onClick={() =>
+                      setCriteria((current) =>
+                        current.filter((item) => item.key !== criterion.key),
+                      )
+                    }
+                    type="button"
+                  >
+                    Remove criterion
+                  </button>
+                </div>
+              </fieldset>
+            ))}
+            <div className="button-row">
+              <button
+                className="secondary"
+                disabled={
+                  trustedCommands.length === 0 || criteria.length >= 20
+                }
+                onClick={() =>
+                  setCriteria((current) => [
+                    ...current,
+                    {
+                      key: crypto.randomUUID(),
+                      description: '',
+                      command: trustedCommands[0]!,
+                    },
+                  ])
+                }
+                type="button"
+              >
+                Add criterion
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="button-row">
           <button
             disabled={
@@ -753,20 +964,35 @@ export function SetupWizard() {
               applied === undefined ||
               head === undefined ||
               title.trim() === '' ||
-              description.trim() === ''
+              description.trim() === '' ||
+              (pipeline === 'goal' &&
+                (criteria.length === 0 ||
+                  criteria.some(
+                    (criterion) =>
+                      criterion.description.trim() === '' ||
+                      criterion.command === '',
+                  )))
             }
             onClick={() => void startRun()}
             type="button"
           >
-            {starting ? 'Starting…' : 'Start feature run'}
+            {starting
+              ? 'Starting…'
+              : pipeline === 'goal'
+                ? 'Start goal run'
+                : 'Start feature run'}
           </button>
         </div>
         {startError !== '' ? <p role="alert">{startError}</p> : null}
         {runId !== '' ? (
           <p>
-            Run started: <a href={`/runs/${runId}`}>{runId}</a>. Watch its
-            steps there, and grant the specification approval in the{' '}
-            <a href="/inbox">inbox</a> when it appears.
+            Run started: <a href={`/runs/${runId}`}>{runId}</a>.{' '}
+            {pipeline === 'goal'
+              ? 'That page tracks each criterion and every attempt against it.'
+              : 'Watch its steps there.'}{' '}
+            Grant the specification approval in the{' '}
+            <a href="/inbox">inbox</a> when it appears
+            {pipeline === 'goal' ? ' — once per attempt' : ''}.
             {mode === 'local' ? (
               <>
                 {' '}When it succeeds, the result is a local branch — inspect
