@@ -62,13 +62,66 @@ async function workflowTimeoutMs(
   }
 }
 
-function deterministicGoalChildRunId(parentRunId: string, step: number) {
+export function deterministicGoalChildRunId(parentRunId: string, step: number) {
   return persistenceId(
     'run',
     `goal-child-${createHash('sha256')
       .update(`${parentRunId}\u0000${String(step)}`)
       .digest('hex')}`,
   );
+}
+
+const TERMINAL = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'rejected',
+  'expired',
+]);
+
+async function specDodApproval(
+  repository: DomainRepository,
+  runId: WorkflowRunId,
+): Promise<
+  | {
+      readonly id: ApprovalId;
+      readonly status: 'pending' | 'consumed';
+      readonly scope: string;
+      readonly fingerprint: string;
+      readonly expiresAt: string;
+      readonly consumedAt?: string;
+    }
+  | undefined
+> {
+  const pending = await repository.listApprovals(runId, {
+    status: 'pending',
+    limit: 100,
+  });
+  const consumed = await repository.listApprovals(runId, {
+    status: 'consumed',
+    limit: 100,
+  });
+  return [...pending, ...consumed].find(
+    (approval) => approval.scope === 'feature-spec-and-dod',
+  );
+}
+
+async function goalChildRuns(
+  repository: DomainRepository,
+  parent: WorkflowRun,
+): Promise<readonly WorkflowRun[]> {
+  const progress = await repository.listGoalProgress(parent.id, { limit: 100 });
+  const children: WorkflowRun[] = [];
+  for (const record of progress) {
+    if (record.criterionId !== undefined || !isObject(record.payload)) continue;
+    const childRunId = record.payload.childRunId;
+    if (typeof childRunId !== 'string') continue;
+    const expected = deterministicGoalChildRunId(parent.id, record.step);
+    if (childRunId !== expected) continue;
+    const child = await repository.getRun(expected);
+    if (child !== undefined) children.push(child);
+  }
+  return children;
 }
 
 async function cancelGoalChildren(
@@ -212,23 +265,56 @@ export async function reconcileWorkflowOutbox(
         if (refreshed !== undefined) run = refreshed;
       }
       const active = ['pending', 'running', 'waiting'].includes(run.status);
-      const deadlineExceeded =
-        (run.pipeline === 'feature' || run.pipeline === 'goal') &&
-        active &&
-        Date.parse(now) >=
-          Date.parse(run.createdAt) +
-            (await workflowTimeoutMs(repository, run));
-      if (deadlineExceeded) {
-        const failed = await repository.transitionRun(
+      const nowMs = Date.parse(now);
+      let failCode: 'workflow_deadline_exceeded' | 'approval_expired' | undefined;
+
+      if (active && (run.pipeline === 'feature' || run.pipeline === 'goal')) {
+        if (run.status === 'waiting') {
+          const approval = await specDodApproval(repository, run.id);
+          if (
+            approval?.status === 'pending' &&
+            Date.parse(approval.expiresAt) <= nowMs
+          ) {
+            failCode = 'approval_expired';
+            await repository.expireApproval(approval.id, {
+              runId: run.id,
+              scope: approval.scope,
+              fingerprint: approval.fingerprint,
+              at: isoTimestamp(now),
+            });
+          }
+        } else if (run.pipeline === 'feature') {
+          const approval = await specDodApproval(repository, run.id);
+          const startMs =
+            approval?.status === 'consumed' && approval.consumedAt !== undefined
+              ? Date.parse(approval.consumedAt)
+              : Date.parse(run.createdAt);
+          if (nowMs >= startMs + MAX_WORKFLOW_TIMEOUT_MS) {
+            failCode = 'workflow_deadline_exceeded';
+          }
+        } else {
+          const children = await goalChildRuns(repository, run);
+          const live = children.filter((child) => !TERMINAL.has(child.status));
+          if (live.length === 0) {
+            const cap = await workflowTimeoutMs(repository, run);
+            if (nowMs >= Date.parse(run.createdAt) + cap) {
+              failCode = 'workflow_deadline_exceeded';
+            }
+          }
+        }
+      }
+
+      if (failCode !== undefined) {
+        const failedTransition = await repository.transitionRun(
           run.id,
           ['pending', 'running', 'waiting'],
           {
             status: 'failed',
             output: {
               status: 'failed',
-              reason: 'workflow_deadline_exceeded',
+              reason: failCode,
             },
-            error: { code: 'workflow_deadline_exceeded' },
+            error: { code: failCode },
             updatedAt: isoTimestamp(now),
             completedAt: isoTimestamp(now),
             cleanupAt: isoTimestamp(
@@ -237,8 +323,8 @@ export async function reconcileWorkflowOutbox(
           },
           run.stateVersion ?? 0,
         );
-        if (failed !== undefined) {
-          run = failed;
+        if (failedTransition !== undefined) {
+          run = failedTransition;
           let approvalAfter: TimestampListCursor<ApprovalId> | undefined;
           for (let approvalPage = 0; approvalPage < 10; approvalPage += 1) {
             const approvals = await repository.listApprovals(run.id, {

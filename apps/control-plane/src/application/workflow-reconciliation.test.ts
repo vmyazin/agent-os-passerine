@@ -16,7 +16,10 @@ import {
 } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
-import { reconcileWorkflowOutbox } from './workflow-reconciliation';
+import {
+  deterministicGoalChildRunId,
+  reconcileWorkflowOutbox,
+} from './workflow-reconciliation';
 import type { WorkflowDispatchOutbox } from './control-plane-service';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
@@ -279,6 +282,201 @@ describe('workflow outbox reconciliation', () => {
       error: { code: 'workflow_deadline_exceeded' },
     });
     expect(delivered).toEqual([`cancel:${runId}`, `cleanup:${runId}`]);
+  });
+
+  it('does not kill a feature run waiting on a live spec/dod approval', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'p1');
+    const runId = persistenceId('run', 'r1');
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2 hours ago
+    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'a1'),
+      runId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f1',
+      status: 'pending',
+      createdAt,
+      expiresAt: isoTimestamp('2026-08-18T10:00:00.000Z'),
+    });
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+
+    await expect(repository.getRun(runId)).resolves.toMatchObject({ status: 'waiting' });
+  });
+
+  it('fails a feature run waiting on an expired spec/dod approval', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'p1');
+    const runId = persistenceId('run', 'r1');
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z');
+    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createRun({
+      id: runId,
+      projectId,
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const approvalId = persistenceId('approval', 'a1');
+    await repository.createApproval({
+      id: approvalId,
+      runId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f1',
+      status: 'pending',
+      createdAt,
+      expiresAt: isoTimestamp('2026-08-17T11:00:00.000Z'), // Expired 1h ago
+    });
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+      requestCancel: async () => undefined,
+      requestCleanup: async () => undefined,
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'approval_expired' },
+    });
+    await expect(repository.getApproval(approvalId)).resolves.toMatchObject({
+      status: 'expired',
+    });
+  });
+
+  it('measures feature deadline from consumption of spec/dod approval', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'p1');
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2h ago
+    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+
+    // 1. Consumed recently (10m ago) -> still running
+    const run1Id = persistenceId('run', 'r1');
+    await repository.createRun({
+      id: run1Id,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const recentlyConsumedAt = isoTimestamp('2026-08-17T11:50:00.000Z');
+    await repository.createApproval({
+      id: persistenceId('approval', 'a1'),
+      runId: run1Id,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f1',
+      status: 'consumed',
+      createdAt,
+      consumedAt: recentlyConsumedAt,
+      expiresAt: isoTimestamp('2026-08-18T10:00:00.000Z'),
+    });
+
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+    await expect(repository.getRun(run1Id)).resolves.toMatchObject({ status: 'running' });
+
+    // 2. Consumed long ago (61m ago) -> deadline exceeded
+    const run2Id = persistenceId('run', 'r2');
+    await repository.createRun({
+      id: run2Id,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const longAgoConsumedAt = isoTimestamp('2026-08-17T10:59:00.000Z');
+    await repository.createApproval({
+      id: persistenceId('approval', 'a2'),
+      runId: run2Id,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'f1',
+      status: 'consumed',
+      createdAt,
+      consumedAt: longAgoConsumedAt,
+      expiresAt: isoTimestamp('2026-08-18T10:00:00.000Z'),
+    });
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+    await expect(repository.getRun(run2Id)).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'workflow_deadline_exceeded' },
+    });
+  });
+
+  it('does not fail a goal run while it has an active child run', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'p1');
+    const parentRunId = persistenceId('run', 'parent');
+    const childRunId = deterministicGoalChildRunId(parentRunId, 1);
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2h ago
+    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createRun({
+      id: parentRunId,
+      projectId,
+      pipeline: 'goal',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    await repository.createRun({
+      id: childRunId,
+      projectId,
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: now, // recent
+      updatedAt: now,
+    });
+    await repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${parentRunId}:step:1:child`),
+      runId: parentRunId,
+      step: 1,
+      status: 'pending',
+      payload: { version: 'goal-child-attempt-v1', childRunId },
+      recordedAt: now,
+    });
+
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+    };
+
+    // Parent is 2h old, but has a live child -> parent stays running
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({ status: 'running' });
+
+    // Child completes -> parent now subject to its own deadline
+    await repository.transitionRun(childRunId, ['waiting'], {
+      status: 'succeeded',
+      completedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
+    }, 0);
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'workflow_deadline_exceeded' },
+    });
   });
 
   it('cancels every recorded active child of a cancelled goal', async () => {
