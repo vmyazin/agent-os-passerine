@@ -1,12 +1,27 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const redirect = vi.hoisted(() =>
+  vi.fn((url: string): never => {
+    throw new Error(`NEXT_REDIRECT:${url}`);
+  }),
+);
+
+const readPageSession = vi.hoisted(() =>
+  vi.fn(async (): Promise<{ readonly login: string } | null> => null),
+);
+
+vi.mock('next/navigation', () => ({ redirect }));
+vi.mock('../../src/auth/page-session', () => ({ readPageSession }));
+
 import LoginPage from '../../app/login/page';
 
 describe('LoginPage', () => {
   beforeEach(() => {
     vi.stubEnv('NODE_ENV', 'development');
     vi.stubEnv('AGENTOS_PUBLIC_URL', 'http://localhost:3000');
+    readPageSession.mockResolvedValue(null);
+    redirect.mockClear();
   });
 
   afterEach(() => {
@@ -63,5 +78,17 @@ describe('LoginPage', () => {
 
     expect(markup).toContain('GitHub sign-in could not be completed');
     expect(markup).toContain('role="alert"');
+  });
+
+  it('redirects a signed-in operator to the sanitized returnTo', async () => {
+    readPageSession.mockResolvedValue({ login: 'operator' });
+
+    await expect(
+      LoginPage({
+        searchParams: Promise.resolve({ returnTo: '/runs?status=waiting' }),
+      }),
+    ).rejects.toThrow('NEXT_REDIRECT:/runs?status=waiting');
+
+    expect(redirect).toHaveBeenCalledWith('/runs?status=waiting');
   });
 });

@@ -28,7 +28,10 @@ test.beforeEach(async ({ context, page }) => {
       sameSite: 'Lax',
     },
   ]);
-  await page.goto('/login');
+  // /login redirects signed-in operators, which destroyed the old
+  // evaluate() context. Hit a public JSON route so the origin cookie
+  // is available without rendering the app shell or HomePage first.
+  await page.goto('/api/health');
   const seeded = await page.evaluate(
     async () => (await fetch('/api/test/seed', { method: 'POST' })).ok,
   );
@@ -52,9 +55,7 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
       .getByRole('navigation', { name: 'Primary navigation' })
       .getByRole('button', { name: 'Sign Out' }),
   ).toBeVisible();
-  await expect(
-    page.getByRole('link', { name: 'Projects, 1' }),
-  ).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Projects, 1' })).toBeVisible();
 });
 
 test('operator can open the projects directory', async ({ page }) => {
@@ -65,9 +66,10 @@ test('operator can open the projects directory', async ({ page }) => {
   ).toBeVisible();
   await expect(page.getByRole('table', { name: 'Projects' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'E2E Project' })).toBeVisible();
-  await expect(
-    page.getByRole('link', { name: 'Projects, 1' }),
-  ).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: 'Projects, 1' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
 });
 
 test('operator can monitor a waiting run and consume a scoped approval', async ({
@@ -95,10 +97,17 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   await expect(page.getByLabel('Your reply')).toBeVisible();
   await page.getByLabel('Your reply').fill('Use Tuesday morning.');
   await page.getByRole('button', { name: 'Send reply' }).click();
+  await expect(page.getByText('Reply sent')).toBeVisible();
+  await page
+    .getByRole('button', { name: /Which deployment window should we use/ })
+    .click();
   await expect(
     page.getByLabel('Sent reply').getByText('Use Tuesday morning.'),
   ).toBeVisible();
   await page.reload();
+  await page
+    .getByRole('button', { name: /Which deployment window should we use/ })
+    .click();
   await expect(
     page.getByLabel('Sent reply').getByText('Use Tuesday morning.'),
   ).toBeVisible();
@@ -128,8 +137,9 @@ test('operator can sign in via the localhost "Get In" bypass CTA', async ({
 
   const getInButton = page.getByRole('link', { name: 'Get In' });
   await expect(getInButton).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign Out' })).toHaveCount(0);
   await expect(
-    page.getByRole('button', { name: 'Sign Out' }),
+    page.getByRole('navigation', { name: 'Primary navigation' }),
   ).toHaveCount(0);
   await getInButton.click();
 

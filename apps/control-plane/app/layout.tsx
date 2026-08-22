@@ -17,36 +17,42 @@ export const metadata: Metadata = {
 export default async function RootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
-  const [counts, session] = await Promise.all([
-    fetchRailCounts(),
-    readPageSession(),
-  ]);
+  const session = await readPageSession();
+  const counts = session ? await fetchRailCounts() : undefined;
   return (
     <html lang="en">
       <body>
         <a className="skip-link" href="#main-content">
           Skip to content
         </a>
-        <div className="app-shell">
-          <aside className="app-rail">
-            <a aria-label="Agent OS home" className="wordmark" href="/">
-              Agent OS
-            </a>
-            <AppRailNav
-              inboxCount={counts?.inboxCount ?? 0}
-              projectCount={counts?.projectCount ?? 0}
-            >
-              {session ? <AppRailSignOut /> : null}
-            </AppRailNav>
-            <footer className="app-rail-footer">Agent OS control plane</footer>
-          </aside>
-          <div className="app-content">
-            <AppRailStatus counts={counts} />
-            <div className="app-content-scroll">
-              <main id="main-content">{children}</main>
+        {session ? (
+          <div className="app-shell">
+            <aside className="app-rail">
+              <a aria-label="Agent OS home" className="wordmark" href="/">
+                Agent OS
+              </a>
+              <AppRailNav
+                inboxCount={counts?.inboxCount ?? 0}
+                projectCount={counts?.projectCount ?? 0}
+              >
+                <AppRailSignOut />
+              </AppRailNav>
+              <footer className="app-rail-footer">
+                Agent OS control plane
+              </footer>
+            </aside>
+            <div className="app-content">
+              <AppRailStatus counts={counts} />
+              <div className="app-content-scroll">
+                <main id="main-content">{children}</main>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="auth-stage">
+            <main id="main-content">{children}</main>
+          </div>
+        )}
       </body>
     </html>
   );

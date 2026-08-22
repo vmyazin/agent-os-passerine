@@ -1,9 +1,12 @@
+// app/login/page.tsx
 import { createElement } from 'react';
+import { redirect } from 'next/navigation';
 
 import {
   isLocalhostBypassAllowed,
   sanitizeReturnTo,
 } from '../../src/auth/auth';
+import { readPageSession } from '../../src/auth/page-session';
 
 export default async function LoginPage({
   searchParams,
@@ -11,8 +14,10 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string; returnTo?: string }>;
 }) {
   const { error, returnTo } = await searchParams;
+  const session = await readPageSession();
   const isLocal = isLocalhostBypassAllowed(process.env);
   const safeReturn = sanitizeReturnTo(returnTo);
+  if (session) redirect(safeReturn);
   const querySuffix =
     safeReturn !== '/' ? `?returnTo=${encodeURIComponent(safeReturn)}` : '';
   const localAuthUrl = `/auth/local${querySuffix}`;

@@ -552,6 +552,22 @@ h1 {
   background: var(--danger-surface);
 }
 
+.auth-stage {
+  display: flex;
+  min-height: 100dvh;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.auth-stage main {
+  width: min(44rem, 100%);
+}
+
+.auth-stage .auth-card {
+  margin-block: 0;
+}
+
 .empty-state,
 .auth-card {
   max-width: 44rem;
