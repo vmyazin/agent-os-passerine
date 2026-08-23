@@ -149,13 +149,26 @@ judged it. Approvals also have their own 24-hour TTL, and the 60-minute
 execution budget starts when the approval is consumed, so acceptance tests
 can be read overnight without spending the run's clock.
 
-Run chaining is designed but unbuilt
-([design](./superpowers/specs/2026-08-23-run-chaining-design.md)): today
-every run ingests the repository at a SHA bound to an applied configuration
-revision and publishes a draft PR the operator merges, so feature N+1 cannot
-see feature N's work until that merge lands. Until it does, a multi-feature
-body of work costs one operator merge between every pair of runs — the
-throughput ceiling for executing a project rather than a feature.
+Run chaining is implemented
+([design](./superpowers/specs/2026-08-23-run-chaining-design.md),
+[plan](./superpowers/plans/2026-08-23-run-chaining.md)): a feature run may
+name `baseRunId`, and the control plane resolves that run's published branch
+and commit from its own outcome record — the caller never supplies a source
+SHA. Ingestion reads the base commit, publication bases on the base branch,
+and the branch stack accumulates until the operator merges the last one.
+`provenance.repositorySha` still pins the applied configuration revision and
+every existing assertion runs against it unchanged. Five refusals cover a
+base that is missing, unfinished, another project's, unpublished, running
+under a different configuration revision, already chained, or too deep
+(`config.chains.maxDepth`, default three).
+
+Verification boundary for chaining: the branch-stacking claim is proved
+against a real git repository through the local-git publisher (run A off
+`main`, run B off A's branch, B's tree carrying both files, `main`
+untouched), and every refusal has its own credential-free case. What has
+*not* run is a chained pair driven by real agent sessions end to end — that
+needs paid model calls and a Trigger deployment, so it stays an explicit
+gap rather than an implied pass.
 
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

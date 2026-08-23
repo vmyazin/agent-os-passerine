@@ -62,6 +62,40 @@ are structurally incapable of reaching the GitHub publisher (and vice
 versa). Everything between the edges — sessions, artifact MCP, budgets,
 approvals, sealed verification — is byte-identical to the GitHub path.
 
+## Chained runs
+
+A feature run may name `baseRunId`: a succeeded run in the same project whose
+published commit it builds on, so feature N+1 does not wait for the operator
+to merge feature N.
+
+The caller names a run, never a SHA. `createRun` reads the base run's own
+outcome for the branch and commit it published (`publishedBranch` /
+`publishedCommitSha`, recorded by the workflow from the publisher's result)
+and writes the resolved edge onto the immutable run input as
+`chain: { baseRunId, baseBranch, baseCommitSha }`.
+
+`provenance.repositorySha` keeps its meaning — the applied configuration
+revision's SHA — and every existing assertion runs against it unchanged,
+including the dispatch-time snapshot check. The chain redirects exactly two
+things: the SHA source ingestion resolves, and the `expectedBase` the
+publication manifest names. So a chained run publishes onto its base's
+branch, the draft PR shows that feature's diff alone, and the branch stack
+accumulates until the operator merges the last one.
+
+Creation refuses, each with its own code: a base that is missing,
+unfinished, or another project's (`base_run_unavailable`); a base that
+recorded no published commit — a draft PR whose publisher reported no
+`commitSha` is unchainable rather than chained to a guess
+(`base_run_unpublished`); a base that ran under a different configuration
+revision (`chain_configuration_changed`); a base another active run already
+builds on, since a chain is a line and not a tree (`chained_base_taken`);
+and a chain longer than `config.chains.maxDepth`, default three
+(`chain_too_deep`).
+
+A base branch that moved underneath a chained run hits the existing
+stale-base check at publication and fails without a partial write. The
+system still never merges: the stack is the operator's to land.
+
 ## Replay and failure model
 
 `workflow_effects` records a fingerprint before every Trigger, runtime,
@@ -125,6 +159,8 @@ The proof-of-concept defaults are fixed in trusted code:
   deadline;
 - a goal parent with a non-terminal child is not failed for the execution
   deadline;
+- at most three runs in a chain (`config.chains.maxDepth`), and one active
+  run per base;
 - $2 per workflow and $5 per rolling 24-hour project window, represented as
   integer microdollars;
 - no new session at 80% of either cap.

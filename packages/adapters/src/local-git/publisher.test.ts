@@ -181,6 +181,59 @@ class CapturingStore implements PublicationStore {
 }
 
 describe('local git publisher', () => {
+  it('stacks a chained publication on the previous run\'s branch', async () => {
+    const { repo, base, publisher } = await fixture();
+
+    // Run A publishes off the default branch, as an unchained run does.
+    const first = manifestBody(repo, base, {
+      runId: 'run-1',
+      changes: [
+        {
+          operation: 'add',
+          path: 'src/first.txt',
+          mode: '100644',
+          content: 'first feature\n',
+        },
+      ],
+    });
+    const a = await publisher.publish({
+      manifest: first,
+      authorization: authorize(first),
+    });
+    expect(a.status).toBe('succeeded');
+
+    // Run B chains: its expectedBase is A's branch and commit, which is
+    // exactly what the workflow builds for a run with a chain edge.
+    const second = manifestBody(repo, base, {
+      runId: 'run-2',
+      expectedBase: { branch: a.branch, sha: a.commitSha },
+      changes: [
+        {
+          operation: 'add',
+          path: 'src/second.txt',
+          mode: '100644',
+          content: 'second feature\n',
+        },
+      ],
+    });
+    const b = await publisher.publish({
+      manifest: second,
+      authorization: authorize(second),
+    });
+
+    expect(await git(repo, ['rev-parse', `${b.commitSha}^`])).toBe(
+      a.commitSha,
+    );
+    // The stack accumulates: B's tree carries A's file as well as its own,
+    // so merging B's branch takes both features.
+    const tree = await git(repo, ['ls-tree', '-r', '--name-only', b.commitSha]);
+    expect(tree.split('\n')).toEqual(
+      expect.arrayContaining(['src/first.txt', 'src/second.txt']),
+    );
+    // And the default branch is untouched until the operator merges.
+    expect(await git(repo, ['rev-parse', 'main'])).toBe(base);
+  });
+
   it('publishes add+modify+delete as a plumbing commit without touching the working tree', async () => {
     const { repo, base, publisher } = await fixture();
     const manifest = manifestBody(repo, base);
