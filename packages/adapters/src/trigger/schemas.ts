@@ -10,9 +10,25 @@ import { z } from 'zod';
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 
+/** Where a chained run reads its source, resolved by the control plane. */
+export const runChainSchema = z
+  .object({
+    baseRunId: identifier,
+    baseBranch: z.string().min(1).max(512),
+    baseCommitSha: z.string().regex(/^[0-9a-f]{40}$/),
+  })
+  .strict();
+
 export const featureWorkflowInputSchema = z
   .object({
     version: z.literal('feature-workflow-input-v1'),
+    /**
+     * Set when this run builds on an earlier run's publication. It redirects
+     * two things and nothing else: the SHA source ingestion resolves, and
+     * the base the publication manifest expects. Provenance below still
+     * pins the applied configuration revision.
+     */
+    chain: runChainSchema.optional(),
     runId: identifier,
     projectId: identifier,
     feature: z

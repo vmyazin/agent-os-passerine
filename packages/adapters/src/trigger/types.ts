@@ -66,6 +66,18 @@ export interface FeatureWorkflowInput {
   readonly runId: string;
   readonly projectId: string;
   readonly feature: { readonly title: string; readonly description: string };
+  /**
+   * Set when this run builds on an earlier run's publication: the source is
+   * read at `baseCommitSha` and the publication expects `baseBranch` as its
+   * base, instead of the project's default branch.
+   */
+  readonly chain?:
+    | {
+        readonly baseRunId: string;
+        readonly baseBranch: string;
+        readonly baseCommitSha: string;
+      }
+    | undefined;
   readonly source: {
     readonly repositorySha: string;
     readonly sourceSnapshotDigest: string;

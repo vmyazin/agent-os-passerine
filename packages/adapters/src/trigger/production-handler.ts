@@ -57,6 +57,7 @@ import {
   deploymentDailyLimitFromEnv,
 } from './workflow-budget.js';
 import type {
+  FeatureWorkflowInput,
   FeatureWorkflowRoles,
   WorkflowPublicationAuthority,
 } from './types.js';
@@ -237,6 +238,24 @@ export function exactTrustedCommand(definition: {
     .map(shellQuote)
     .join(' ');
   return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation} && node --test 'test/acceptance/*.test.mjs'; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
+}
+
+/**
+ * A chained run publishes onto the branch its base published, not onto the
+ * default branch: the operator sees this feature's diff alone, and the
+ * existing stale-base check still refuses to write if that branch moved
+ * underneath it. An unchained run keeps the default-branch base.
+ */
+export function publicationExpectedBase(
+  workflow: FeatureWorkflowInput,
+  defaultBranch: string,
+): { readonly branch: string; readonly sha: string } {
+  return workflow.chain === undefined
+    ? { branch: defaultBranch, sha: workflow.source.repositorySha }
+    : {
+        branch: workflow.chain.baseBranch,
+        sha: workflow.chain.baseCommitSha,
+      };
 }
 
 function priceUsage(
@@ -587,10 +606,10 @@ export async function createProductionFeatureWorkflowFromEnv(
             runId: workflow.runId,
             stepId: 'publication',
             repository: target.repository,
-            expectedBase: {
-              branch: config.project.defaultBranch,
-              sha: workflow.source.repositorySha,
-            },
+            expectedBase: publicationExpectedBase(
+              workflow,
+              config.project.defaultBranch,
+            ),
             configDigest: workflow.digests.config,
             policyDigest: workflow.digests.policy,
             sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,

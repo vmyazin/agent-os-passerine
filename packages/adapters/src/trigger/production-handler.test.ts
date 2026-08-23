@@ -8,6 +8,7 @@ import {
   createProductionFeatureWorkflowFromEnv,
   exactTrustedCommand,
   kimiFromEnv,
+  publicationExpectedBase,
 } from './production-handler.js';
 
 function completeEnv(
@@ -80,6 +81,44 @@ describe('production feature workflow composition', () => {
       command.indexOf('node --test'),
     );
     expect(command).toContain('AGENTOS_EXIT_CODE');
+  });
+
+  it('bases a chained publication on the branch its base run published', () => {
+    const workflow = {
+      version: 'feature-workflow-input-v1',
+      runId: 'run-2',
+      projectId: 'project-1',
+      feature: { title: 'Next', description: 'Builds on the first.' },
+      source: {
+        repositorySha: 'a'.repeat(40),
+        sourceSnapshotDigest: '0'.repeat(64),
+      },
+      digests: {
+        config: '0'.repeat(64),
+        model: '0'.repeat(64),
+        prompt: '0'.repeat(64),
+        environment: '0'.repeat(64),
+        policy: '0'.repeat(64),
+      },
+    } as const;
+
+    expect(publicationExpectedBase(workflow, 'main')).toEqual({
+      branch: 'main',
+      sha: 'a'.repeat(40),
+    });
+    expect(
+      publicationExpectedBase(
+        {
+          ...workflow,
+          chain: {
+            baseRunId: 'run-1',
+            baseBranch: 'agentos/run-1-abcdef01',
+            baseCommitSha: 'd'.repeat(40),
+          },
+        },
+        'main',
+      ),
+    ).toEqual({ branch: 'agentos/run-1-abcdef01', sha: 'd'.repeat(40) });
   });
 
   it('fails closed with an actionable, secret-free missing environment error', async () => {

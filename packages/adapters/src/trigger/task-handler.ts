@@ -11,7 +11,7 @@ import {
 } from '@agentos/core';
 import { z } from 'zod';
 
-import { featureWorkflowInputSchema } from './schemas.js';
+import { featureWorkflowInputSchema, runChainSchema } from './schemas.js';
 import type { FeatureWorkflowResult } from './types.js';
 
 const runInputSchema = z
@@ -19,6 +19,10 @@ const runInputSchema = z
     idempotencyKey: z.string().min(1).max(256),
     title: z.string().min(1).max(200),
     description: z.string().min(1).max(20_000),
+    // A chained run's source is its base run's published commit; the
+    // control plane resolved it from that run's own publication record, so
+    // dispatch reads it rather than re-deriving anything.
+    chain: runChainSchema.optional(),
     provenance: z
       .object({
         repositorySha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -129,10 +133,16 @@ export function createFeatureWorkflowTaskHandler(
         snapshot.policyDigest !== stored.data.provenance.policyDigest
       )
         throw new Error('feature run config snapshot provenance mismatch');
+      // Provenance still pins the applied configuration revision and its
+      // SHA -- every assertion above ran against it. What changes for a
+      // chained run is only where the source is read from.
+      const sourceSha =
+        stored.data.chain?.baseCommitSha ??
+        stored.data.provenance.repositorySha;
       const sourceSnapshot = await options.sourceSnapshot.resolve({
         projectId: run.projectId,
         runId: run.id,
-        repositorySha: stored.data.provenance.repositorySha,
+        repositorySha: sourceSha,
       });
       const workflowInput = featureWorkflowInputSchema.parse({
         version: 'feature-workflow-input-v1',
@@ -142,8 +152,11 @@ export function createFeatureWorkflowTaskHandler(
           title: stored.data.title,
           description: stored.data.description,
         },
+        ...(stored.data.chain === undefined
+          ? {}
+          : { chain: stored.data.chain }),
         source: {
-          repositorySha: stored.data.provenance.repositorySha,
+          repositorySha: sourceSha,
           sourceSnapshotDigest:
             typeof sourceSnapshot === 'string'
               ? sourceSnapshot
