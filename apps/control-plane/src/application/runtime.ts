@@ -570,6 +570,28 @@ export function workflowDispatchFromEnv() {
   });
 }
 
+/**
+ * Approval summaries read spec/DoD artifact bodies; without R2 env the inbox
+ * degrades to bare approvals instead of failing. The seed route writes
+ * through this same store so a seeded approval renders the way a real one
+ * does.
+ */
+export function approvalArtifactStoreFromEnv() {
+  const configured =
+    (process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() ?? '') !== '' &&
+    (process.env.CLOUDFLARE_R2_ARTIFACT_BUCKET?.trim() ?? '') !== '' &&
+    (process.env.CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID?.trim() ?? '') !== '' &&
+    (process.env.CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY?.trim() ?? '') !== '';
+  if (!configured) return undefined;
+  return createR2ArtifactStore({
+    accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
+    bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
+    accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
+    secretAccessKey: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY'),
+    manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
+  });
+}
+
 export function controlPlaneService(): ControlPlaneService {
   if (service === undefined) {
     const dispatch = workflowDispatchFromEnv();
@@ -588,28 +610,7 @@ export function controlPlaneService(): ControlPlaneService {
               ) => (await resolver.resolve(config)).repositorySha,
             };
           })();
-    // Approval summaries read spec/DoD artifact bodies; without R2 env the
-    // inbox degrades to bare approvals instead of failing.
-    const approvalArtifacts = (() => {
-      const repository = repositoryFromEnv();
-      const configured =
-        (process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() ?? '') !== '' &&
-        (process.env.CLOUDFLARE_R2_ARTIFACT_BUCKET?.trim() ?? '') !== '' &&
-        (process.env.CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID?.trim() ?? '') !==
-          '' &&
-        (process.env.CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY?.trim() ?? '') !==
-          '';
-      if (!configured) return undefined;
-      return createR2ArtifactStore({
-        accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
-        bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
-        accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
-        secretAccessKey: requiredRuntime(
-          'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
-        ),
-        manifest: createDomainArtifactManifestStore(repository),
-      });
-    })();
+    const approvalArtifacts = approvalArtifactStoreFromEnv();
     service = new ControlPlaneService(
       repositoryFromEnv(),
       () => isoTimestamp(new Date().toISOString()),

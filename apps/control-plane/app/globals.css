@@ -939,6 +939,36 @@ div.inbox-message-copy {
   gap: 0.75rem;
 }
 
+/* Frozen acceptance tests in a spec approval. The operator has to be able
+   to read the file that will decide the run, so the body is a real code
+   block -- inset, monospace, and scrolling inside itself. Without the
+   scroll container an unwrapped test line pushes the whole 390 px page
+   sideways. */
+.inbox-acceptance-test {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.inbox-acceptance-test + .inbox-acceptance-test {
+  margin-top: 0.9rem;
+}
+
+.inbox-acceptance-test-body {
+  margin: 0;
+  border-radius: 0.6rem;
+  background: var(--surface-inset);
+  padding: 0.85rem 1rem;
+  max-height: 22rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+
 .inbox-thread-entry + .inbox-thread-entry {
   border-top: 1px solid var(--line-soft);
   padding-top: 1.25rem;
