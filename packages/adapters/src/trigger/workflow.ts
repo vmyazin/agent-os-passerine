@@ -1752,10 +1752,18 @@ export function createDurableFeatureWorkflow(
                 status: 'succeeded',
                 localBranch: publication.branch,
                 localRepositoryUrl: publication.repositoryUrl,
+                publishedBranch: publication.branch,
+                publishedCommitSha: publication.commitSha,
               }
             : {
                 status: 'succeeded',
                 draftPullRequestUrl: publication.pullRequestUrl,
+                ...(publication.branch === undefined
+                  ? {}
+                  : { publishedBranch: publication.branch }),
+                ...(publication.commitSha === undefined
+                  ? {}
+                  : { publishedCommitSha: publication.commitSha }),
               };
         if (
           (await transitionCurrentRun(dependencies, runId, ['running'], {

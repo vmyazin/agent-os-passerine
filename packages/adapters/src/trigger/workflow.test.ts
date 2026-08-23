@@ -702,8 +702,75 @@ describe('durable feature workflow', () => {
       status: 'succeeded',
       localBranch: 'agentos/run-1-abcdef01',
       localRepositoryUrl: 'file:///workspaces/exp',
+      // A later run chains onto this commit, and the outcome is the only
+      // place the control plane can read it back.
+      publishedBranch: 'agentos/run-1-abcdef01',
+      publishedCommitSha: 'a'.repeat(40),
     });
     expect(result).not.toHaveProperty('draftPullRequestUrl');
+  });
+
+  it('records where a draft publication landed, and omits what the publisher did not report', async () => {
+    const build = (
+      publish: () => Promise<{
+        readonly status: 'succeeded';
+        readonly draft: true;
+        readonly pullRequestUrl: string;
+        readonly branch?: string;
+        readonly commitSha?: string;
+      }>,
+    ) =>
+      fixture().then((f) =>
+        createDurableFeatureWorkflow({
+          repository: f.repository,
+          checkpoints: new InMemoryWorkflowCheckpointStore(),
+          artifacts: f.artifacts,
+          runtime: f.runtime,
+          approval: f.waiter,
+          roles,
+          clock: () => now,
+          priceUsage: () => 100,
+          resolveTestCommand: () => 'pnpm test',
+          verifier: {
+            verify: async () => ({
+              passed: true,
+              evidenceDigest: f.verificationMeta.digest,
+              evidenceArtifact: f.verificationMeta,
+            }),
+          },
+          publicationAuthority: { authorize: async () => ({}) },
+          publisher: { publish },
+        }),
+      );
+
+    const reported = await (
+      await build(async () => ({
+        status: 'succeeded',
+        draft: true,
+        pullRequestUrl: 'https://github.test/pr/7',
+        branch: 'agentos/run-1-abcdef01',
+        commitSha: 'b'.repeat(40),
+      }))
+    ).run(input);
+    expect(reported).toEqual({
+      status: 'succeeded',
+      draftPullRequestUrl: 'https://github.test/pr/7',
+      publishedBranch: 'agentos/run-1-abcdef01',
+      publishedCommitSha: 'b'.repeat(40),
+    });
+
+    const silent = await (
+      await build(async () => ({
+        status: 'succeeded',
+        draft: true,
+        pullRequestUrl: 'https://github.test/pr/8',
+      }))
+    ).run(input);
+    // Unchainable rather than guessed at.
+    expect(silent).toEqual({
+      status: 'succeeded',
+      draftPullRequestUrl: 'https://github.test/pr/8',
+    });
   });
 
   it('rejects a publisher result matching neither the draft-PR nor the local-git shape', async () => {

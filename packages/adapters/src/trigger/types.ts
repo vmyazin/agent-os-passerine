@@ -91,6 +91,16 @@ export interface FeatureWorkflowResult {
   readonly draftPullRequestUrl?: string;
   readonly localBranch?: string;
   readonly localRepositoryUrl?: string;
+  /**
+   * Where the publication actually landed. The publisher reports both, and
+   * a later run that chains onto this one needs them to name its base --
+   * the run outcome is the only place the control plane can read them, so
+   * dropping them here makes the commit unrecoverable. A draft-PR publisher
+   * reports `commitSha` optionally, so a run published without one is
+   * simply unchainable rather than guessed at.
+   */
+  readonly publishedBranch?: string;
+  readonly publishedCommitSha?: string;
   readonly reason?: string;
 }
 
