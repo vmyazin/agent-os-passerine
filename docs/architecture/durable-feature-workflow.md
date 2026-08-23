@@ -33,7 +33,7 @@ session leases.
    `changes_requested` decision cannot publish.
 5. After implementation, trusted code seals the acceptance test files onto the
    change set (`sealed-changes`). Verification materializes the sealed set and
-   runs the allowlisted project command and `node --test test/acceptance/` in a
+   runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'` in a
    separate, secretless Managed sandbox with only source/change inputs and Bash.
    An implementer change under `test/acceptance/` is a permanent error. It can
    reach only server-configured package registry hosts; lifecycle scripts are

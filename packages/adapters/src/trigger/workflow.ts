@@ -1556,7 +1556,14 @@ export function createDurableFeatureWorkflow(
         try {
           sealedChanges = {
             version: 'change-set-v1' as const,
-            changes: sealChangeSet(changeSet.changes, dodBody.acceptanceTests),
+            changes: sealChangeSet(
+              changeSet.changes,
+              dodBody.acceptanceTests,
+              dependencies.sourcePaths?.({
+                runId: workflow.runId,
+                sourceSnapshotDigest: workflow.source.sourceSnapshotDigest,
+              }) ?? new Set<string>(),
+            ),
           };
         } catch (error) {
           if (error instanceof AcceptancePathReservedError) {

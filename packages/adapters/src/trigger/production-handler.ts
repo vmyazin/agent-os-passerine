@@ -236,7 +236,7 @@ export function exactTrustedCommand(definition: {
   const invocation = [definition.executable, ...definition.arguments]
     .map(shellQuote)
     .join(' ');
-  return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation} && node --test test/acceptance/; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
+  return `set +e; IN=/workspace/inputs; [ -f "$IN/source-bundle.json" ] || IN=/mnt/session/uploads/workspace/inputs; rm -rf /workspace/repo; mkdir -p /workspace/repo; node "$IN/materialize.mjs" "$IN" && cd /workspace/repo && pnpm install --frozen-lockfile --ignore-scripts && ${invocation} && node --test 'test/acceptance/*.test.mjs'; code=$?; printf '\\nAGENTOS_EXIT_CODE=%s\\n' "$code"; exit "$code"`;
 }
 
 function priceUsage(
@@ -823,6 +823,18 @@ export async function createProductionFeatureWorkflowFromEnv(
               deploymentDailyUsageMicrodollars,
             }),
         verifier,
+        // The seal publishes acceptance files as `modify` for paths the base
+        // repository already has; the bundle is the only place that list
+        // lives, and it is digest-bound to the run being sealed.
+        sourcePaths: ({ runId, sourceSnapshotDigest }) => {
+          const loaded = sourceBundles.get(runId);
+          if (
+            loaded === undefined ||
+            loaded.metadata.digest !== sourceSnapshotDigest
+          )
+            return undefined;
+          return new Set(loaded.body.files.map((file) => file.path));
+        },
         resolveTestCommand: (commandKey) => {
           if (!allowedCommands.has(commandKey))
             throw new Error('test command is not allowed for this project');

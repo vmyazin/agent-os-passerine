@@ -69,9 +69,15 @@ describe('production feature workflow composition', () => {
     expect(command.indexOf('pnpm install')).toBeLessThan(
       command.indexOf("'pnpm' 'test'"),
     );
-    expect(command).toContain("'pnpm' 'test' && node --test test/acceptance/");
+    // A directory argument makes Node 24 resolve it as a module and die with
+    // MODULE_NOT_FOUND before a single test runs, so the gate must name the
+    // files by pattern; Node expands it, and so does the shell if it prefers.
+    expect(command).toContain(
+      "'pnpm' 'test' && node --test 'test/acceptance/*.test.mjs'",
+    );
+    expect(command).not.toContain('node --test test/acceptance/');
     expect(command.indexOf("'pnpm' 'test'")).toBeLessThan(
-      command.indexOf('node --test test/acceptance/'),
+      command.indexOf('node --test'),
     );
     expect(command).toContain('AGENTOS_EXIT_CODE');
   });

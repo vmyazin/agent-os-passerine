@@ -400,6 +400,17 @@ export interface DurableFeatureWorkflowDependencies {
     projectId: string,
   ) => Promise<number>;
   readonly verifier: WorkflowVerifier;
+  /**
+   * Paths already present in the run's source bundle. The acceptance-test
+   * overlay must be published as `modify`, not `add`, for a path the base
+   * repository already carries (the publisher rejects an `add` whose target
+   * exists), which happens as soon as an earlier run's acceptance file is
+   * merged and a later run reuses that criterion id.
+   */
+  readonly sourcePaths?: (input: {
+    readonly runId: string;
+    readonly sourceSnapshotDigest: string;
+  }) => ReadonlySet<string> | undefined;
   readonly resolveTestCommand?: (commandKey: string) => string;
   readonly publicationAuthority: WorkflowPublicationAuthority;
   readonly publisher: WorkflowPublisher;

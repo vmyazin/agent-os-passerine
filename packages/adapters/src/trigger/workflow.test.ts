@@ -618,6 +618,54 @@ describe('durable feature workflow', () => {
     });
   });
 
+  it('seals an acceptance file the base repository already carries as a modify', async () => {
+    const f = await fixture();
+    const authorized: Array<{ changeSet: unknown }> = [];
+    await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      // The operator merged an earlier run, so the base branch already has
+      // this path. Publishing it as an `add` would be rejected.
+      sourcePaths: () => new Set(['test/acceptance/status-test.test.mjs']),
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: {
+        authorize: async (request) => {
+          authorized.push({ changeSet: request.changeSet });
+          return { authorized: request };
+        },
+      },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+    expect(authorized[0]?.changeSet).toMatchObject({
+      version: 'change-set-v1',
+      changes: expect.arrayContaining([
+        expect.objectContaining({
+          operation: 'modify',
+          path: 'test/acceptance/status-test.test.mjs',
+        }),
+      ]),
+    });
+  });
+
   it('records localBranch/localRepositoryUrl (and no draftPullRequestUrl) when the publisher resolves a local-git result', async () => {
     const f = await fixture();
     const workflow = createDurableFeatureWorkflow({
