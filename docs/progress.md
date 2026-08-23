@@ -1,6 +1,6 @@
 # Build progress
 
-Last reviewed: 2026-08-18
+Last reviewed: 2026-08-23
 
 ## Completed foundation steps
 
@@ -126,13 +126,36 @@ against a local git repository (`project.localPath` +
 local-branch publication behind the existing seams, a guided setup-wizard
 mode, and no GitHub Apps required.
 
-Multi-project configuration is implemented (Phase 1 of
-[the multi-project design](./superpowers/specs/2026-08-20-multi-project-parallel-design.md)):
-project identity derives from the configuration binding, CAS preconditions
-and the latest-revision lookup are project-scoped in both repository
-adapters, and the configuration/setup/runs/inbox APIs, wizard, and CLI
-accept project selectors. Execution still serializes on the global agent
-session and single-slot Trigger queues until Phase 2.
+Multi-project operation is implemented — all five phases of
+[the multi-project design](./superpowers/specs/2026-08-20-multi-project-parallel-design.md):
+project-scoped configuration and CAS preconditions, per-project session
+leases and queues, multi-repo GitHub binding with split deployment/project
+readiness, a live projects UI with per-project filters, and budgets read
+from each project's configuration. One caveat stands: the per-project
+Trigger queues are exercised only against a mocked SDK boundary, so
+cross-project parallelism is unverified against real Trigger.dev.
+
+The Definition of Done is now executable and frozen. A feature run's
+specifier writes one `test/acceptance/<criterionId>.test.mjs` file per
+criterion into the hashed DoD artifact; the operator reads those files in
+the approval inbox before implementation starts; trusted code overlays them
+onto the implementer's change set (an implementer write under that prefix is
+a permanent error) and runs them in the sealed sandbox after the project's
+own suite. The implementer's tests still run — as evidence of what the
+author believed, not as the gate. This closes the failure the todo-app-02
+run demonstrated: five green steps and a published branch whose store handed
+out its internals, because the author wrote both the code and the tests that
+judged it. Approvals also have their own 24-hour TTL, and the 60-minute
+execution budget starts when the approval is consumed, so acceptance tests
+can be read overnight without spending the run's clock.
+
+Run chaining is designed but unbuilt
+([design](./superpowers/specs/2026-08-23-run-chaining-design.md)): today
+every run ingests the repository at a SHA bound to an applied configuration
+revision and publishes a draft PR the operator merges, so feature N+1 cannot
+see feature N's work until that merge lands. Until it does, a multi-feature
+body of work costs one operator merge between every pair of runs — the
+throughput ceiling for executing a project rather than a feature.
 
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.
