@@ -52,6 +52,18 @@ export interface CreateRunInput extends PersistenceDigests {
   readonly projectId: string;
   readonly title: string;
   readonly description: string;
+  /** A succeeded run in this project whose published commit this run builds on. */
+  readonly baseRunId?: string | undefined;
+}
+
+/**
+ * Where a chained run reads its source, derived by the control plane from
+ * the base run's own publication record -- never from caller input.
+ */
+export interface RunChain {
+  readonly baseRunId: string;
+  readonly baseBranch: string;
+  readonly baseCommitSha: string;
 }
 
 export interface CreateGoalRunInput extends CreateRunInput {
@@ -182,6 +194,26 @@ function safeStrings(
         .filter((item): item is string => typeof item === 'string')
         .map(redactText)
     : undefined;
+}
+
+/** The repository layer caps a list at 100; asking for more is not a page. */
+const ACTIVE_RUN_PAGE = 100;
+
+/** Chains bounded by config, or by the schema default when it says nothing. */
+const DEFAULT_CHAIN_MAX_DEPTH = 3;
+
+function chainDepthLimit(configRevision: ConfigRevision | undefined): number {
+  if (configRevision === undefined) return DEFAULT_CHAIN_MAX_DEPTH;
+  try {
+    return (
+      parseAgentOsConfig(configRevision.config).chains?.maxDepth ??
+      DEFAULT_CHAIN_MAX_DEPTH
+    );
+  } catch {
+    // An unreadable revision cannot widen the bound; a run whose config does
+    // not parse fails later on its own terms, not by chaining further.
+    return DEFAULT_CHAIN_MAX_DEPTH;
+  }
 }
 
 function fingerprint(value: unknown): string {
@@ -460,11 +492,24 @@ function goalDefinitions(
 function inputForRun(
   idempotencyKey: string,
   input: CreateRunInput | CreateGoalRunInput,
+  chain?: RunChain,
 ): JsonValue {
   return {
     idempotencyKey,
     title: input.title,
     description: input.description,
+    // The resolved edge, not the requested one: baseBranch and
+    // baseCommitSha come from the base run's publication record, so nothing
+    // downstream has to trust -- or re-derive -- what the caller asked for.
+    ...(chain === undefined
+      ? {}
+      : {
+          chain: {
+            baseRunId: chain.baseRunId,
+            baseBranch: chain.baseBranch,
+            baseCommitSha: chain.baseCommitSha,
+          },
+        }),
     provenance: {
       repositorySha: input.repositorySha,
       configDigest: input.configDigest,
@@ -1104,6 +1149,99 @@ export class ControlPlaneService {
     return this.createRun('goal', idempotencyKey, input);
   }
 
+  /**
+   * Resolves a chained run's base into the branch and commit it will build
+   * on. Everything here reads the base run's own records: the caller names
+   * a run, and the SHA comes from what this system published for it.
+   */
+  private async resolveChain(
+    input: CreateRunInput,
+    configRevision: ConfigRevision | undefined,
+  ): Promise<RunChain | undefined> {
+    const baseRunId = input.baseRunId;
+    if (baseRunId === undefined) return undefined;
+    const projectId = persistenceId('project', input.projectId);
+    const base = await this.repository.getRun(persistenceId('run', baseRunId));
+    if (
+      base === undefined ||
+      base.projectId !== projectId ||
+      base.status !== 'succeeded'
+    )
+      throw new ServiceError(
+        'base_run_unavailable',
+        'the base run must be a succeeded run in this project',
+        422,
+      );
+    const outcome = record(base.output);
+    const baseBranch = outcome?.publishedBranch;
+    const baseCommitSha = outcome?.publishedCommitSha;
+    if (typeof baseBranch !== 'string' || typeof baseCommitSha !== 'string')
+      throw new ServiceError(
+        'base_run_unpublished',
+        'the base run did not record a published branch and commit to build on',
+        422,
+      );
+    // Both runs must execute under one applied configuration. The caller's
+    // provenance already pins the revision; this says the base pinned the
+    // same one, so a configuration applied mid-chain ends the chain instead
+    // of silently changing what the next run runs under.
+    if (configRevision !== undefined) {
+      const snapshots = await this.repository.listConfigSnapshots(base.id, {
+        limit: 2,
+      });
+      if (
+        snapshots.length !== 1 ||
+        snapshots[0]!.configRevisionId !== configRevision.id
+      )
+        throw new ServiceError(
+          'chain_configuration_changed',
+          'the base run executed under a different configuration revision',
+          409,
+        );
+    }
+    for (const status of ['pending', 'running', 'waiting'] as const) {
+      // Per-project concurrency is one, so this page is short by
+      // construction; it is bounded anyway rather than trusting that.
+      const active = await this.repository.listRuns({
+        projectId,
+        status,
+        limit: ACTIVE_RUN_PAGE,
+      });
+      if (
+        active.some(
+          (candidate) =>
+            record(record(candidate.input)?.chain)?.baseRunId === baseRunId,
+        )
+      )
+        throw new ServiceError(
+          'chained_base_taken',
+          'another active run already builds on that base run',
+          409,
+        );
+    }
+    const maxDepth = chainDepthLimit(configRevision);
+    // Count the runs already in the chain, base included; the run being
+    // created is the one after them, so the chain it would produce is
+    // `existing + 1`. The walk is bounded by the limit it is checking.
+    let existing = 1;
+    let ancestor: string | undefined = record(record(base.input)?.chain)
+      ?.baseRunId as string | undefined;
+    while (typeof ancestor === 'string' && existing <= maxDepth) {
+      existing += 1;
+      const run = await this.repository.getRun(persistenceId('run', ancestor));
+      ancestor = record(record(run?.input)?.chain)?.baseRunId as
+        | string
+        | undefined;
+    }
+    if (existing + 1 > maxDepth)
+      throw new ServiceError(
+        'chain_too_deep',
+        `a chain may not exceed ${String(maxDepth)} runs`,
+        422,
+      );
+    return { baseRunId, baseBranch, baseCommitSha };
+  }
+
   private async createRun(
     pipeline: 'feature' | 'goal',
     idempotencyKey: string,
@@ -1112,7 +1250,6 @@ export class ControlPlaneService {
     const id = this.generateId('run', `${pipeline}:${idempotencyKey}`);
     const requestInput = JSON.parse(canonicalJsonValue(input)) as
       CreateRunInput | CreateGoalRunInput;
-    const runInput = inputForRun(idempotencyKey, requestInput);
     const now = this.clock();
     const projectRecord = await this.repository.getProject(
       persistenceId('project', requestInput.projectId),
@@ -1150,6 +1287,8 @@ export class ControlPlaneService {
           409,
         );
     }
+    const chain = await this.resolveChain(requestInput, configRevision);
+    const runInput = inputForRun(idempotencyKey, requestInput, chain);
     try {
       const created = await this.repository.createRunIdempotently(
         {

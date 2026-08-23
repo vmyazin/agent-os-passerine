@@ -140,6 +140,17 @@ export const GoalLimitsSchema = z
   })
   .strict();
 
+/**
+ * How far a chain of runs may extend before the operator is asking for a
+ * project rather than a feature. Optional so every applied revision keeps
+ * parsing; a config that never mentions chains gets the default bound.
+ */
+export const ChainLimitsSchema = z
+  .object({
+    maxDepth: PositiveInteger.min(1).max(10).default(3),
+  })
+  .strict();
+
 export const RuntimeRoutingSchema = z
   .object({
     provider: Identifier,
@@ -200,6 +211,7 @@ export const AgentOsConfigSchema = z
     policies: PatchPolicyConfigSchema,
     budgets: BudgetConfigSchema,
     goals: GoalLimitsSchema,
+    chains: ChainLimitsSchema.optional(),
     runtime: RuntimeRoutingSchema,
     verification: VerificationConfigSchema.optional(),
   })

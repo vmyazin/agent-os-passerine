@@ -16,7 +16,14 @@ export const createRunSchema = z
     projectId: id,
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().min(1).max(10_000),
+    /**
+     * The applied configuration revision's SHA -- required for chained runs
+     * too. A chain redirects where the run reads its source from; it does
+     * not change which configuration the run executes under.
+     */
     repositorySha: z.string().regex(/^[a-f0-9]{40}$/i),
+    /** A succeeded run in this project whose published commit this run builds on. */
+    baseRunId: id.optional(),
     configDigest: digest,
     modelDigest: digest,
     promptDigest: digest,

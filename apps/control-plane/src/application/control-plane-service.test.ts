@@ -1642,6 +1642,226 @@ runtime: { provider: local }
   });
 }
 
+describe('run chaining', () => {
+  const publishedRun = async (
+    repository: InMemoryDomainRepository,
+    id: string,
+    output: Record<string, unknown>,
+    overrides: { readonly projectId?: string; readonly status?: 'succeeded' | 'failed' } = {},
+  ) => {
+    const runId = persistenceId('run', id);
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', overrides.projectId ?? 'project-1'),
+      pipeline: 'feature',
+      status: overrides.status ?? 'succeeded',
+      input: { idempotencyKey: id, title: id, description: id },
+      output: output as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return runId;
+  };
+
+  const project = async (repository: InMemoryDomainRepository, id = 'project-1') => {
+    await repository.createProject({
+      id: persistenceId('project', id),
+      name: id,
+      createdAt: now,
+      updatedAt: now,
+    });
+  };
+
+  const publication = {
+    publishedBranch: 'agentos/run-base-abcdef01',
+    publishedCommitSha: 'c'.repeat(40),
+  };
+
+  it('records the base branch and commit from the base run, not from the caller', async () => {
+    const repository = new InMemoryDomainRepository();
+    await project(repository);
+    await publishedRun(repository, 'base-1', publication);
+
+    const chained = await createService(repository).createFeatureRun('chain-1', {
+      ...feature,
+      baseRunId: 'base-1',
+    });
+
+    const stored = await repository.getRun(persistenceId('run', chained.id));
+    expect(stored?.input).toMatchObject({
+      chain: {
+        baseRunId: 'base-1',
+        baseBranch: publication.publishedBranch,
+        baseCommitSha: publication.publishedCommitSha,
+      },
+      // The chain redirects where source is read, never which configuration
+      // the run executes under.
+      provenance: { repositorySha: 'a'.repeat(40) },
+    });
+  });
+
+  it('rejects a base that is missing, unfinished, or another project\'s', async () => {
+    const repository = new InMemoryDomainRepository();
+    await project(repository);
+    await project(repository, 'project-2');
+    await publishedRun(repository, 'failed-base', publication, { status: 'failed' });
+    await publishedRun(repository, 'other-project-base', publication, {
+      projectId: 'project-2',
+    });
+    const service = createService(repository);
+
+    for (const baseRunId of ['no-such-run', 'failed-base', 'other-project-base']) {
+      await expect(
+        service.createFeatureRun(`chain-${baseRunId}`, { ...feature, baseRunId }),
+      ).rejects.toMatchObject({ code: 'base_run_unavailable', status: 422 });
+    }
+  });
+
+  it('rejects a base that never recorded where it published', async () => {
+    const repository = new InMemoryDomainRepository();
+    await project(repository);
+    // A draft-PR publisher that reported no commitSha: chainable would mean
+    // guessing which commit the PR points at.
+    await publishedRun(repository, 'base-2', {
+      status: 'succeeded',
+      draftPullRequestUrl: 'https://github.test/pr/1',
+    });
+
+    await expect(
+      createService(repository).createFeatureRun('chain-2', {
+        ...feature,
+        baseRunId: 'base-2',
+      }),
+    ).rejects.toMatchObject({ code: 'base_run_unpublished', status: 422 });
+  });
+
+  it('rejects a second active run building on the same base', async () => {
+    const repository = new InMemoryDomainRepository();
+    await project(repository);
+    await publishedRun(repository, 'base-3', publication);
+    const service = createService(repository);
+    await service.createFeatureRun('chain-3a', { ...feature, baseRunId: 'base-3' });
+
+    await expect(
+      service.createFeatureRun('chain-3b', { ...feature, baseRunId: 'base-3' }),
+    ).rejects.toMatchObject({ code: 'chained_base_taken', status: 409 });
+  });
+
+  it('ends the chain when a configuration is applied between the runs', async () => {
+    const repository = new InMemoryDomainRepository();
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce('b'.repeat(40))
+      .mockResolvedValueOnce('c'.repeat(40));
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve },
+    );
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+    const first = await service.applyConfiguration('chain-cfg-1', {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const base = await service.createFeatureRun('chain-cfg-base', {
+      projectId: first.projectId,
+      title: 'Base',
+      description: 'The run the chain builds on.',
+      ...first.provenance,
+    });
+    await repository.transitionRun(
+      persistenceId('run', base.id),
+      ['pending'],
+      {
+        status: 'succeeded',
+        output: { status: 'succeeded', ...publication },
+        updatedAt: now,
+        completedAt: now,
+      },
+      0,
+    );
+
+    // The operator applies a new configuration; the base ran under the old
+    // one, so the chain ends here rather than quietly changing what the next
+    // run executes under.
+    const second = await service.applyConfiguration('chain-cfg-2', {
+      canonicalConfig: canonicalConfigJson({
+        ...config,
+        budgets: { ...config.budgets, dailyMicrodollars: 3 },
+      }),
+      digest: canonicalConfigHash({
+        ...config,
+        budgets: { ...config.budgets, dailyMicrodollars: 3 },
+      }),
+      expectedRevision: first.revision,
+      expectedDigest: first.digest,
+    });
+
+    await expect(
+      service.createFeatureRun('chain-cfg-next', {
+        projectId: second.projectId,
+        title: 'Next',
+        description: 'Builds on the base.',
+        ...second.provenance,
+        baseRunId: base.id,
+      }),
+    ).rejects.toMatchObject({
+      code: 'chain_configuration_changed',
+      status: 409,
+    });
+  });
+
+  it('rejects a chain deeper than the bound', async () => {
+    const repository = new InMemoryDomainRepository();
+    await project(repository);
+    await publishedRun(repository, 'deep-1', publication);
+    for (const [id, ancestor] of [
+      ['deep-2', 'deep-1'],
+      ['deep-3', 'deep-2'],
+    ] as const) {
+      await repository.createRun({
+        id: persistenceId('run', id),
+        projectId: persistenceId('project', 'project-1'),
+        pipeline: 'feature',
+        status: 'succeeded',
+        input: {
+          idempotencyKey: id,
+          title: id,
+          description: id,
+          chain: { baseRunId: ancestor, ...publication },
+        },
+        output: { status: 'succeeded', ...publication },
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // deep-1 -> deep-2 -> deep-3 is already three runs; a fourth exceeds the
+    // default bound.
+    await expect(
+      createService(repository).createFeatureRun('chain-deep', {
+        ...feature,
+        baseRunId: 'deep-3',
+      }),
+    ).rejects.toMatchObject({ code: 'chain_too_deep', status: 422 });
+  });
+});
+
 describe('multi-project configuration', () => {
   it('creates one project per binding and keeps their revision chains independent', async () => {
     const repository = new InMemoryDomainRepository();
