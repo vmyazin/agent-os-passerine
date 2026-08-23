@@ -10,6 +10,7 @@ import {
   isoTimestamp,
   parseAgentOsConfig,
   persistenceId,
+  type Approval,
   type ApprovalId,
   type DomainRepository,
   type JsonValue,
@@ -82,17 +83,7 @@ const TERMINAL = new Set([
 async function specDodApproval(
   repository: DomainRepository,
   runId: WorkflowRunId,
-): Promise<
-  | {
-      readonly id: ApprovalId;
-      readonly status: 'pending' | 'consumed';
-      readonly scope: string;
-      readonly fingerprint: string;
-      readonly expiresAt: string;
-      readonly consumedAt?: string;
-    }
-  | undefined
-> {
+): Promise<Approval | undefined> {
   const pending = await repository.listApprovals(runId, {
     status: 'pending',
     limit: 100,
@@ -297,7 +288,21 @@ export async function reconcileWorkflowOutbox(
           const live = children.filter((child) => !TERMINAL.has(child.status));
           if (live.length === 0) {
             const cap = await workflowTimeoutMs(repository, run);
-            if (nowMs >= Date.parse(run.createdAt) + cap) {
+            // A child that sat overnight on its approval must not hand the
+            // parent an already-expired clock. The coordinator's budget is
+            // time it spent coordinating: it starts when the last child
+            // finished, or at creation when it never dispatched one.
+            const lastChildCompletion = children.reduce(
+              (latest, child) =>
+                child.completedAt === undefined
+                  ? latest
+                  : Math.max(latest, Date.parse(child.completedAt)),
+              Number.NEGATIVE_INFINITY,
+            );
+            const startMs = Number.isFinite(lastChildCompletion)
+              ? lastChildCompletion
+              : Date.parse(run.createdAt);
+            if (nowMs >= startMs + cap) {
               failCode = 'workflow_deadline_exceeded';
             }
           }

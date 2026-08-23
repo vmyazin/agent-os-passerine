@@ -479,6 +479,64 @@ describe('workflow outbox reconciliation', () => {
     });
   });
 
+  it('starts the goal coordinator deadline at the last child completion', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'p-late-child');
+    const parentRunId = persistenceId('run', 'parent-late-child');
+    const childRunId = deterministicGoalChildRunId(parentRunId, 1);
+    const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2h ago
+    await repository.createProject({
+      id: projectId,
+      name: 'P',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    await repository.createRun({
+      id: parentRunId,
+      projectId,
+      pipeline: 'goal',
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    });
+    // The child waited on its 24h approval and finished ten minutes ago.
+    await repository.createRun({
+      id: childRunId,
+      projectId,
+      pipeline: 'feature',
+      status: 'succeeded',
+      createdAt,
+      updatedAt: isoTimestamp('2026-08-17T11:50:00.000Z'),
+      completedAt: isoTimestamp('2026-08-17T11:50:00.000Z'),
+    });
+    await repository.appendGoalProgress({
+      id: persistenceId('goalProgress', `goal:${parentRunId}:step:1:child`),
+      runId: parentRunId,
+      step: 1,
+      status: 'pending',
+      payload: { version: 'goal-child-attempt-v1', childRunId },
+      recordedAt: now,
+    });
+
+    const outbox: WorkflowDispatchOutbox = {
+      requestStart: async () => undefined,
+      requestApprovalResume: async () => undefined,
+    };
+
+    await reconcileWorkflowOutbox(repository, outbox, () => now);
+    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({
+      status: 'running',
+    });
+
+    // One hour after that child finished, the coordinator is out of budget.
+    const later = isoTimestamp('2026-08-17T12:51:00.000Z');
+    await reconcileWorkflowOutbox(repository, outbox, () => later);
+    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'workflow_deadline_exceeded' },
+    });
+  });
+
   it('cancels every recorded active child of a cancelled goal', async () => {
     const repository = new InMemoryDomainRepository();
     const projectId = persistenceId('project', 'goal-cancel-project');
