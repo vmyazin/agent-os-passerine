@@ -34,6 +34,7 @@ const stringFlags = [
   'environment-digest',
   'policy-digest',
   'idempotency-key',
+  'base-run',
   'criteria-json',
   'scope-hash',
   'reply',
@@ -125,7 +126,11 @@ function runStart(
     'environment-digest',
     'policy-digest',
     'idempotency-key',
-    ...(kind === 'goal.start' ? (['criteria-json'] as const) : []),
+    // Only a feature can chain: a goal dispatches its own children, and
+    // chaining those is a separate decision.
+    ...(kind === 'goal.start'
+      ? (['criteria-json'] as const)
+      : (['base-run'] as const)),
   ]);
   const repositorySha = required(values, 'repository-sha', label, 40);
   if (!/^[a-f0-9]{40}$/i.test(repositorySha)) {
@@ -148,6 +153,9 @@ function runStart(
     environmentDigest: required(values, 'environment-digest', label, 256),
     policyDigest: required(values, 'policy-digest', label, 256),
     idempotencyKey: required(values, 'idempotency-key', label, 200),
+    ...(typeof values['base-run'] === 'string'
+      ? { baseRunId: assertId(values['base-run'], 'base run id') }
+      : {}),
   };
   return kind === 'goal.start'
     ? {

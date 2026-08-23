@@ -19,7 +19,7 @@ Usage:
   agentos init [--config PATH] [--force]
   agentos config validate|plan [--config PATH]
   agentos config apply [--config PATH] --idempotency-key KEY
-  agentos feature start --project-id ID --title TEXT --description TEXT --repository-sha SHA --config-digest DIGEST --model-digest DIGEST --prompt-digest DIGEST --environment-digest DIGEST --policy-digest DIGEST --idempotency-key KEY
+  agentos feature start --project-id ID --title TEXT --description TEXT --repository-sha SHA --config-digest DIGEST --model-digest DIGEST --prompt-digest DIGEST --environment-digest DIGEST --policy-digest DIGEST --idempotency-key KEY [--base-run RUN_ID]
   agentos goal start --project-id ID --title TEXT --description TEXT --repository-sha SHA --config-digest DIGEST --model-digest DIGEST --prompt-digest DIGEST --environment-digest DIGEST --policy-digest DIGEST --criteria-json JSON --idempotency-key KEY
   agentos goal show ID
   agentos runs list

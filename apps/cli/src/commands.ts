@@ -30,6 +30,9 @@ function runBody(
     promptDigest: command.promptDigest,
     environmentDigest: command.environmentDigest,
     policyDigest: command.policyDigest,
+    ...(command.baseRunId === undefined
+      ? {}
+      : { baseRunId: command.baseRunId }),
     ...(command.kind === 'goal.start' ? { criteria: command.criteria } : {}),
   };
 }

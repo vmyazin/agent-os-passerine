@@ -15,6 +15,8 @@ export interface RunStartOptions extends GlobalOptions {
   readonly environmentDigest: string;
   readonly policyDigest: string;
   readonly idempotencyKey: string;
+  /** A succeeded run in this project whose published commit this run builds on. */
+  readonly baseRunId?: string | undefined;
 }
 
 export interface GoalCommandCriterion {

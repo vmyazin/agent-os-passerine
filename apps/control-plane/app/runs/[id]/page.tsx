@@ -122,6 +122,20 @@ export default async function RunPage({
           </ol>
         )}
       </section>
+      {run.chain === undefined ? null : (
+        <section aria-labelledby="chain-title">
+          <h2 id="chain-title">Builds on</h2>
+          <p>
+            This run started from{' '}
+            <a href={`/runs/${run.chain.baseRunId}`}>
+              run {run.chain.baseRunId}
+            </a>
+            , at <code>{run.chain.baseCommitSha.slice(0, 12)}</code> on{' '}
+            <code>{run.chain.baseBranch}</code> — not from the default
+            branch. Merging this run&apos;s branch takes that work with it.
+          </p>
+        </section>
+      )}
       {run.outcome === undefined ? null : (
         <section aria-labelledby="outcome-title">
           <h2 id="outcome-title">Outcome</h2>

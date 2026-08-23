@@ -564,6 +564,12 @@ export interface RunProjection extends PersistenceDigests {
     readonly localBranch?: string;
     readonly localRepositoryUrl?: string;
   };
+  /** Set when this run was started on top of an earlier run's publication. */
+  readonly chain?: {
+    readonly baseRunId: string;
+    readonly baseBranch: string;
+    readonly baseCommitSha: string;
+  };
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
   readonly steps: readonly {
@@ -622,6 +628,27 @@ function safeHttpUrl(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The chain edge as the operator needs to read it. It comes from the
+ * immutable run input, which the control plane wrote from the base run's
+ * own publication record, so nothing agent-influenced reaches the page.
+ */
+function projectRunChain(
+  value: JsonValue | undefined,
+): RunProjection['chain'] {
+  const chain = record(record(value)?.chain);
+  const baseRunId = chain?.baseRunId;
+  const baseBranch = chain?.baseBranch;
+  const baseCommitSha = chain?.baseCommitSha;
+  if (
+    typeof baseRunId !== 'string' ||
+    typeof baseBranch !== 'string' ||
+    typeof baseCommitSha !== 'string'
+  )
+    return undefined;
+  return { baseRunId, baseBranch, baseCommitSha };
 }
 
 function projectRunOutcome(
@@ -1989,6 +2016,7 @@ export class ControlPlaneService {
     const safeInput = projectRunInput(run.input);
     const safeError = projectRunError(run.error);
     const outcome = projectRunOutcome(run.output);
+    const chain = projectRunChain(run.input);
     return {
       id: run.id,
       projectId: run.projectId,
@@ -1998,6 +2026,7 @@ export class ControlPlaneService {
       ...(safeError === undefined ? {} : { error: safeError }),
       ...(goal === undefined ? {} : { goal }),
       ...(outcome === undefined ? {} : { outcome }),
+      ...(chain === undefined ? {} : { chain }),
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       ...provenance(run),

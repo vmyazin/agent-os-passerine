@@ -86,6 +86,20 @@ describe('parseCommand', () => {
     expect(parseCommand(['--version'])).toMatchObject({ kind: 'version' });
   });
 
+  it('carries --base-run into a feature start, and refuses it for a goal', () => {
+    expect(
+      parseCommand(['feature', 'start', ...runFlags, '--base-run', 'run_1']),
+    ).toMatchObject({ kind: 'feature.start', baseRunId: 'run_1' });
+    expect(
+      parseCommand(['feature', 'start', ...runFlags]),
+    ).not.toHaveProperty('baseRunId');
+    // A goal dispatches its own children; chaining those is a separate
+    // decision, so the flag is not silently accepted there.
+    expect(() =>
+      parseCommand(['goal', 'start', ...goalFlags, '--base-run', 'run_1']),
+    ).toThrow();
+  });
+
   it.each([
     [['init'], 'init'],
     [['config', 'validate'], 'config.validate'],
