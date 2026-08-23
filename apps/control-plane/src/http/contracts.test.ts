@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { createGoalRunSchema, allowedQuery } from './contracts';
+import {
+  createGoalRunSchema,
+  createRunSchema,
+  allowedQuery,
+  runProjectionSchema,
+} from './contracts';
 
 const request = {
   projectId: 'project-1',
@@ -47,6 +52,37 @@ describe('control-plane HTTP contracts', () => {
         })),
       }).success,
     ).toBe(false);
+  });
+
+  it('carries a chain edge in and back out again', () => {
+    expect(
+      createRunSchema.safeParse({ ...request, baseRunId: 'run_1' }).success,
+    ).toBe(true);
+
+    // The route validates its own response, so a projection field missing
+    // from this schema is a 500 that no service-level test can see.
+    const projection = {
+      id: 'run_2',
+      projectId: 'project-1',
+      pipeline: 'feature',
+      status: 'running' as const,
+      chain: {
+        baseRunId: 'run_1',
+        baseBranch: 'agentos/run-1-abcdef01',
+        baseCommitSha: 'd'.repeat(40),
+      },
+      createdAt: '2026-08-17T12:00:00.000Z',
+      updatedAt: '2026-08-17T12:00:00.000Z',
+      repositorySha: 'a'.repeat(40),
+      configDigest: 'config',
+      modelDigest: 'model',
+      promptDigest: 'prompt',
+      environmentDigest: 'environment',
+      policyDigest: 'policy',
+      steps: [],
+      timeline: [],
+    };
+    expect(runProjectionSchema.safeParse(projection).success).toBe(true);
   });
 
   describe('allowedQuery', () => {

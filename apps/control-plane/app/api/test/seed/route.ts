@@ -158,6 +158,50 @@ export async function POST(request: Request): Promise<Response> {
         new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       ),
     });
+  // A chained pair, so the run page's "Builds on" section has something to
+  // show: a succeeded run that recorded where it published, and a run
+  // started on top of it.
+  const chainBaseId = persistenceId('run', 'e2e-chain-base');
+  const chainedId = persistenceId('run', 'e2e-chain-next');
+  const basePublication = {
+    publishedBranch: 'agentos/run-e2e-chain-base-1f4a9c22',
+    publishedCommitSha: 'd4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f607',
+  };
+  if (!(await repository.getRun(chainBaseId)))
+    await repository.createRun({
+      id: chainBaseId,
+      projectId,
+      pipeline: 'feature',
+      status: 'succeeded',
+      input: { title: 'Add the todo store', description: 'The first feature.' },
+      output: {
+        status: 'succeeded',
+        localBranch: basePublication.publishedBranch,
+        localRepositoryUrl: 'file:///workspaces/todo-app-02',
+        ...basePublication,
+      },
+      createdAt: at,
+      updatedAt: at,
+      completedAt: at,
+    });
+  if (!(await repository.getRun(chainedId)))
+    await repository.createRun({
+      id: chainedId,
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      input: {
+        title: 'List todos by due date',
+        description: 'Builds on the todo store.',
+        chain: {
+          baseRunId: 'e2e-chain-base',
+          baseBranch: basePublication.publishedBranch,
+          baseCommitSha: basePublication.publishedCommitSha,
+        },
+      },
+      createdAt: at,
+      updatedAt: at,
+    });
   const messageId = persistenceId('inboxMessage', 'e2e-message');
   if (!(await repository.getInboxMessage(messageId)))
     await repository.createInboxMessage({

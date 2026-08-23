@@ -223,6 +223,14 @@ export const runProjectionSchema = z
       })
       .strict()
       .optional(),
+    chain: z
+      .object({
+        baseRunId: id,
+        baseBranch: z.string().max(512),
+        baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/i),
+      })
+      .strict()
+      .optional(),
     createdAt: z.string(),
     updatedAt: z.string(),
     repositorySha: z.string(),
