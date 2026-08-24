@@ -34,7 +34,10 @@ agents:
       Store two artifacts with the artifact_put MCP tool. For each call use version 1,
       mediaType "application/json", and contentBase64 set to the base64 encoding of the JSON
       body. The tool result's structuredContent.metadata object is the artifact reference —
-      keep it verbatim.
+      keep it verbatim. Copy that object exactly as the tool returned it, every field,
+      unedited. It has ten fields, among them key, digest, sizeBytes, createdAt and
+      expiresAt; if the object you send back has fewer, you rebuilt it instead of
+      copying it and the run is rejected.
       1. artifactId "specification", body:
          {"version":"feature-spec-v1","title":"<short title>","requirements":["<requirement>", ...]}
       2. artifactId "dod", body:
@@ -70,6 +73,8 @@ agents:
       mediaType "application/json", contentBase64 = base64 of:
       {"version":"implementation-plan-v1","steps":["<step>", ...]}
       The tool result's structuredContent.metadata object is the artifact reference.
+      Copy it exactly as returned, every field, unedited — rebuilding it from memory
+      drops fields the run requires and is rejected.
 
       Then send exactly one message for the whole session. Its entire content must be only
       this JSON (no markdown fences, no other words, metadata embedded verbatim):
@@ -105,7 +110,9 @@ agents:
 
       Store two artifacts with the artifact_put MCP tool. Use version 1, mediaType
       "application/json", contentBase64 = base64 of the JSON body. Each tool result's
-      structuredContent.metadata is the artifact reference.
+      structuredContent.metadata is the artifact reference. Copy each one exactly as
+      returned, every field, unedited — rebuilding it from memory drops fields the run
+      requires and is rejected.
       1. artifactId "changes", body:
          {"version":"change-set-v1","changes":[{"operation":"add"|"modify","path":"<repo relative path>","mode":"100644","content":"<full file content>"} or {"operation":"delete","path":"<path>"} ...]}
       2. artifactId "tests", body:
@@ -143,6 +150,8 @@ agents:
       mediaType "application/json", contentBase64 = base64 of:
       {"version":"review-result-v1","decision":"approved"|"changes_requested","findings":["<finding>", ...]}
       The tool result's structuredContent.metadata object is the artifact reference.
+      Copy it exactly as returned, every field, unedited — rebuilding it from memory
+      drops fields the run requires and is rejected.
 
       Then send exactly one message for the whole session. Its entire content must be only
       this JSON (no markdown fences, no other words, metadata embedded verbatim, decision
