@@ -1,7 +1,16 @@
 // packages/core/src/acceptance-tests.ts
+import path from 'node:path';
+
+import { initSync, parse } from 'es-module-lexer';
+
 import { normalizeRepositoryPathSyntax } from './publication.js';
 
 export const ACCEPTANCE_TEST_PREFIX = 'test/acceptance/';
+const ACCEPTANCE_IMPORT_SAFETY_ERROR =
+  'acceptance test import resolves outside repository';
+const REPOSITORY_SENTINEL_ROOT = '/repository';
+
+initSync();
 
 export interface AcceptanceTestFile {
   readonly path: string;
@@ -64,6 +73,53 @@ export function acceptanceTestsPairingError(
     return `acceptance test pairing: unexpected ${[...remaining].join(', ')}`;
   }
   return undefined;
+}
+
+function isAbsoluteFilesystemSpecifier(specifier: string): boolean {
+  return (
+    path.posix.isAbsolute(specifier) ||
+    /^[A-Za-z]:[\\/]/u.test(specifier) ||
+    specifier.startsWith('\\\\') ||
+    specifier.startsWith('file:')
+  );
+}
+
+function resolvesOutsideRepository(
+  filePath: string,
+  specifier: string,
+): boolean {
+  if (isAbsoluteFilesystemSpecifier(specifier)) return true;
+  if (!specifier.startsWith('./') && !specifier.startsWith('../')) return false;
+  const importingFile = path.posix.resolve(REPOSITORY_SENTINEL_ROOT, filePath);
+  const target = path.posix.resolve(
+    path.posix.dirname(importingFile),
+    specifier,
+  );
+  const relative = path.posix.relative(REPOSITORY_SENTINEL_ROOT, target);
+  return (
+    relative === '..' ||
+    relative.startsWith('../') ||
+    path.posix.isAbsolute(relative)
+  );
+}
+
+export function acceptanceTestImportSafetyError(input: {
+  readonly path: string;
+  readonly content: string;
+}): string | undefined {
+  try {
+    const [imports] = parse(input.content, input.path);
+    return imports.some(
+      (entry) =>
+        entry.n !== undefined && resolvesOutsideRepository(input.path, entry.n),
+    )
+      ? ACCEPTANCE_IMPORT_SAFETY_ERROR
+      : undefined;
+  } catch {
+    // The schema boundary must fail closed without persisting parser details or
+    // any agent-authored source text in the run error.
+    return ACCEPTANCE_IMPORT_SAFETY_ERROR;
+  }
 }
 
 export function sealChangeSet(

@@ -40,7 +40,9 @@ describe('Trigger SDK boundary', () => {
   it('starts the versioned task with a stable global idempotency key', async () => {
     const { sdk, calls } = fakeSdk();
     const dispatcher = createTriggerWorkflowDispatcher(sdk);
-    await expect(dispatcher.startFeature('run-1', 'project-1')).resolves.toEqual({
+    await expect(
+      dispatcher.startFeature('run-1', 'project-1'),
+    ).resolves.toEqual({
       externalRunRef: 'trigger-run-safe-ref',
     });
     expect(calls).toEqual([
@@ -83,6 +85,46 @@ describe('Trigger SDK boundary', () => {
         ],
       },
     ]);
+  });
+
+  it('uses a fresh deterministic key only for retry attempt 1', async () => {
+    const { sdk, calls } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    await dispatcher.startFeature('run-1', 'project-1', 1);
+    await dispatcher.startGoal('goal-1', 'project-2', 1);
+
+    expect(calls).toEqual([
+      expect.objectContaining({
+        method: 'triggerTask',
+        args: expect.arrayContaining([
+          expect.objectContaining({
+            idempotencyKey: 'feature-workflow:run-1:v1:retry:1',
+          }),
+        ]),
+      }),
+      expect.objectContaining({
+        method: 'triggerTask',
+        args: expect.arrayContaining([
+          expect.objectContaining({
+            idempotencyKey: 'goal-workflow:goal-1:v1:retry:1',
+          }),
+        ]),
+      }),
+    ]);
+  });
+
+  it('exposes the SDK boundary best-effort run state', async () => {
+    const { sdk, calls } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    await expect(dispatcher.retrieve('trigger-run-safe-ref')).resolves.toEqual({
+      status: 'QUEUED',
+    });
+    expect(calls).toContainEqual({
+      method: 'retrieveRun',
+      args: ['trigger-run-safe-ref'],
+    });
   });
 
   it('never sends a queue name Trigger has not been told about', async () => {

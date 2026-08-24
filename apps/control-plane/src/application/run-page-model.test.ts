@@ -8,9 +8,28 @@ const notFound = vi.hoisted(() =>
 
 vi.mock('next/navigation', () => ({ notFound }));
 
-import { loadRunPageModel } from './run-page-model';
+import { loadRunPageModel, newestTriggerExternalRef } from './run-page-model';
 
 describe('run detail page model', () => {
+  it('diagnoses the newest persisted Trigger attempt', () => {
+    expect(
+      newestTriggerExternalRef([
+        {
+          kind: 'trigger-workflow-start',
+          status: 'succeeded',
+          externalRef: 'trigger-primary',
+          updatedAt: '2026-08-24T12:00:00.000Z',
+        },
+        {
+          kind: 'trigger-workflow-start',
+          status: 'succeeded',
+          externalRef: 'trigger-retry-1',
+          updatedAt: '2026-08-24T12:01:00.000Z',
+        },
+      ]),
+    ).toBe('trigger-retry-1');
+  });
+
   it('rejects invalid path identifiers before repository access', async () => {
     const getRun = vi.fn();
     await expect(loadRunPageModel('../secret', { getRun })).rejects.toThrow(

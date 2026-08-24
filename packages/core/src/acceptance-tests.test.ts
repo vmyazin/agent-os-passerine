@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ACCEPTANCE_TEST_PREFIX,
   AcceptancePathReservedError,
+  acceptanceTestImportSafetyError,
   acceptanceTestPathForCriterion,
   acceptanceTestsPairingError,
   isAcceptanceTestPath,
@@ -13,9 +14,9 @@ import {
 describe('acceptance test paths', () => {
   it('reserves the prefix case-insensitively', () => {
     expect(ACCEPTANCE_TEST_PREFIX).toBe('test/acceptance/');
-    expect(isAcceptanceTestPath('test/acceptance/list-deep-copy.test.mjs')).toBe(
-      true,
-    );
+    expect(
+      isAcceptanceTestPath('test/acceptance/list-deep-copy.test.mjs'),
+    ).toBe(true);
     expect(isAcceptanceTestPath('TEST/ACCEPTANCE/x.test.mjs')).toBe(true);
     expect(isAcceptanceTestPath('test/todo-store.test.mjs')).toBe(false);
     expect(isAcceptanceTestPath('src/test/acceptance/x.test.mjs')).toBe(false);
@@ -26,20 +27,53 @@ describe('acceptance test paths', () => {
       'test/acceptance/list-deep-copy.test.mjs',
     );
     expect(
-      acceptanceTestsPairingError(['list-deep-copy'], [
-        'test/acceptance/list-deep-copy.test.mjs',
-      ]),
+      acceptanceTestsPairingError(
+        ['list-deep-copy'],
+        ['test/acceptance/list-deep-copy.test.mjs'],
+      ),
     ).toBeUndefined();
     expect(
-      acceptanceTestsPairingError(['list-deep-copy'], [
-        'test/acceptance/other.test.mjs',
-      ]),
+      acceptanceTestsPairingError(
+        ['list-deep-copy'],
+        ['test/acceptance/other.test.mjs'],
+      ),
     ).toMatch(/pairing/);
     expect(
-      acceptanceTestsPairingError(['a', 'b'], [
-        'test/acceptance/a.test.mjs',
-      ]),
+      acceptanceTestsPairingError(['a', 'b'], ['test/acceptance/a.test.mjs']),
     ).toMatch(/pairing/);
+  });
+});
+
+describe('acceptance test import safety', () => {
+  const path = 'test/acceptance/list-deep-copy.test.mjs';
+
+  it.each([
+    "import { list } from '../../../src/todo-store.mjs';",
+    "import '../../../src/setup.mjs';",
+    "export { list } from '../../../src/todo-store.mjs';",
+    "await import('../../../src/todo-store.mjs');",
+    "import '/tmp/todo-store.mjs';",
+    String.raw`import 'C:\\tmp\\todo-store.mjs';`,
+  ])(
+    'rejects an import that can address outside the repository: %s',
+    (content) => {
+      expect(acceptanceTestImportSafetyError({ path, content })).toBe(
+        'acceptance test import resolves outside repository',
+      );
+    },
+  );
+
+  it.each([
+    "import { list } from '../../src/todo-store.mjs';",
+    "import '../../src/setup.mjs';",
+    "export { list } from '../../src/todo-store.mjs';",
+    "await import('../../src/todo-store.mjs');",
+    "import { test } from 'node:test';",
+    "import helpers from '@agentos/test-helpers';",
+    "// import '../../../src/comment-only.mjs';\nexport {};",
+    'const example = "import \'../../../src/string-only.mjs\'";\nexport { example };',
+  ])('allows a non-escaping module reference: %s', (content) => {
+    expect(acceptanceTestImportSafetyError({ path, content })).toBeUndefined();
   });
 });
 

@@ -117,6 +117,9 @@ importers:
 
   packages/core:
     dependencies:
+      es-module-lexer:
+        specifier: 2.3.1
+        version: 2.3.1
       yaml:
         specifier: 2.9.0
         version: 2.9.0

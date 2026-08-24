@@ -174,6 +174,53 @@ describe('definitionOfDoneSchema', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('rejects the live repository-escaping import before approval', () => {
+    const parsed = definitionOfDoneSchema.safeParse({
+      ...valid,
+      acceptanceTests: [
+        {
+          path: 'test/acceptance/list-deep-copy.test.mjs',
+          mode: '100644',
+          content:
+            "import { list } from '../../../src/todo-store.mjs';\n" +
+            "import { test } from 'node:test';\n",
+        },
+      ],
+    });
+
+    expect(parsed.success).toBe(false);
+    const issues = parsed.success ? [] : parsed.error.issues;
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ['acceptanceTests', 0, 'content'],
+        }),
+      ]),
+    );
+    const message = artifactSchemaFailureMessage(
+      { stepId: 'specification', artifactId: 'dod' },
+      issues,
+    );
+    expect(message).toContain('acceptanceTests.0.content');
+    expect(message).not.toContain('../../../src/todo-store.mjs');
+    expect(message).not.toContain('import { list }');
+  });
+
+  it('accepts the corrected repository-internal import', () => {
+    expect(
+      definitionOfDoneSchema.safeParse({
+        ...valid,
+        acceptanceTests: [
+          {
+            path: 'test/acceptance/list-deep-copy.test.mjs',
+            mode: '100644',
+            content: "import { list } from '../../src/todo-store.mjs';\n",
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe('artifactSchemaFailureMessage', () => {
@@ -210,10 +257,9 @@ describe('artifactSchemaFailureMessage', () => {
 
   it('still names the artifact when the failure has no path', () => {
     expect(
-      artifactSchemaFailureMessage(
-        { stepId: 'review', artifactId: 'review' },
-        [{ path: [] }],
-      ),
+      artifactSchemaFailureMessage({ stepId: 'review', artifactId: 'review' }, [
+        { path: [] },
+      ]),
     ).toBe(
       'the review step\'s "review" artifact did not match its required schema',
     );

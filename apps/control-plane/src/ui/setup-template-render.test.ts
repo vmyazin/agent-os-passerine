@@ -1,4 +1,6 @@
 // src/ui/setup-template-render.test.ts
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { renderSetupConfig } from './setup-template-render';
@@ -6,16 +8,37 @@ import { SETUP_CONFIG_TEMPLATE } from './setup-template';
 import { SETUP_CONFIG_TEMPLATE_LOCAL } from './setup-template-local';
 
 describe('renderSetupConfig', () => {
+  it('keeps the acceptance import example identical in every prompt source', () => {
+    const canonical = readFileSync(
+      new URL('../../../../agentos/passerine.yaml', import.meta.url),
+      'utf8',
+    );
+    const example =
+      'src/example.mjs is imported from test/acceptance/<id>.test.mjs as ../../src/example.mjs';
+
+    for (const template of [
+      canonical,
+      SETUP_CONFIG_TEMPLATE,
+      SETUP_CONFIG_TEMPLATE_LOCAL,
+    ]) {
+      expect(template).toContain(example);
+    }
+  });
+
   it('renders the untouched template when given its own defaults', () => {
     // The wizard's first render passes only a name, so every other field
     // falls back to the template's own placeholder and the output is
     // byte-identical to the template. That is a correct render, not a
     // failed match, and it must not throw.
-    expect(() => renderSetupConfig('github', { name: 'my-project' })).not.toThrow();
+    expect(() =>
+      renderSetupConfig('github', { name: 'my-project' }),
+    ).not.toThrow();
     expect(renderSetupConfig('github', { name: 'my-project' })).toBe(
       SETUP_CONFIG_TEMPLATE,
     );
-    expect(() => renderSetupConfig('local', { name: 'my-project' })).not.toThrow();
+    expect(() =>
+      renderSetupConfig('local', { name: 'my-project' }),
+    ).not.toThrow();
     expect(renderSetupConfig('local', { name: 'my-project' })).toBe(
       SETUP_CONFIG_TEMPLATE_LOCAL,
     );

@@ -16,6 +16,20 @@ interface RunReader {
   getRun(id: string): Promise<RunProjection>;
 }
 
+export function newestTriggerExternalRef(
+  records: readonly DispatchRecord[],
+): string | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (
+      record?.kind === 'trigger-workflow-start' &&
+      record.externalRef !== undefined
+    )
+      return record.externalRef;
+  }
+  return undefined;
+}
+
 export async function loadRunPageModel(
   rawId: string,
   service: RunReader = controlPlaneService(),
@@ -48,9 +62,7 @@ export async function loadRunPageModel(
  * to render: no checkpoint store, no Trigger key, an unknown run id, or an
  * unreachable API each mean "say less", not "throw".
  */
-export async function loadRunDispatch(
-  runId: string,
-): Promise<
+export async function loadRunDispatch(runId: string): Promise<
   | {
       readonly records: readonly DispatchRecord[];
       readonly external?: ExternalRunState;
@@ -84,11 +96,7 @@ export async function loadRunDispatch(
     return undefined;
   }
 
-  const externalRef = records.find(
-    (record) =>
-      record.kind === 'trigger-workflow-start' &&
-      record.externalRef !== undefined,
-  )?.externalRef;
+  const externalRef = newestTriggerExternalRef(records);
   if (externalRef === undefined) return { records };
   const external = await externalRunStateFromEnv(externalRef);
   return { records, ...(external === undefined ? {} : { external }) };

@@ -96,7 +96,10 @@ export function createTriggerSdkBoundary(): TriggerSdkBoundary {
       try {
         const run = (await runs.retrieve(id)) as {
           readonly status?: unknown;
-          readonly error?: { readonly message?: unknown; readonly name?: unknown };
+          readonly error?: {
+            readonly message?: unknown;
+            readonly name?: unknown;
+          };
         };
         if (typeof run.status !== 'string') return undefined;
         const message = run.error?.message ?? run.error?.name;
@@ -118,11 +121,16 @@ export interface TriggerWorkflowDispatcher {
   startFeature(
     runId: string,
     projectId: string,
+    attempt?: 0 | 1,
   ): Promise<{ readonly externalRunRef: string }>;
   startGoal(
     runId: string,
     projectId: string,
+    attempt?: 0 | 1,
   ): Promise<{ readonly externalRunRef: string }>;
+  retrieve(
+    externalRunRef: string,
+  ): ReturnType<TriggerSdkBoundary['retrieveRun']>;
   cancel(externalRunRef: string): Promise<void>;
 }
 
@@ -130,29 +138,32 @@ export function createTriggerWorkflowDispatcher(
   sdk: TriggerSdkBoundary = createTriggerSdkBoundary(),
 ): TriggerWorkflowDispatcher {
   return Object.freeze({
-    async startFeature(runId: string, projectId: string) {
+    async startFeature(runId: string, projectId: string, attempt: 0 | 1 = 0) {
       const result = await sdk.triggerTask(
         FEATURE_WORKFLOW_TASK_ID,
         { version: 'feature-task-payload-v1', runId },
         {
-          idempotencyKey: `feature-workflow:${runId}:v1`,
+          idempotencyKey: `feature-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}`,
           idempotencyKeyTTL: '30d',
           concurrencyKey: projectId,
         },
       );
       return { externalRunRef: result.id };
     },
-    async startGoal(runId: string, projectId: string) {
+    async startGoal(runId: string, projectId: string, attempt: 0 | 1 = 0) {
       const result = await sdk.triggerTask(
         GOAL_WORKFLOW_TASK_ID,
         { version: 'goal-task-payload-v1', runId },
         {
-          idempotencyKey: `goal-workflow:${runId}:v1`,
+          idempotencyKey: `goal-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}`,
           idempotencyKeyTTL: '30d',
           concurrencyKey: projectId,
         },
       );
       return { externalRunRef: result.id };
+    },
+    async retrieve(externalRunRef: string) {
+      return sdk.retrieveRun(externalRunRef);
     },
     async cancel(externalRunRef: string) {
       await sdk.cancelRun(externalRunRef);

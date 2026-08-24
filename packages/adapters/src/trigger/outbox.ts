@@ -239,6 +239,15 @@ function cleanupExternalReference(effect: WorkflowEffect): string | undefined {
   return undefined;
 }
 
+function isExecutorUnavailable(
+  state: Awaited<ReturnType<TriggerWorkflowDispatcher['retrieve']>>,
+): boolean {
+  return (
+    state?.status === 'SYSTEM_FAILURE' &&
+    state.error?.includes('COULD_NOT_FIND_EXECUTOR') === true
+  );
+}
+
 export function createDurableTriggerOutbox(
   options: DurableTriggerOutboxOptions,
 ): DurableTriggerOutbox {
@@ -278,13 +287,90 @@ export function createDurableTriggerOutbox(
           options.clock(),
         );
       }
+      const retryRequest = {
+        ...request,
+        idempotencyKey: `${request.idempotencyKey}:retry:1`,
+      };
+      const retryEffect = await options.checkpoints.getEffect(
+        retryRequest.idempotencyKey,
+      );
+      if (
+        retryEffect?.status === 'succeeded' &&
+        retryEffect.externalRef !== undefined
+      ) {
+        const retryState = await options.trigger.retrieve(
+          retryEffect.externalRef,
+        );
+        if (!isExecutorUnavailable(retryState)) return;
+        if (options.repository === undefined)
+          throw new Error('repository is required before workflow dispatch');
+        const run = await options.repository.getRun(
+          persistenceId('run', request.runId),
+        );
+        if (run === undefined) throw new Error('workflow run not found');
+        if (['pending', 'running', 'waiting'].includes(run.status)) {
+          const at = isoTimestamp(options.clock());
+          await options.repository.transitionRun(
+            run.id,
+            ['pending', 'running', 'waiting'],
+            {
+              status: 'failed',
+              error: { code: 'dispatch_executor_unavailable' },
+              output: {
+                status: 'failed',
+                reason: 'dispatch_executor_unavailable',
+              },
+              updatedAt: at,
+              completedAt: at,
+            },
+            run.stateVersion ?? 0,
+          );
+        }
+        return;
+      }
+
       const claim = await ownedClaim(
         options,
         request,
         'trigger-workflow-start',
       );
       const effect = claim.effect;
-      if (effect.status === 'succeeded') return;
+      if (effect.status === 'succeeded') {
+        if (effect.externalRef === undefined) return;
+        const state = await options.trigger.retrieve(effect.externalRef);
+        if (!isExecutorUnavailable(state)) return;
+        const retryClaim = await ownedClaim(
+          options,
+          retryRequest,
+          'trigger-workflow-start',
+        );
+        if (retryClaim.effect.status === 'succeeded') return;
+        await options.checkpoints.markEffectStarted(
+          retryClaim.lease,
+          options.clock(),
+        );
+        if (options.repository === undefined)
+          throw new Error('repository is required before workflow dispatch');
+        const run = await options.repository.getRun(
+          persistenceId('run', request.runId),
+        );
+        if (run === undefined) throw new Error('workflow run not found');
+        const result = await (request.pipeline === 'goal'
+          ? options.trigger.startGoal(request.runId, run.projectId, 1)
+          : options.trigger.startFeature(request.runId, run.projectId, 1));
+        await options.checkpoints.attachExternalRef(
+          retryClaim.lease,
+          result.externalRunRef,
+          options.clock(),
+        );
+        await options.checkpoints.completeEffect(
+          retryClaim.lease,
+          { externalRunRef: result.externalRunRef },
+          options.clock(),
+        );
+        return;
+      }
+
       await options.checkpoints.markEffectStarted(claim.lease, options.clock());
       if (options.repository === undefined)
         throw new Error('repository is required before workflow dispatch');
@@ -428,15 +514,24 @@ export function createDurableTriggerOutbox(
           );
         }
       }
-      const triggerStart = effects.find(
-        (candidate) =>
-          candidate.kind === 'trigger-workflow-start' &&
-          candidate.externalRef !== undefined,
-      );
-      if (triggerStart?.externalRef !== undefined) {
+      const triggerStarts = [
+        ...new Set(
+          effects
+            .filter(
+              (candidate) =>
+                candidate.kind === 'trigger-workflow-start' &&
+                candidate.externalRef !== undefined,
+            )
+            .map((candidate) => candidate.externalRef as string),
+        ),
+      ];
+      for (const [index, externalRef] of triggerStarts.entries()) {
         const triggerRequest = {
           runId: request.runId,
-          idempotencyKey: `${request.idempotencyKey}:trigger`,
+          idempotencyKey:
+            index === 0
+              ? `${request.idempotencyKey}:trigger`
+              : `${request.idempotencyKey}:trigger:${externalRef}`,
         };
         try {
           const triggerClaim = await ownedClaim(
@@ -449,10 +544,10 @@ export function createDurableTriggerOutbox(
               triggerClaim.lease,
               options.clock(),
             );
-            await options.trigger.cancel(triggerStart.externalRef);
+            await options.trigger.cancel(externalRef);
             await options.checkpoints.completeEffect(
               triggerClaim.lease,
-              { externalRunRef: triggerStart.externalRef, cancelled: true },
+              { externalRunRef: externalRef, cancelled: true },
               options.clock(),
             );
           }

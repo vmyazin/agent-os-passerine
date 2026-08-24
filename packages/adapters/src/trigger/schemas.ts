@@ -2,6 +2,7 @@ import {
   PUBLICATION_MAX_FILE_BYTES,
   PUBLICATION_MAX_FILES,
   PUBLICATION_MAX_TOTAL_BYTES,
+  acceptanceTestImportSafetyError,
   acceptanceTestsPairingError,
   isAcceptanceTestPath,
 } from '@agentos/core';
@@ -217,12 +218,20 @@ export const definitionOfDoneSchema = z
         message: 'acceptance tests exceed aggregate size',
       });
     }
-    for (const file of value.acceptanceTests) {
+    for (const [index, file] of value.acceptanceTests.entries()) {
       if (!isAcceptanceTestPath(file.path) || file.content.includes('\0')) {
         context.addIssue({
           code: 'custom',
           path: ['acceptanceTests'],
           message: `invalid acceptance test path: ${file.path}`,
+        });
+      }
+      const importError = acceptanceTestImportSafetyError(file);
+      if (importError !== undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: ['acceptanceTests', index, 'content'],
+          message: importError,
         });
       }
     }

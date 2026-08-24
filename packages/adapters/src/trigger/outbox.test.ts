@@ -73,6 +73,7 @@ function collaborators(
       trigger: {
         startFeature: vi.fn(),
         startGoal: vi.fn(),
+        retrieve: vi.fn(),
         cancel: cancelTrigger,
       },
       approval: {
@@ -173,7 +174,12 @@ describe('durable Trigger outbox start', () => {
     }
     const outbox = createDurableTriggerOutbox({
       checkpoints,
-      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
+      trigger: {
+        startFeature,
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure: vi.fn() },
       clock: () => now,
@@ -202,7 +208,12 @@ describe('durable Trigger outbox start', () => {
     });
     const outbox = createDurableTriggerOutbox({
       checkpoints,
-      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
+      trigger: {
+        startFeature,
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
       repository: repositoryWithRun('run-1'),
@@ -241,6 +252,7 @@ describe('durable Trigger outbox start', () => {
       trigger: {
         startFeature,
         startGoal,
+        retrieve: vi.fn(),
         cancel: vi.fn(),
       },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
@@ -291,7 +303,12 @@ describe('durable Trigger outbox start', () => {
     });
     const outbox = createDurableTriggerOutbox({
       checkpoints,
-      trigger: { startFeature, startGoal: vi.fn(), cancel: vi.fn() },
+      trigger: {
+        startFeature,
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
       approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
       sourceSnapshot: { ensure },
       repository: repositoryWithRun('run-1'),
@@ -319,9 +336,169 @@ describe('durable Trigger outbox start', () => {
       externalRef: 'trigger-run-1',
     });
   });
+
+  async function recoveryFixture(
+    externalState: (
+      externalRunRef: string,
+    ) => Promise<{ status: string; error?: string } | undefined>,
+  ) {
+    const repository = new InMemoryDomainRepository();
+    const at = isoTimestamp(now);
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Dispatch recovery',
+      createdAt: at,
+      updatedAt: at,
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'run-1'),
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'pending',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const startFeature = vi.fn(
+      async (_runId: string, _projectId: string, attempt?: 0 | 1) => ({
+        externalRunRef: attempt === 1 ? 'trigger-retry-1' : 'trigger-primary',
+      }),
+    );
+    const retrieve = vi.fn(externalState);
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: {
+        startFeature,
+        startGoal: vi.fn(),
+        retrieve,
+        cancel: vi.fn(),
+      },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: {
+        ensure: vi.fn(async () => ({
+          key: 'source/recovery',
+          digest: 'b'.repeat(64),
+          sizeBytes: 123,
+        })),
+      },
+      repository,
+      clock: () => now,
+    });
+    return { checkpoints, outbox, repository, retrieve, startFeature };
+  }
+
+  it('fences one fresh dispatch after confirmed executor loss', async () => {
+    const fixture = await recoveryFixture(async (externalRunRef) =>
+      externalRunRef === 'trigger-primary'
+        ? {
+            status: 'SYSTEM_FAILURE',
+            error: 'Task failed: COULD_NOT_FIND_EXECUTOR',
+          }
+        : { status: 'QUEUED' },
+    );
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
+
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+
+    expect(fixture.startFeature.mock.calls).toEqual([
+      ['run-1', 'project-1'],
+      ['run-1', 'project-1', 1],
+    ]);
+    await expect(
+      fixture.checkpoints.getEffect('workflow-start:run-1:retry:1'),
+    ).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'trigger-retry-1',
+    });
+  });
+
+  it.each([
+    ['unknown state', undefined],
+    ['queued', { status: 'QUEUED' }],
+    ['executing', { status: 'EXECUTING' }],
+    ['ordinary failure', { status: 'FAILED', error: 'user code failed' }],
+    [
+      'other system failure',
+      { status: 'SYSTEM_FAILURE', error: 'WORKER_CRASHED' },
+    ],
+  ])('does not retry %s', async (_label, state) => {
+    const fixture = await recoveryFixture(async () => state);
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
+
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+
+    expect(fixture.startFeature).toHaveBeenCalledOnce();
+    await expect(
+      fixture.checkpoints.getEffect('workflow-start:run-1:retry:1'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('fails the domain run after the retry loses its executor too', async () => {
+    const fixture = await recoveryFixture(async () => ({
+      status: 'SYSTEM_FAILURE',
+      error: 'COULD_NOT_FIND_EXECUTOR',
+    }));
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
+
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+    await fixture.outbox.requestStart(request);
+
+    expect(fixture.startFeature).toHaveBeenCalledTimes(2);
+    await expect(
+      fixture.repository.getRun(persistenceId('run', 'run-1')),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      error: { code: 'dispatch_executor_unavailable' },
+      output: {
+        status: 'failed',
+        reason: 'dispatch_executor_unavailable',
+      },
+    });
+  });
 });
 
 describe('durable Trigger outbox cancellation', () => {
+  it('cancels every distinct persisted Trigger attempt exactly once', async () => {
+    const { checkpoints, cancelTrigger, outbox } = collaborators();
+    for (const [key, externalRef] of [
+      ['workflow-start:run-1', 'trigger-primary'],
+      ['workflow-start:run-1:retry:1', 'trigger-retry-1'],
+      ['workflow-start:run-1:retry:duplicate', 'trigger-retry-1'],
+    ] as const) {
+      await startedEffect(checkpoints, {
+        key,
+        kind: 'trigger-workflow-start',
+        externalRef,
+      });
+    }
+    const request = { idempotencyKey: 'cancel:run-1', runId: 'run-1' };
+
+    await outbox.requestCancel(request);
+    await outbox.requestCancel(request);
+
+    expect(cancelTrigger.mock.calls).toEqual([
+      ['trigger-primary'],
+      ['trigger-retry-1'],
+    ]);
+  });
+
   it('still cancels Trigger when an active runtime cannot be cancelled safely', async () => {
     const { checkpoints, cancelTrigger, outbox } = collaborators();
     await startedEffect(checkpoints, {
