@@ -3,6 +3,7 @@ import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import { CancelRunAction } from '../../../src/ui/mutation-forms';
+import { StartRunForm } from '../../../src/ui/start-run-form';
 import { UndispatchedRunNotice } from '../../../src/ui/undispatched-run-notice';
 
 export const dynamic = 'force-dynamic';
@@ -122,6 +123,34 @@ export default async function RunPage({
           </ol>
         )}
       </section>
+      {run.status !== 'succeeded' || run.pipeline !== 'feature' ? null : (
+        <section aria-labelledby="follow-up-title">
+          <h2 id="follow-up-title">Build on this</h2>
+          {run.outcome?.publishedBranch === undefined ||
+          run.outcome.publishedCommitSha === undefined ? (
+            <p>
+              This run recorded no published commit, so nothing can be started
+              on top of it. Start the next feature from the project instead,
+              and it will build on the default branch.
+            </p>
+          ) : (
+            <>
+              <p>
+                A follow-up starts from{' '}
+                <code>{run.outcome.publishedCommitSha.slice(0, 12)}</code> on{' '}
+                <code>{run.outcome.publishedBranch}</code>, so it sees this
+                run&apos;s work without waiting for you to merge.
+              </p>
+              <StartRunForm
+                baseRunId={run.id}
+                configured
+                label="Start a follow-up"
+                projectId={run.projectId}
+              />
+            </>
+          )}
+        </section>
+      )}
       {run.chain === undefined ? null : (
         <section aria-labelledby="chain-title">
           <h2 id="chain-title">Builds on</h2>

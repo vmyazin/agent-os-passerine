@@ -63,6 +63,14 @@ describe('control-plane HTTP contracts', () => {
     // from this schema is a 500 that no service-level test can see.
     const projection = {
       id: 'run_2',
+      outcome: {
+        localBranch: 'agentos/run-1-abcdef01',
+        localRepositoryUrl: 'file:///workspaces/exp',
+        // The follow-up action reads these two off the projection, so they
+        // have to survive the response schema.
+        publishedBranch: 'agentos/run-1-abcdef01',
+        publishedCommitSha: 'd'.repeat(40),
+      },
       projectId: 'project-1',
       pipeline: 'feature',
       status: 'running' as const,

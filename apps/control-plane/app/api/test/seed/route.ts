@@ -202,6 +202,29 @@ export async function POST(request: Request): Promise<Response> {
       createdAt: at,
       updatedAt: at,
     });
+  // A run that succeeded without recording where it published: a draft-PR
+  // publisher that reported no commit. Nothing can chain onto it, and the
+  // run page has to say so rather than hiding the action.
+  const unpublishedId = persistenceId('run', 'e2e-unpublished');
+  if (!(await repository.getRun(unpublishedId)))
+    await repository.createRun({
+      id: unpublishedId,
+      projectId,
+      pipeline: 'feature',
+      status: 'succeeded',
+      input: {
+        title: 'Rename the status route',
+        description: 'Published as a draft PR with no commit reported.',
+      },
+      output: {
+        status: 'succeeded',
+        draftPullRequestUrl: 'https://github.test/pr/42',
+      },
+      createdAt: at,
+      updatedAt: at,
+      completedAt: at,
+    });
+
   // A backlog mid-flight: one item published, one running, two waiting.
   const backlogId = persistenceId('backlog', 'e2e-backlog');
   if (!(await repository.getBacklog(backlogId))) {

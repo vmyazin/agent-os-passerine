@@ -287,6 +287,11 @@ export const runProjectionSchema = z
         draftPullRequestUrl: z.string().max(2_048).optional(),
         localBranch: z.string().max(2_048).optional(),
         localRepositoryUrl: z.string().max(2_048).optional(),
+        publishedBranch: z.string().max(512).optional(),
+        publishedCommitSha: z
+          .string()
+          .regex(/^[a-f0-9]{40}$/i)
+          .optional(),
       })
       .strict()
       .optional(),

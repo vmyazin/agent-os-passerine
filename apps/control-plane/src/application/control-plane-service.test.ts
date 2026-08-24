@@ -1642,6 +1642,57 @@ runtime: { provider: local }
   });
 }
 
+describe('what a run offers to build on', () => {
+  const runWithOutput = async (output: Record<string, unknown>) => {
+    const repository = new InMemoryDomainRepository();
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'P',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'published-run'),
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'succeeded',
+      input: { title: 'Base', description: 'The first feature.' },
+      output: output as never,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return createService(repository).getRun('published-run');
+  };
+
+  it('surfaces the published branch and commit', async () => {
+    await expect(
+      runWithOutput({
+        status: 'succeeded',
+        localBranch: 'agentos/run-1-abcdef01',
+        publishedBranch: 'agentos/run-1-abcdef01',
+        publishedCommitSha: 'd'.repeat(40),
+      }),
+    ).resolves.toMatchObject({
+      outcome: {
+        publishedBranch: 'agentos/run-1-abcdef01',
+        publishedCommitSha: 'd'.repeat(40),
+      },
+    });
+  });
+
+  it('drops a commit that is not one', async () => {
+    // A chained run is started from this value. Offering a malformed one
+    // would put the follow-up on a base the publisher never wrote.
+    const run = await runWithOutput({
+      status: 'succeeded',
+      publishedBranch: 'agentos/run-1-abcdef01',
+      publishedCommitSha: 'not-a-commit',
+    });
+    expect(run.outcome?.publishedCommitSha).toBeUndefined();
+    expect(run.outcome?.publishedBranch).toBe('agentos/run-1-abcdef01');
+  });
+});
+
 describe('configuration drift on the project page', () => {
   const driftConfig = () =>
     loadAgentOsConfig(`

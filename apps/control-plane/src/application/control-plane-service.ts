@@ -596,6 +596,9 @@ export interface RunProjection extends PersistenceDigests {
     readonly draftPullRequestUrl?: string;
     readonly localBranch?: string;
     readonly localRepositoryUrl?: string;
+    /** Where this run published, and therefore what can be built on it. */
+    readonly publishedBranch?: string;
+    readonly publishedCommitSha?: string;
   };
   /** Set when this run was started on top of an earlier run's publication. */
   readonly chain?: {
@@ -691,16 +694,28 @@ function projectRunOutcome(
   const draftPullRequestUrl = safeHttpUrl(source, 'draftPullRequestUrl');
   const localBranch = safeString(source, 'localBranch');
   const localRepositoryUrl = safeString(source, 'localRepositoryUrl');
+  const publishedBranch = safeString(source, 'publishedBranch');
+  // A commit is a hex string or it is nothing: a chained run is started from
+  // this value, so a malformed one must not reach a start form as an offer.
+  const rawCommit = safeString(source, 'publishedCommitSha');
+  const publishedCommitSha =
+    rawCommit !== undefined && /^[a-f0-9]{40}$/i.test(rawCommit)
+      ? rawCommit
+      : undefined;
   if (
     draftPullRequestUrl === undefined &&
     localBranch === undefined &&
-    localRepositoryUrl === undefined
+    localRepositoryUrl === undefined &&
+    publishedBranch === undefined &&
+    publishedCommitSha === undefined
   )
     return undefined;
   return {
     ...(draftPullRequestUrl === undefined ? {} : { draftPullRequestUrl }),
     ...(localBranch === undefined ? {} : { localBranch }),
     ...(localRepositoryUrl === undefined ? {} : { localRepositoryUrl }),
+    ...(publishedBranch === undefined ? {} : { publishedBranch }),
+    ...(publishedCommitSha === undefined ? {} : { publishedCommitSha }),
   };
 }
 
