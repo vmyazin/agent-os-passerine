@@ -7,6 +7,11 @@ import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { formatDisplayDate } from '../../../src/ui/format-timestamp';
 import { PageToolbar } from '../../../src/ui/page-toolbar';
+import {
+  BacklogStatusAction,
+  CreateBacklogForm,
+} from '../../../src/ui/backlog-forms';
+import { backlogView } from '../../../src/ui/backlog-view-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
 
 export const dynamic = 'force-dynamic';
@@ -32,6 +37,14 @@ export default async function ProjectDetailPage({
     throw error;
   }
   const backlogs = await controlPlaneService().listBacklogs(project.id);
+  // An item's run that is `waiting` is waiting on the operator's approval,
+  // which is the state a backlog spends most of its life in. The run list is
+  // already loaded for this page, so naming it costs nothing.
+  const waitingRunIds = new Set(
+    project.recentRuns
+      .filter((run) => run.status === 'waiting')
+      .map((run) => run.id),
+  );
 
   const runCountLabel =
     project.runCount === 1 ? '1 run' : `${project.runCount} runs`;
@@ -135,56 +148,69 @@ export default async function ProjectDetailPage({
           </div>
         </dl>
       </section>
-      {backlogs.length === 0 ? null : (
-        <section aria-labelledby="project-backlogs">
-          <div className="section-heading">
-            <h2 id="project-backlogs">Backlogs</h2>
-          </div>
-          {backlogs.map((backlog) => (
-            <article className="backlog" key={backlog.id}>
-              <div className="backlog-header">
-                <strong>{backlog.title}</strong>
-                <span className={`backlog-status backlog-status-${backlog.status}`}>
-                  {backlog.status}
-                </span>
-              </div>
-              {backlog.status !== 'paused' ? null : (
-                <p className="backlog-paused">
-                  {backlog.pausedReason === undefined ? (
-                    // No reason means nothing refused: an operator stopped it.
-                    <>You paused this backlog.</>
-                  ) : (
-                    <>
-                      Stopped on <code>{backlog.pausedReason}</code>.
-                    </>
-                  )}{' '}
-                  Nothing else starts until you resume it, and the work already
-                  published stays where it is.
-                </p>
-              )}
-              <ol className="backlog-items">
-                {backlog.items.map((item) => (
-                  <li key={item.id}>
-                    <span className="backlog-item-ordinal">{item.ordinal}</span>
-                    <span className="backlog-item-title">
-                      {item.runId === undefined ? (
-                        item.title
-                      ) : (
-                        <a href={`/runs/${item.runId}`}>{item.title}</a>
-                      )}
-                    </span>
+      <section aria-labelledby="project-backlogs">
+        <div className="section-heading">
+          <h2 id="project-backlogs">Backlogs</h2>
+          {project.latestRevision === undefined ? null : (
+            <CreateBacklogForm projectId={project.id} />
+          )}
+        </div>
+        {backlogs.length === 0 ? (
+          <EmptyState title="No backlogs yet">
+            A backlog runs an ordered list of features one at a time, each
+            building on the last.
+          </EmptyState>
+        ) : (
+          backlogs.map((backlog) => {
+            const view = backlogView(backlog, { waitingRunIds });
+            return (
+              <article className="backlog" key={backlog.id}>
+                <div className="backlog-header">
+                  <strong>{backlog.title}</strong>
+                  <span className="backlog-header-controls">
                     <span
-                      className={`backlog-item-status backlog-item-status-${item.status}`}
+                      className={`backlog-status backlog-status-${backlog.status}`}
                     >
-                      {item.status}
+                      {backlog.status}
                     </span>
-                  </li>
-                ))}
-              </ol>
-            </article>
-          ))}
-        </section>
-      )}
+                    <BacklogStatusAction
+                      backlogId={backlog.id}
+                      status={backlog.status}
+                    />
+                  </span>
+                </div>
+                <p className="backlog-progress">{view.progress}</p>
+                {view.paused === undefined ? null : (
+                  <p className="backlog-paused">
+                    {view.paused.sentence}{' '}
+                    {view.paused.action ??
+                      'Nothing else starts until you resume it, and the work already published stays where it is.'}
+                  </p>
+                )}
+                <ol className="backlog-items">
+                  {view.items.map((item) => (
+                    <li key={item.id}>
+                      <span className="backlog-item-ordinal">{item.ordinal}</span>
+                      <span className="backlog-item-title">
+                        {item.runId === undefined ? (
+                          item.title
+                        ) : (
+                          <a href={`/runs/${item.runId}`}>{item.title}</a>
+                        )}
+                      </span>
+                      <span
+                        className={`backlog-item-status backlog-item-status-${item.emphasis}`}
+                      >
+                        {item.state}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              </article>
+            );
+          })
+        )}
+      </section>
       <section aria-labelledby="project-runs">
         <div className="section-heading">
           <h2 id="project-runs">Recent runs</h2>

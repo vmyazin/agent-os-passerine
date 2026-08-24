@@ -189,7 +189,9 @@ export async function POST(request: Request): Promise<Response> {
       id: chainedId,
       projectId,
       pipeline: 'feature',
-      status: 'running',
+      // Waiting on its spec/DoD approval: the state a backlog spends most of
+      // its life in, and the one the page has to name properly.
+      status: 'waiting',
       input: {
         title: 'List todos by due date',
         description: 'Builds on the todo store.',

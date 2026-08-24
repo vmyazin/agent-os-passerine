@@ -1081,14 +1081,68 @@ div.inbox-message-copy {
   font-size: 0.82rem;
 }
 
-.backlog-item-status-running {
+.backlog-item-status-active {
   color: var(--signal-violet-dark);
   font-weight: 700;
 }
 
-.backlog-item-status-failed {
+/* Anything the operator has to act on: a failure, or an item waiting on
+   their approval. Both are "the backlog is stopped until you look". */
+.backlog-item-status-attention {
   color: var(--danger-ink);
   font-weight: 700;
+}
+
+.backlog-item-status-done {
+  color: var(--ink-secondary);
+}
+
+.backlog-progress {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: 0.92rem;
+}
+
+.backlog-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.backlog-status-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.backlog-create {
+  display: grid;
+  gap: 0.9rem;
+  max-width: 46rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.75rem;
+  background: var(--surface-sheet);
+  padding: 1.15rem;
+}
+
+.backlog-create label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.backlog-create-items {
+  display: grid;
+  gap: 0.9rem;
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.backlog-create-items li {
+  display: grid;
+  gap: 0.4rem;
 }
 
 /* Frozen acceptance tests in a spec approval. The operator has to be able
