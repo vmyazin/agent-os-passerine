@@ -1150,6 +1150,66 @@ export class ControlPlaneService {
    * list. Both callers resolve it the same way, so the picker cannot drift
    * from the check.
    */
+  /**
+   * Starts a run for a project with provenance resolved from its applied
+   * configuration revision, rather than supplied by the caller.
+   *
+   * The CLI endpoints keep asking for the five digests and the SHA, because
+   * a script has them and pinning them is how a stale script fails loudly.
+   * A person does not have them, and a form that asked for them would be
+   * asking someone to copy hashes between two browser tabs.
+   *
+   * The SHA is the applied revision's, never the branch head: run creation
+   * requires them to match, so using the head would produce a 409 the
+   * operator cannot act on. Drift is surfaced on the project page instead.
+   */
+  async startRunForProject(
+    idempotencyKey: string,
+    input: {
+      readonly projectId: string;
+      readonly title: string;
+      readonly description: string;
+      readonly pipeline: 'feature' | 'goal';
+      readonly criteria?: readonly CommandCriterion[] | undefined;
+      readonly baseRunId?: string | undefined;
+    },
+  ): Promise<RunProjection> {
+    const revision = await this.repository.getLatestConfigRevision(
+      persistenceId('project', input.projectId),
+    );
+    if (revision === undefined)
+      throw new ServiceError(
+        'project_unconfigured',
+        'apply a configuration for this project before starting a run',
+        409,
+      );
+    const base = {
+      projectId: input.projectId,
+      title: input.title,
+      description: input.description,
+      repositorySha: revision.repositorySha,
+      configDigest: revision.configDigest,
+      modelDigest: revision.modelDigest,
+      promptDigest: revision.promptDigest,
+      environmentDigest: revision.environmentDigest,
+      policyDigest: revision.policyDigest,
+      ...(input.baseRunId === undefined ? {} : { baseRunId: input.baseRunId }),
+    };
+    if (input.pipeline === 'goal') {
+      if (input.criteria === undefined || input.criteria.length === 0)
+        throw new ServiceError(
+          'invalid_goal_criteria',
+          'a goal run requires at least one criterion',
+          422,
+        );
+      return this.createGoalRun(idempotencyKey, {
+        ...base,
+        criteria: input.criteria,
+      });
+    }
+    return this.createFeatureRun(idempotencyKey, base);
+  }
+
   async listTrustedGoalCommands(
     projectId?: string,
   ): Promise<readonly string[]> {

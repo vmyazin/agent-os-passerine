@@ -152,6 +152,26 @@ export const createBacklogSchema = z
   })
   .strict();
 
+/**
+ * A start request from the browser: no digests and no SHA, because the
+ * server resolves those from the project's applied revision. The CLI's
+ * createRunSchema keeps requiring them -- a script that pins provenance
+ * must keep failing when it goes stale.
+ */
+export const startProjectRunSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(10_000),
+    pipeline: z.enum(['feature', 'goal']),
+    criteria: z.array(goalCommandCriterionSchema).min(1).max(20).optional(),
+    baseRunId: id.optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.pipeline === 'goal' || value.criteria === undefined,
+    { message: 'criteria belong to a goal run', path: ['criteria'] },
+  );
+
 export const backlogProjectionSchema = z
   .object({
     id: id,
