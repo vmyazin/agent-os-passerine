@@ -37,7 +37,9 @@ import {
   persistenceId,
   resolveProjectVerificationPolicy,
   advanceBacklog,
+  planConfigChange,
 } from '@agentos/core';
+import { REDACTED_VALUE } from '../ui/redact-configuration';
 
 export type IdGenerator = <Kind extends PersistenceIdKind>(
   kind: Kind,
@@ -230,6 +232,54 @@ function chainDepthLimit(configRevision: ConfigRevision | undefined): number {
     // not parse fails later on its own terms, not by chaining further.
     return DEFAULT_CHAIN_MAX_DEPTH;
   }
+}
+
+/**
+ * Strips every `variables` map out of a value before it is described.
+ *
+ * Masking the leaf path alone is not enough: removing or adding a whole
+ * environment produces one change whose value is the entire environment
+ * object, `variables` included. That is the same credential leaving by a
+ * wider door.
+ */
+function withoutVariableValues(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutVariableValues);
+  if (typeof value !== 'object' || value === null) return value;
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(source)) {
+    if (
+      key === 'variables' &&
+      typeof entry === 'object' &&
+      entry !== null &&
+      !Array.isArray(entry)
+    ) {
+      result[key] = Object.fromEntries(
+        Object.keys(entry as Record<string, unknown>).map((name) => [
+          name,
+          REDACTED_VALUE,
+        ]),
+      );
+      continue;
+    }
+    result[key] = withoutVariableValues(entry);
+  }
+  return result;
+}
+
+/**
+ * A config value as one short line. Anything that could be a credential is
+ * masked: a plan is rendered into a browser session, while the canonical
+ * config itself is withheld from one.
+ */
+function describeConfigValue(path: string, value: unknown): string {
+  if (/^environments\.[^.]+\.variables(\.|$)/.test(path))
+    return REDACTED_VALUE;
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value.slice(0, 200);
+  if (typeof value === 'number' || typeof value === 'boolean')
+    return String(value);
+  return JSON.stringify(withoutVariableValues(value)).slice(0, 200);
 }
 
 function fingerprint(value: unknown): string {
@@ -1039,6 +1089,65 @@ export class ControlPlaneService {
         active === undefined
           ? null
           : configurationProjection(active, includeCanonical),
+    };
+  }
+
+  /**
+   * What applying this YAML would change, without applying it and without
+   * echoing what is stored.
+   *
+   * `GET /api/configuration` withholds the canonical config from session
+   * callers because `environments[].variables` is free-form and may hold
+   * credentials. A diff would smuggle those values back out through its
+   * `before` side, so values under that path are masked here on the way out
+   * -- the same rule the configuration page already renders by. Every other
+   * path in an Agent OS config names models, budgets, pipelines, and
+   * policies, which are the whole point of reading a plan.
+   */
+  async planConfigurationChange(
+    yaml: string,
+  ): Promise<{
+    readonly projectId: string;
+    readonly changed: boolean;
+    readonly fromRevision: number | null;
+    readonly changes: readonly {
+      readonly kind: 'added' | 'removed' | 'changed';
+      readonly path: string;
+      readonly before?: string;
+      readonly after?: string;
+    }[];
+  }> {
+    let config: AgentOsConfig;
+    try {
+      config = loadAgentOsConfig(yaml);
+    } catch (error) {
+      throw new ServiceError(
+        'invalid_configuration',
+        error instanceof Error
+          ? error.message.slice(0, 2_000)
+          : 'invalid configuration',
+        422,
+      );
+    }
+    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    const active = await this.repository.getLatestConfigRevision(projectId);
+    if (active === undefined)
+      return { projectId, changed: true, fromRevision: null, changes: [] };
+    const plan = planConfigChange(parseAgentOsConfig(active.config), config);
+    return {
+      projectId,
+      changed: plan.changed,
+      fromRevision: active.revision,
+      changes: plan.changes.slice(0, 200).map((change) => ({
+        kind: change.kind,
+        path: change.path,
+        ...(change.before === undefined
+          ? {}
+          : { before: describeConfigValue(change.path, change.before) }),
+        ...(change.after === undefined
+          ? {}
+          : { after: describeConfigValue(change.path, change.after) }),
+      })),
     };
   }
 

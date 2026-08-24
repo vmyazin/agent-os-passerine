@@ -1642,6 +1642,106 @@ runtime: { provider: local }
   });
 }
 
+describe('planning a configuration change', () => {
+  const yaml = (dailyMicrodollars: number, secret: string) => `
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process, variables: { API_KEY: ${secret} } } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: ${String(dailyMicrodollars)}, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`;
+
+  const applied = async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+    );
+    const config = loadAgentOsConfig(yaml(2, 'stored-secret'));
+    await service.applyConfiguration('plan-cfg', {
+      canonicalConfig: canonicalConfigJson(config),
+      digest: canonicalConfigHash(config),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    return service;
+  };
+
+  it('reports what would change without applying it', async () => {
+    const service = await applied();
+    const plan = await service.planConfigurationChange(yaml(3, 'stored-secret'));
+
+    expect(plan).toMatchObject({ changed: true, fromRevision: 1 });
+    expect(plan.changes).toContainEqual({
+      kind: 'changed',
+      path: 'budgets.dailyMicrodollars',
+      before: '2',
+      after: '3',
+    });
+    // Nothing was written: the active revision is still the first one.
+    const next = await service.planConfigurationChange(yaml(3, 'stored-secret'));
+    expect(next.fromRevision).toBe(1);
+  });
+
+  it('never returns a stored environment variable through the diff', async () => {
+    const service = await applied();
+    const plan = await service.planConfigurationChange(
+      yaml(2, 'submitted-secret'),
+    );
+
+    const variable = plan.changes.find((change) =>
+      change.path.startsWith('environments.default.variables.'),
+    );
+    expect(variable).toBeDefined();
+    // The `before` side would otherwise hand a session caller a value the
+    // configuration endpoint deliberately withholds.
+    expect(variable?.before).toBe('[REDACTED]');
+    expect(variable?.after).toBe('[REDACTED]');
+    expect(JSON.stringify(plan)).not.toContain('stored-secret');
+  });
+
+  it('does not leak a variable when a whole environment is removed', async () => {
+    const service = await applied();
+    // The environment is gone entirely, so the diff carries one change whose
+    // value is the whole object -- variables included, unless they are
+    // stripped on the way out.
+    const plan = await service.planConfigurationChange(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { other: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+
+    const removed = plan.changes.find(
+      (change) => change.path === 'environments.default',
+    );
+    expect(removed?.kind).toBe('removed');
+    expect(removed?.before).toContain('[REDACTED]');
+    expect(JSON.stringify(plan)).not.toContain('stored-secret');
+  });
+
+  it('rejects YAML that is not a configuration', async () => {
+    const service = await applied();
+    await expect(
+      service.planConfigurationChange('version: 1\nproject: {}'),
+    ).rejects.toMatchObject({ code: 'invalid_configuration', status: 422 });
+  });
+});
+
 describe('what a run offers to build on', () => {
   const runWithOutput = async (output: Record<string, unknown>) => {
     const repository = new InMemoryDomainRepository();

@@ -3,6 +3,7 @@ import { controlPlaneService } from '../../src/application/runtime';
 import { ServiceError } from '../../src/application/control-plane-service';
 import { requirePageSession } from '../../src/auth/page-session';
 import { EmptyState } from '../../src/ui/components';
+import { ConfigurationEditor } from '../../src/ui/configuration-editor';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
 import { redactConfigurationForDisplay } from '../../src/ui/redact-configuration';
@@ -46,9 +47,16 @@ export default async function ConfigurationPage({
     <div className="page-stack">
       <PageToolbar
         action={
-          revisionLabel === undefined ? undefined : (
-            <span className="project-count">{revisionLabel}</span>
-          )
+          <span className="configuration-toolbar">
+            {revisionLabel === undefined ? null : (
+              <span className="project-count">{revisionLabel}</span>
+            )}
+            <ConfigurationEditor
+              {...(selectorProjectId === undefined
+                ? {}
+                : { projectId: selectorProjectId })}
+            />
+          </span>
         }
         description="Canonical metadata for the selected project's applied configuration."
         title="Configuration"

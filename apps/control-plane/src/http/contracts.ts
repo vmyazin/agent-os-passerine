@@ -172,6 +172,24 @@ export const startProjectRunSchema = z
     { message: 'criteria belong to a goal run', path: ['criteria'] },
   );
 
+export const configurationPlanSchema = z
+  .object({
+    projectId: id,
+    changed: z.boolean(),
+    fromRevision: z.number().int().positive().nullable(),
+    changes: z.array(
+      z
+        .object({
+          kind: z.enum(['added', 'removed', 'changed']),
+          path: z.string().max(500),
+          before: z.string().max(500).optional(),
+          after: z.string().max(500).optional(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
 export const backlogProjectionSchema = z
   .object({
     id: id,

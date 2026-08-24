@@ -1005,6 +1005,66 @@ div.inbox-message-copy {
   }
 }
 
+.configuration-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.configuration-editor {
+  display: grid;
+  gap: 0.9rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.75rem;
+  background: var(--surface-sheet);
+  padding: 1.15rem;
+  text-align: left;
+}
+
+.configuration-editor label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+/* The plan is the thing an operator reads before spending a revision on a
+   change, so it gets an inset surface of its own rather than running into
+   the buttons. */
+.configuration-plan {
+  border-radius: 0.6rem;
+  background: var(--surface-inset);
+  padding: 0.9rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.configuration-plan ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.plan-kind {
+  font-size: 0.78rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.plan-kind-added {
+  color: var(--status-success-line);
+}
+
+.plan-kind-removed {
+  color: var(--danger-ink);
+}
+
+.plan-kind-changed {
+  color: var(--signal-violet-dark);
+}
+
 /* A backlog on the project page: an ordered list the operator reads top to
    bottom, where the item that is running and the reason a stopped one
    stopped are the two things worth finding at a glance. */
