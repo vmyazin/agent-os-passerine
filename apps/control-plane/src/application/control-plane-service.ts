@@ -137,6 +137,15 @@ export interface ProjectDetailProjection extends ProjectListProjection {
   readonly workflowBudgetMicrodollars?: number;
   readonly dailyBudgetMicrodollars?: number;
   readonly recentRuns: readonly RunProjection[];
+  /**
+   * The commit a run started now would build on, and the branch head as it
+   * currently stands. A run is pinned to the applied revision's SHA, so when
+   * these differ the operator is about to build on code they may think they
+   * replaced -- worth saying before they press start, not after.
+   */
+  readonly appliedSha?: string;
+  readonly headSha?: string;
+  readonly drifted?: boolean;
 }
 
 export interface ConfigurationProjection {
@@ -952,6 +961,18 @@ export class ControlPlaneService {
         // Budget labels are decoration; unreadable config must not break the page.
       }
     }
+    let headSha: string | undefined;
+    if (latest !== undefined && this.repositoryHead !== undefined) {
+      try {
+        headSha = await this.repositoryHead.resolve(
+          parseAgentOsConfig(latest.config),
+        );
+      } catch {
+        // A reader that is unavailable, unconfigured, or looking at a repo
+        // that moved must not take the page down with it. Unknown drift
+        // renders as no claim rather than a false "up to date".
+      }
+    }
     return {
       ...summary,
       ...(workflowBudgetMicrodollars === undefined
@@ -960,6 +981,11 @@ export class ControlPlaneService {
       ...(dailyBudgetMicrodollars === undefined
         ? {}
         : { dailyBudgetMicrodollars }),
+      ...(latest === undefined ? {} : { appliedSha: latest.repositorySha }),
+      ...(headSha === undefined ? {} : { headSha }),
+      ...(latest === undefined || headSha === undefined
+        ? {}
+        : { drifted: headSha !== latest.repositorySha }),
       recentRuns,
     };
   }

@@ -7,6 +7,7 @@ import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { formatDisplayDate } from '../../../src/ui/format-timestamp';
 import { PageToolbar } from '../../../src/ui/page-toolbar';
+import { StartRunForm } from '../../../src/ui/start-run-form';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,6 +48,26 @@ export default async function ProjectDetailPage({
         title={project.name}
         titleId="project-detail-title"
       />
+      <section aria-labelledby="project-start">
+        <div className="section-heading">
+          <h2 id="project-start">Start work</h2>
+        </div>
+        <StartRunForm
+          configured={project.latestRevision !== undefined}
+          projectId={project.id}
+          {...(project.drifted === true &&
+          project.appliedSha !== undefined &&
+          project.headSha !== undefined
+            ? { drift: { appliedSha: project.appliedSha, headSha: project.headSha } }
+            : {})}
+          {...(project.workflowBudgetMicrodollars === undefined
+            ? {}
+            : { workflowBudgetMicrodollars: project.workflowBudgetMicrodollars })}
+          {...(project.dailyBudgetMicrodollars === undefined
+            ? {}
+            : { dailyBudgetMicrodollars: project.dailyBudgetMicrodollars })}
+        />
+      </section>
       <section aria-label="Project summary" className="metric-grid">
         <article>
           <span className="metric-label">Runs</span>

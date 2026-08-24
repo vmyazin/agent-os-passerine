@@ -1642,6 +1642,71 @@ runtime: { provider: local }
   });
 }
 
+describe('configuration drift on the project page', () => {
+  const driftConfig = () =>
+    loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+
+  const detail = async (resolve: () => Promise<string>) => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+    );
+    const applied = await service.applyConfiguration('drift-cfg', {
+      canonicalConfig: canonicalConfigJson(driftConfig()),
+      digest: canonicalConfigHash(driftConfig()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const reader = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve },
+    );
+    return reader.getProjectDetail(applied.projectId);
+  };
+
+  it('reports the applied commit and whether the branch has moved past it', async () => {
+    await expect(detail(async () => 'b'.repeat(40))).resolves.toMatchObject({
+      appliedSha: 'b'.repeat(40),
+      headSha: 'b'.repeat(40),
+      drifted: false,
+    });
+    await expect(detail(async () => 'c'.repeat(40))).resolves.toMatchObject({
+      appliedSha: 'b'.repeat(40),
+      headSha: 'c'.repeat(40),
+      drifted: true,
+    });
+  });
+
+  it('claims nothing about drift when the head cannot be read', async () => {
+    // An unavailable reader must not take the page down, and must not be
+    // reported as agreement either.
+    const projection = await detail(async () => {
+      throw new Error('reader unavailable');
+    });
+    expect(projection.appliedSha).toBe('b'.repeat(40));
+    expect(projection.headSha).toBeUndefined();
+    expect(projection.drifted).toBeUndefined();
+  });
+});
+
 describe('starting a run for a project', () => {
   const projectConfig = () =>
     loadAgentOsConfig(`
