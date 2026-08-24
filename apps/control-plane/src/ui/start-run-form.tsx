@@ -3,6 +3,8 @@
 
 import { useEffect, useState } from 'react';
 
+import { submittableCriteria } from './start-run-model';
+
 /**
  * Starting work from the project that will own it.
  *
@@ -86,14 +88,7 @@ export function StartRunForm({
           pipeline,
           ...(baseRunId === undefined ? {} : { baseRunId }),
           ...(pipeline === 'goal'
-            ? {
-                criteria: criteria.map((criterion, ordinal) => ({
-                  id: `criterion-${String(ordinal + 1)}`,
-                  type: 'command' as const,
-                  description: criterion.description.trim(),
-                  command: criterion.command,
-                })),
-              }
+            ? { criteria: submittableCriteria(criteria) }
             : {}),
         }),
       });
@@ -124,14 +119,12 @@ export function StartRunForm({
     value === undefined ? undefined : `$${(value / 1_000_000).toFixed(2)}`;
   const workflowCap = money(workflowBudgetMicrodollars);
   const dailyCap = money(dailyBudgetMicrodollars);
+  // The same function decides what is sent and whether sending is possible,
+  // so the button cannot enable a request the server will reject.
   const ready =
     title.trim() !== '' &&
     description.trim() !== '' &&
-    (pipeline === 'feature' ||
-      criteria.some(
-        (criterion) =>
-          criterion.description.trim() !== '' && criterion.command !== '',
-      ));
+    (pipeline === 'feature' || submittableCriteria(criteria).length > 0);
 
   if (!open)
     return (
