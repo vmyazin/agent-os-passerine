@@ -191,5 +191,22 @@ it, including two pre-existing goal-criterion paths, reported an opaque
 failure instead. No backlog has been driven end to end by real agent
 sessions; that needs paid model calls and a Trigger deployment.
 
+The browser now reaches what the CLI reaches
+([design](./superpowers/specs/2026-08-23-operator-ui-parity-design.md),
+[plan](./superpowers/plans/2026-08-23-operator-ui-parity.md),
+[table](./architecture/cli-ui-parity.md)). Starting work moved out of the
+setup wizard and onto the project that will own it, with provenance resolved
+from the applied revision instead of typed; a succeeded run offers to start
+the next one chained onto its published commit; backlogs are created,
+paused, and resumed on the project page; and a configuration change can be
+planned before it is applied. `init` and `--json` stay CLI-only on purpose.
+
+The credential boundary held under review and then did not: the plan
+endpoint masks `environments[].variables` on both sides of a diff, which the
+first implementation did only for leaf paths — an added or removed
+environment carries the whole object, variables inside. Found by reading a
+real plan against a real project, fixed, and covered by a test that fails
+without it.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

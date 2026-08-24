@@ -30,6 +30,9 @@ Usage:
   agentos inbox approve ID --scope-hash HASH --idempotency-key KEY
   agentos inbox reject ID --scope-hash HASH --idempotency-key KEY
 
+Everything here except init and --json is also reachable in the browser; see
+docs/architecture/cli-ui-parity.md for where each action lives.
+
 Global options:
   --url URL       Control-plane URL (or AGENTOS_URL)
   --token TOKEN   API token (or AGENTOS_API_TOKEN)
