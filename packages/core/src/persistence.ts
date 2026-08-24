@@ -675,6 +675,12 @@ export interface DomainRepository {
    * Attaching requires the item to be `pending` with no run, so two
    * reconciliation passes racing produce one run and not two.
    */
+  /**
+   * Removes a backlog and its items. Refused once any item has produced a
+   * run: those runs are the record of work that was actually done, and a
+   * list that can erase its own history is not a record.
+   */
+  deleteBacklog(id: BacklogId): Promise<boolean>;
   updateBacklogItem(request: {
     readonly id: BacklogItemId;
     readonly expected: readonly BacklogItemStatus[];

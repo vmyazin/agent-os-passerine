@@ -1715,6 +1715,22 @@ export class InMemoryDomainRepository implements DomainRepository {
     );
   }
 
+  async deleteBacklog(id: BacklogId): Promise<boolean> {
+    if (!this.#backlogs.has(id)) return false;
+    const items = [...this.#backlogItems.values()].filter(
+      (item) => item.backlogId === id,
+    );
+    if (items.some((item) => item.runId !== undefined)) return false;
+    for (const item of items) {
+      this.#backlogItems.delete(item.id);
+      this.#backlogItemOrdinals.delete(
+        `${item.backlogId}\u0000${String(item.ordinal)}`,
+      );
+    }
+    this.#backlogs.delete(id);
+    return true;
+  }
+
   async updateBacklogItem(request: {
     readonly id: BacklogItemId;
     readonly expected: readonly BacklogItemStatus[];

@@ -25,6 +25,7 @@ Keep this table current when either surface changes.
 | `inbox approve` / `reject` | Inbox reading pane | Shows the frozen acceptance tests before the decision. |
 | — | Project → **Create a backlog** | Browser-only so far. `POST /api/backlogs` exists for scripts. |
 | — | Backlog → **Pause** / **Resume** | Browser-only so far. |
+| — | Backlog → **Delete** | Offered only while no item has produced a run; after that the backlog is a record of work that happened. |
 | `--json` | — | Deliberate. Machine-readable output is the CLI's contract. |
 
 ## Where an action lives

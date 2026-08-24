@@ -10,6 +10,7 @@ import { PageToolbar } from '../../../src/ui/page-toolbar';
 import {
   BacklogStatusAction,
   CreateBacklogForm,
+  DeleteBacklogAction,
 } from '../../../src/ui/backlog-forms';
 import { backlogView } from '../../../src/ui/backlog-view-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
@@ -176,6 +177,12 @@ export default async function ProjectDetailPage({
                     <BacklogStatusAction
                       backlogId={backlog.id}
                       status={backlog.status}
+                    />
+                    <DeleteBacklogAction
+                      backlogId={backlog.id}
+                      deletable={backlog.items.every(
+                        (item) => item.runId === undefined,
+                      )}
                     />
                   </span>
                 </div>

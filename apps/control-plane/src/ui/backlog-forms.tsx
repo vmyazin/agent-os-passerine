@@ -62,6 +62,68 @@ export function BacklogStatusAction({
 }
 
 /**
+ * Removing a backlog created by mistake. Only offered while no item has
+ * produced a run -- after that the backlog is a record of work that
+ * happened, and pausing is the way to stop it.
+ */
+export function DeleteBacklogAction({
+  backlogId,
+  deletable,
+}: {
+  readonly backlogId: string;
+  readonly deletable: boolean;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  if (!deletable) return null;
+  const submit = async () => {
+    if (pending) return;
+    setPending(true);
+    const response = await fetch(`/api/backlogs/${backlogId}`, {
+      method: 'DELETE',
+    });
+    if (response.ok) {
+      location.reload();
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    setMessage(body.error?.message ?? 'The request was refused.');
+    setPending(false);
+  };
+  return (
+    <span className="backlog-status-action">
+      {confirming ? (
+        <>
+          <button disabled={pending} onClick={() => void submit()} type="button">
+            {pending ? 'Deleting…' : 'Confirm delete'}
+          </button>
+          <button
+            className="secondary"
+            disabled={pending}
+            onClick={() => setConfirming(false)}
+            type="button"
+          >
+            Keep
+          </button>
+        </>
+      ) : (
+        <button
+          className="secondary"
+          onClick={() => setConfirming(true)}
+          type="button"
+        >
+          Delete
+        </button>
+      )}
+      <span aria-live="polite">{message}</span>
+    </span>
+  );
+}
+
+/**
  * Writing the list once is the whole point of a backlog, so the form takes
  * every item up front rather than making the operator add them one request
  * at a time.

@@ -1577,6 +1577,23 @@ export class ControlPlaneService {
     return this.backlogProjection(updated);
   }
 
+  /**
+   * Removing a backlog created by mistake. Refused once any item has
+   * produced a run: those runs happened, and a list that can erase its own
+   * history is not a record of what was done.
+   */
+  async deleteBacklog(id: string): Promise<void> {
+    const deleted = await this.repository.deleteBacklog(
+      persistenceId('backlog', id),
+    );
+    if (!deleted)
+      throw new ServiceError(
+        'backlog_not_deletable',
+        'a backlog that has started work cannot be deleted; pause it instead',
+        409,
+      );
+  }
+
   private async backlogProjection(
     backlog: Backlog,
   ): Promise<BacklogProjection> {

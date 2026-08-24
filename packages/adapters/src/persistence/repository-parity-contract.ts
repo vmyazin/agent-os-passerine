@@ -1108,6 +1108,58 @@ export function repositoryParityContract(
       ).toBeUndefined();
     });
 
+    it('deletes a backlog only while it has produced no runs', async () => {
+      const repository = await createRepository();
+      const { projectId, runId } = await seed(
+        repository,
+        `${implementation}-backlog-delete`,
+      );
+      const backlogId = persistenceId(
+        'backlog',
+        `${implementation}-backlog-3`,
+      );
+      const itemId = persistenceId('backlogItem', `${implementation}-item-d1`);
+      const create = async () => {
+        await repository.createBacklog({
+          id: backlogId,
+          projectId,
+          title: 'Disposable',
+          status: 'active',
+          createdAt: at,
+          updatedAt: at,
+        });
+        await repository.createBacklogItemIdempotently({
+          id: itemId,
+          backlogId,
+          ordinal: 1,
+          title: 'One',
+          description: 'One.',
+          status: 'pending',
+          createdAt: at,
+          updatedAt: at,
+        });
+      };
+
+      await create();
+      expect(await repository.deleteBacklog(backlogId)).toBe(true);
+      expect(await repository.getBacklog(backlogId)).toBeUndefined();
+      expect(await repository.listBacklogItems(backlogId)).toHaveLength(0);
+      // A backlog that never existed is not an error, just nothing to do.
+      expect(await repository.deleteBacklog(backlogId)).toBe(false);
+
+      // Once an item has produced a run, the backlog is a record of work.
+      await create();
+      await repository.updateBacklogItem({
+        id: itemId,
+        expected: ['pending'],
+        status: 'running',
+        runId,
+        updatedAt: at,
+      });
+      expect(await repository.deleteBacklog(backlogId)).toBe(false);
+      expect(await repository.getBacklog(backlogId)).toBeDefined();
+    });
+
     it('moves backlog status only from an expected state, and clears a stale reason', async () => {
       const repository = await createRepository();
       const { projectId } = await seed(

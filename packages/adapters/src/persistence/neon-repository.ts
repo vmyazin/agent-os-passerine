@@ -77,6 +77,8 @@ import {
   lte,
   or,
   sql,
+  notExists,
+  isNotNull,
 } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
 import { drizzle, type NeonHttpDatabase } from 'drizzle-orm/neon-http';
@@ -1955,6 +1957,32 @@ export class NeonDomainRepository implements DomainRepository {
         .limit(boundedListLimit(page.limit)),
       mapBacklogItemRow,
     );
+  }
+
+  async deleteBacklog(id: BacklogId): Promise<boolean> {
+    // One statement, so a run attached between the check and the delete
+    // loses the race rather than losing its item: the NOT EXISTS is
+    // evaluated inside the same delete.
+    const rows = await this.database
+      .delete(backlogs)
+      .where(
+        and(
+          eq(backlogs.id, id),
+          notExists(
+            this.database
+              .select({ one: sql`1` })
+              .from(backlogItems)
+              .where(
+                and(
+                  eq(backlogItems.backlogId, id),
+                  isNotNull(backlogItems.runId),
+                ),
+              ),
+          ),
+        ),
+      )
+      .returning({ id: backlogs.id });
+    return rows.length > 0;
   }
 
   async updateBacklogItem(request: {
