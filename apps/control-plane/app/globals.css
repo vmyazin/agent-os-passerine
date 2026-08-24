@@ -939,6 +939,34 @@ div.inbox-message-copy {
   gap: 0.75rem;
 }
 
+/* A run's status, in words. The badge says which state; this says how long
+   it has been true and what has to happen next -- the part an operator is
+   actually deciding on when they look at a page that has not changed. */
+.run-status-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.run-status-explanation {
+  margin: 0.6rem 0 0;
+  color: var(--ink-command);
+  font-size: 0.98rem;
+  line-height: 1.6;
+  max-width: 46rem;
+}
+
+.run-status-next {
+  color: var(--ink-secondary);
+}
+
+.run-live {
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Starting work: a form that stays closed until asked for, so the project
    page still reads as a status page rather than a console. */
 .start-run-form {

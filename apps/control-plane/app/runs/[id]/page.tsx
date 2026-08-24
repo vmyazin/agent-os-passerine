@@ -3,6 +3,8 @@ import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import { CancelRunAction } from '../../../src/ui/mutation-forms';
+import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
+import { explainRunStatus } from '../../../src/ui/run-status-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
 import { UndispatchedRunNotice } from '../../../src/ui/undispatched-run-notice';
 
@@ -20,18 +22,38 @@ export default async function RunPage({
   await requirePageSession();
   const { id } = await params;
   const run = await loadRunPageModel(id);
+  const now = new Date().toISOString();
   const awaitingDispatch = isAwaitingDispatch({
     status: run.status,
     stepCount: run.steps.length,
     createdAt: run.createdAt,
-    now: new Date().toISOString(),
+    now,
+  });
+  const explanation = explainRunStatus({
+    status: run.status,
+    stepCount: run.steps.length,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    now,
   });
   return (
     <div className="page-stack">
       <section className="page-heading" aria-labelledby="run-title">
         <p className="eyebrow">{run.pipeline} run</p>
         <h1 id="run-title">{run.input?.title ?? run.id}</h1>
-        <RunStatusBadge status={run.status} />
+        <div className="run-status-line">
+          <RunStatusBadge status={run.status} />
+          <RunLiveRefresh live={explanation.live} />
+        </div>
+        <p className="run-status-explanation">
+          {explanation.summary}
+          {explanation.next === undefined ? null : (
+            <>
+              {' '}
+              <span className="run-status-next">{explanation.next}</span>
+            </>
+          )}
+        </p>
         {TERMINAL_STATUSES.has(run.status) ? null : (
           <CancelRunAction runId={run.id} />
         )}
@@ -62,6 +84,9 @@ export default async function RunPage({
           <h2 id="goal-title">Bounded goal progress</h2>
           <p>
             Step {run.goal.currentStep} of {run.goal.maxSteps}
+            {run.goal.children.length === 0
+              ? ' · no attempt has started yet'
+              : ''}
           </p>
           <ol className="timeline">
             {run.goal.criteria.map((criterion) => {
