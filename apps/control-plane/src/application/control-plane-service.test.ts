@@ -1793,6 +1793,166 @@ describe('what a run offers to build on', () => {
   });
 });
 
+describe('starting a finished run again', () => {
+  const config = () =>
+    loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+
+  const seeded = async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+    );
+    const applied = await service.applyConfiguration('restart-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    return { repository, service, applied };
+  };
+
+  const finish = async (
+    repository: InMemoryDomainRepository,
+    runId: string,
+    status: 'failed' | 'succeeded' = 'failed',
+  ) => {
+    await repository.transitionRun(
+      persistenceId('run', runId),
+      ['pending'],
+      { status, updatedAt: now, completedAt: now },
+      0,
+    );
+  };
+
+  it('re-issues the request as a new run, leaving the original as the record', async () => {
+    const { repository, service, applied } = await seeded();
+    const first = await service.startRunForProject('restart-1', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, first.id);
+
+    const second = await service.restartRun('restart-1-again', first.id);
+
+    expect(second.id).not.toBe(first.id);
+    expect(second).toMatchObject({
+      pipeline: 'feature',
+      status: 'pending',
+      input: { title: 'about page' },
+    });
+    // The original is untouched: it is what happened, and a restart is not
+    // an edit of history.
+    await expect(
+      repository.getRun(persistenceId('run', first.id)),
+    ).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  it('replays a goal run with the criteria it was admitted with', async () => {
+    const { repository, service, applied } = await seeded();
+    const first = await service.startRunForProject('restart-goal', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'goal',
+      criteria: [
+        {
+          id: 'criterion-1',
+          type: 'command',
+          description: 'content loads',
+          command: 'pnpm test',
+        },
+      ],
+    });
+    await finish(repository, first.id);
+
+    const second = await service.restartRun('restart-goal-again', first.id);
+
+    // The commands come from the run's own input, never from the browser.
+    const criteria = await repository.listGoalCriteria(
+      persistenceId('run', second.id),
+    );
+    expect(criteria).toHaveLength(1);
+    expect(second.goal?.criteria[0]).toMatchObject({
+      id: 'criterion-1',
+      description: 'content loads',
+    });
+  });
+
+  it('refuses a run that has not finished', async () => {
+    const { service, applied } = await seeded();
+    const first = await service.startRunForProject('restart-live', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'still going',
+      pipeline: 'feature',
+    });
+
+    // Two live runs from one request is the thing to avoid; cancelling is
+    // the operator's explicit decision to end the first.
+    await expect(
+      service.restartRun('restart-live-again', first.id),
+    ).rejects.toMatchObject({ code: 'run_not_restartable', status: 409 });
+  });
+
+  it('keeps the chain, resolving it again from the base run', async () => {
+    const { repository, service, applied } = await seeded();
+    const base = await service.startRunForProject('restart-base', {
+      projectId: applied.projectId,
+      title: 'the base',
+      description: 'publishes something.',
+      pipeline: 'feature',
+    });
+    await repository.transitionRun(
+      persistenceId('run', base.id),
+      ['pending'],
+      {
+        status: 'succeeded',
+        output: {
+          status: 'succeeded',
+          publishedBranch: 'agentos/run-1-abcdef01',
+          publishedCommitSha: 'd'.repeat(40),
+        },
+        updatedAt: now,
+        completedAt: now,
+      },
+      0,
+    );
+    const chained = await service.startRunForProject('restart-chained', {
+      projectId: applied.projectId,
+      title: 'the follow-up',
+      description: 'builds on the base.',
+      pipeline: 'feature',
+      baseRunId: base.id,
+    });
+    await finish(repository, chained.id);
+
+    const again = await service.restartRun('restart-chained-again', chained.id);
+
+    expect(again.chain).toMatchObject({
+      baseRunId: base.id,
+      baseCommitSha: 'd'.repeat(40),
+    });
+  });
+});
+
 describe('configuration drift on the project page', () => {
   const driftConfig = () =>
     loadAgentOsConfig(`

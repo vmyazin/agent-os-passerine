@@ -5,7 +5,10 @@ import {
 import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
-import { CancelRunAction } from '../../../src/ui/mutation-forms';
+import {
+  CancelRunAction,
+  RestartRunAction,
+} from '../../../src/ui/mutation-forms';
 import { diagnoseDispatch } from '../../../src/ui/dispatch-diagnostics-model';
 import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
 import { explainRunStatus } from '../../../src/ui/run-status-model';
@@ -67,7 +70,11 @@ export default async function RunPage({
             </>
           )}
         </p>
-        {TERMINAL_STATUSES.has(run.status) ? null : (
+        {TERMINAL_STATUSES.has(run.status) ? (
+          run.pipeline === 'feature' || run.pipeline === 'goal' ? (
+            <RestartRunAction runId={run.id} />
+          ) : null
+        ) : (
           <CancelRunAction runId={run.id} />
         )}
       </section>

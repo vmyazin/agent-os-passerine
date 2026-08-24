@@ -92,6 +92,77 @@ export function ApprovalActions({
 }
 
 /**
+ * Starting a finished run's request again.
+ *
+ * It creates a new run rather than re-dispatching this one: the original is
+ * the record of what happened, and provenance is resolved again from the
+ * configuration applied now -- usually the reason the operator is here.
+ * Two-step, because it spends money.
+ */
+export function RestartRunAction({ runId }: { readonly runId: string }) {
+  const [confirming, setConfirming] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const start = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Starting…');
+    const response = await fetch(`/api/runs/${runId}/restart`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+    });
+    if (response.ok) {
+      const run = (await response.json()) as { id?: string };
+      if (typeof run.id === 'string') location.href = `/runs/${run.id}`;
+      else location.reload();
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    setMessage(
+      typeof body.error?.message === 'string'
+        ? `Could not start it again: ${body.error.message}.`
+        : 'Could not start it again.',
+    );
+    setPending(false);
+  };
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        {confirming ? (
+          <>
+            <button disabled={pending} onClick={() => void start()} type="button">
+              {pending ? 'Starting…' : 'Confirm, start again'}
+            </button>
+            <button
+              className="secondary"
+              disabled={pending}
+              onClick={() => setConfirming(false)}
+              type="button"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button
+            className="secondary"
+            onClick={() => setConfirming(true)}
+            type="button"
+          >
+            Start again
+          </button>
+        )}
+      </div>
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
+/**
  * Stopping a run that will not finish on its own. The cancel endpoint writes
  * the terminal status and its event before it tells the worker, so this works
  * even when no worker is connected -- which is exactly when a run needs it.

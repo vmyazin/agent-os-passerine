@@ -14,6 +14,8 @@ describe('elapsedLabel', () => {
     expect(elapsedLabel(created, '2026-08-24T03:26:20.000Z')).toBe('3 minutes');
     expect(elapsedLabel(created, '2026-08-24T05:00:00.000Z')).toBe('1 hour');
     expect(elapsedLabel(created, '2026-08-24T09:00:00.000Z')).toBe('5 hours');
+    // "159 hours ago" is arithmetic homework, not a timestamp.
+    expect(elapsedLabel(created, '2026-08-31T03:23:13.000Z')).toBe('7 days');
   });
 
   it('never reports a negative age from a clock that disagrees', () => {

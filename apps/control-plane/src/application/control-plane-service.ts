@@ -555,6 +555,44 @@ function goalDefinitions(
   });
 }
 
+/**
+ * The command criteria a goal run was started with, read back from its
+ * immutable input. Commands never travel through the browser for this --
+ * the run already holds the exact allowlist keys it was admitted with.
+ */
+function restartCriteria(value: JsonValue | undefined): readonly CommandCriterion[] {
+  if (!Array.isArray(value))
+    throw new ServiceError(
+      'run_not_restartable',
+      'this goal run did not record its criteria',
+      409,
+    );
+  return value.map((entry) => {
+    const criterion = record(entry);
+    const id = criterion?.id;
+    const description = criterion?.description;
+    const command = criterion?.command;
+    const required = criterion?.required;
+    if (
+      typeof id !== 'string' ||
+      typeof description !== 'string' ||
+      typeof command !== 'string'
+    )
+      throw new ServiceError(
+        'run_not_restartable',
+        'this goal run recorded a criterion that cannot be replayed',
+        409,
+      );
+    return {
+      id,
+      type: 'command' as const,
+      description,
+      command,
+      ...(typeof required === 'boolean' ? { required } : {}),
+    };
+  });
+}
+
 function inputForRun(
   idempotencyKey: string,
   input: CreateRunInput | CreateGoalRunInput,
@@ -1358,6 +1396,66 @@ export class ControlPlaneService {
       });
     }
     return this.createFeatureRun(idempotencyKey, base);
+  }
+
+  /**
+   * Starts the same request again, as a new run.
+   *
+   * Deliberately not a re-dispatch of the original. Dispatch is a durable,
+   * idempotent effect: it returns early once it has succeeded, and Trigger's
+   * own idempotency key (`<pipeline>-workflow:<runId>:v1`, kept for thirty
+   * days) would hand back the very run that died. Making the same run id
+   * executable twice would mean versioning that key, and if the first
+   * executor were somehow alive, two paid sessions would share one run --
+   * which is exactly what the one-session-per-run posture exists to prevent.
+   *
+   * So the failed run stays as the record of what happened, and its request
+   * is re-issued against whatever configuration is applied *now* -- which is
+   * usually the point, since something was changed to make it work.
+   */
+  async restartRun(
+    idempotencyKey: string,
+    runId: string,
+  ): Promise<RunProjection> {
+    const run = await this.repository.getRun(persistenceId('run', runId));
+    if (run === undefined)
+      throw new ServiceError('not_found', 'run not found', 404);
+    if (!['succeeded', 'failed', 'cancelled'].includes(run.status))
+      throw new ServiceError(
+        'run_not_restartable',
+        'this run has not finished; cancel it first, then start it again',
+        409,
+      );
+    if (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+      throw new ServiceError(
+        'run_not_restartable',
+        'only feature and goal runs can be started again',
+        409,
+      );
+    const input = record(run.input);
+    const title = typeof input?.title === 'string' ? input.title : undefined;
+    const description =
+      typeof input?.description === 'string' ? input.description : undefined;
+    if (title === undefined || description === undefined)
+      throw new ServiceError(
+        'run_not_restartable',
+        'this run did not record the request it was started from',
+        409,
+      );
+    // The base run, not the base commit: the chain is resolved again from
+    // that run's publication, so a restart cannot pin itself to a commit
+    // that has since been superseded.
+    const baseRunId = record(input?.chain)?.baseRunId;
+    const criteria =
+      run.pipeline === 'goal' ? restartCriteria(input?.criteria) : undefined;
+    return this.startRunForProject(idempotencyKey, {
+      projectId: run.projectId,
+      title,
+      description,
+      pipeline: run.pipeline,
+      ...(typeof baseRunId === 'string' ? { baseRunId } : {}),
+      ...(criteria === undefined ? {} : { criteria }),
+    });
   }
 
   async listTrustedGoalCommands(

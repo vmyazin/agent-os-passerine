@@ -12,6 +12,7 @@ export interface RunStatusExplanation {
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
 /**
  * How long something has been true, in the coarsest unit that is still
@@ -28,8 +29,14 @@ export function elapsedLabel(fromIso: string, nowIso: string): string {
     const minutes = Math.floor(ms / MINUTE_MS);
     return minutes === 1 ? '1 minute' : `${String(minutes)} minutes`;
   }
-  const hours = Math.floor(ms / HOUR_MS);
-  return hours === 1 ? '1 hour' : `${String(hours)} hours`;
+  if (ms < 2 * DAY_MS) {
+    const hours = Math.floor(ms / HOUR_MS);
+    return hours === 1 ? '1 hour' : `${String(hours)} hours`;
+  }
+  // Past a couple of days, hours stop being a quantity anyone reads: "159
+  // hours ago" is arithmetic homework.
+  const days = Math.floor(ms / DAY_MS);
+  return `${String(days)} days`;
 }
 
 /**
