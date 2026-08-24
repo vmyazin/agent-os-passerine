@@ -780,10 +780,15 @@ async function runTool(
           sizeBytes: metadata.sizeBytes,
           ...(metadata.digest === undefined ? {} : { hash: metadata.digest }),
         });
+        // The same shape the Managed Agents MCP presents, because the agent
+        // prompts are written once for both runtimes: they say to copy
+        // `structuredContent.metadata` verbatim into the final message. This
+        // used to answer with `{key, sizeBytes}`, so an agent on this runtime
+        // could only invent the other eight fields, and every run died at
+        // its first artifact reference.
         return {
           content: JSON.stringify({
-            key: metadata.key,
-            sizeBytes: metadata.sizeBytes,
+            structuredContent: { metadata: metadata.record },
           }),
           isError: false,
         };
@@ -895,6 +900,12 @@ function extractPutMetadata(structured: Record<string, unknown>): {
   readonly mediaType: string;
   readonly sizeBytes: number;
   readonly digest: string | undefined;
+  /**
+   * The whole metadata object exactly as the Artifact MCP returned it. The
+   * agent has to echo this into its final message, so narrowing it to the
+   * fields this runtime happens to need leaves the model inventing the rest.
+   */
+  readonly record: Record<string, unknown>;
 } {
   const metadata = structured.metadata;
   if (
@@ -912,6 +923,7 @@ function extractPutMetadata(structured: Record<string, unknown>): {
     mediaType: record.mediaType as string,
     sizeBytes: record.sizeBytes as number,
     digest: typeof record.digest === 'string' ? record.digest : undefined,
+    record,
   };
 }
 

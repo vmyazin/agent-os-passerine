@@ -668,6 +668,104 @@ describe('createKimiRuntimeProvider', () => {
     }
   });
 
+  it('hands the agent the whole artifact reference, not the two fields this runtime uses', async () => {
+    // Agents must echo `structuredContent.metadata` into their final message,
+    // and the prompts saying so are shared with the managed runtime. This
+    // used to answer with {key, sizeBytes}, so an agent here could only
+    // invent projectId, runId, stepId, artifactId, version, digest,
+    // mediaType and retentionClass -- and every run died on its first
+    // artifact reference, looking exactly like the model disobeying.
+    const metadata = {
+      projectId: 'proj',
+      runId: 'run-1',
+      stepId: 'step-1',
+      artifactId: 'report',
+      version: 1,
+      key: 'proj/run-1/step-1/report/1',
+      digest: 'd'.repeat(64),
+      mediaType: 'text/plain',
+      sizeBytes: 14,
+      retentionClass: 'working',
+      createdAt: '2026-08-24T12:00:00.000Z',
+      expiresAt: '2026-08-31T12:00:00.000Z',
+    };
+    const { transport } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'artifact_put',
+            input: {
+              artifactId: 'report',
+              version: 1,
+              mediaType: 'text/plain',
+              contentBase64: Buffer.from('hello artifact').toString('base64'),
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_2',
+            name: 'submit_result',
+            input: { done: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]);
+    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { readonly id: string };
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            content: [{ type: 'text', text: 'ok' }],
+            structuredContent: { metadata },
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const { provider } = await makeProvider({
+      transport,
+      artifactMcp: {
+        url: 'https://control.agentos.test/api/mcp/artifacts',
+        resolveCredential: async (ref: string) => `bearer-for-${ref}`,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    });
+    const handle = await provider.start(
+      baseRequest({ credentialRefs: ['vault_abc123'] }),
+    );
+    const events = await collectEvents(provider, handle);
+
+    const result = events.find(
+      (event) =>
+        event.type === 'tool_result' &&
+        JSON.stringify(event).includes('structuredContent'),
+    );
+    expect(result).toBeDefined();
+    // The provider wraps each loop event as `payload: { detail }`, where the
+    // detail is the JSON the loop recorded for the tool result.
+    const { detail } = result?.payload as { readonly detail: string };
+    const { content } = JSON.parse(detail) as { readonly content: string };
+    const echoed = JSON.parse(content) as {
+      readonly structuredContent: { readonly metadata: unknown };
+    };
+    // Every field the agent has to echo, exactly as the MCP returned it.
+    expect(echoed.structuredContent.metadata).toEqual(metadata);
+  });
+
   it('artifact_put/artifact_get round-trip through a stubbed fetchImpl, sending the resolved bearer as Authorization and never echoing it', async () => {
     const { transport } = scriptedTransport([
       {
@@ -727,9 +825,18 @@ describe('createKimiRuntimeProvider', () => {
           body.params.name === 'artifact.put'
             ? {
                 metadata: {
+                  projectId: 'proj',
+                  runId: 'run-1',
+                  stepId: 'step-1',
+                  artifactId: 'report',
+                  version: 1,
                   key: 'proj/run-1/step-1/report/1',
+                  digest: 'd'.repeat(64),
                   mediaType: 'text/plain',
                   sizeBytes: 14,
+                  retentionClass: 'working',
+                  createdAt: '2026-08-24T12:00:00.000Z',
+                  expiresAt: '2026-08-31T12:00:00.000Z',
                 },
               }
             : {
@@ -785,6 +892,7 @@ describe('createKimiRuntimeProvider', () => {
         key: 'proj/run-1/step-1/report/1',
         mediaType: 'text/plain',
         sizeBytes: 14,
+        hash: 'd'.repeat(64),
       },
     ]);
   });
