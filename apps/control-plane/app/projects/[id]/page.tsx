@@ -208,6 +208,9 @@ export default async function ProjectDetailPage({
                       <span
                         className={`backlog-item-status backlog-item-status-${item.emphasis}`}
                       >
+                        {item.emphasis === 'active' ? (
+                          <span aria-hidden="true" className="status-spinner" />
+                        ) : null}
                         {item.state}
                       </span>
                     </li>

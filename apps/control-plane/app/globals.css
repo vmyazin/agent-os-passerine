@@ -537,6 +537,41 @@ h1 {
   font-weight: 700;
 }
 
+.status {
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Work in flight. The badge already says which state, so this only has to
+   read as motion; it is aria-hidden and carries no information of its own. */
+.status-spinner {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  opacity: 0.75;
+  animation: status-spin 0.9s linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion is a stated product requirement, and a spinner is the one
+   element that cannot simply ignore it. The ring becomes a filled dot: the
+   same "something is in flight" signal, standing still. */
+@media (prefers-reduced-motion: reduce) {
+  .status-spinner {
+    border-top-color: currentColor;
+    background: currentColor;
+    animation: none;
+  }
+}
+
 .status-running,
 .status-succeeded {
   border-color: var(--status-success-line);
@@ -1208,6 +1243,9 @@ div.inbox-message-copy {
 }
 
 .backlog-item-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   color: var(--ink-muted);
   font-size: 0.82rem;
 }
