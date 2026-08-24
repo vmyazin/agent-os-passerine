@@ -8,6 +8,12 @@ import {
 import type {
   Approval,
   ApprovalId,
+  Backlog,
+  BacklogId,
+  BacklogItem,
+  BacklogItemId,
+  BacklogItemStatus,
+  BacklogStatus,
   ApprovalListFilter,
   ArtifactCapabilityQuotaRequest,
   ArtifactCapabilityQuotaResult,
@@ -273,6 +279,10 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #webhooks = new Map<string, WebhookReceipt>();
   readonly #goalCriteria = new Map<string, GoalCriterion>();
   readonly #goalCriterionKeys = new Map<string, string>();
+  readonly #backlogs = new Map<string, Backlog>();
+  readonly #backlogItems = new Map<string, BacklogItem>();
+  readonly #backlogItemOrdinals = new Map<string, string>();
+  readonly #backlogItemRuns = new Map<string, string>();
   readonly #goalProgress = new Map<string, GoalProgress>();
 
   constructor(
@@ -1598,5 +1608,140 @@ export class InMemoryDomainRepository implements DomainRepository {
         )
         .slice(0, boundedListLimit(page.limit)),
     );
+  }
+
+  async createBacklog(backlog: Backlog): Promise<Backlog> {
+    requireEntry(this.#projects, backlog.projectId, 'Project');
+    return insertUnique(this.#backlogs, backlog.id, backlog, 'Backlog');
+  }
+
+  async getBacklog(id: BacklogId): Promise<Backlog | undefined> {
+    const found = this.#backlogs.get(id);
+    return found === undefined ? undefined : copy(found);
+  }
+
+  async listBacklogs(
+    projectId: ProjectId,
+    page: ListPage<TimestampListCursor<BacklogId>> = {},
+  ): Promise<readonly Backlog[]> {
+    return copy(
+      [...this.#backlogs.values()]
+        .filter(
+          (backlog) =>
+            backlog.projectId === projectId &&
+            isAfterTimestamp(backlog.createdAt, backlog.id, page.after),
+        )
+        .sort((left, right) =>
+          compareTimestamped(
+            left.createdAt,
+            left.id,
+            right.createdAt,
+            right.id,
+          ),
+        )
+        .slice(0, boundedListLimit(page.limit)),
+    );
+  }
+
+  async updateBacklogStatus(request: {
+    readonly id: BacklogId;
+    readonly expected: readonly BacklogStatus[];
+    readonly status: BacklogStatus;
+    readonly pausedReason?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<Backlog | undefined> {
+    const existing = this.#backlogs.get(request.id);
+    if (existing === undefined || !request.expected.includes(existing.status))
+      return undefined;
+    const updated: Backlog = {
+      ...existing,
+      status: request.status,
+      // A backlog that is no longer paused carries no stale reason.
+      ...(request.status === 'paused' && request.pausedReason !== undefined
+        ? { pausedReason: request.pausedReason }
+        : {}),
+      updatedAt: request.updatedAt,
+    };
+    if (request.status !== 'paused') delete (updated as { pausedReason?: string }).pausedReason;
+    this.#backlogs.set(request.id, copy(updated));
+    return copy(updated);
+  }
+
+  async createBacklogItemIdempotently(
+    item: BacklogItem,
+  ): Promise<BacklogItem> {
+    requireEntry(this.#backlogs, item.backlogId, 'Backlog');
+    const existing = this.#backlogItems.get(item.id);
+    if (existing !== undefined) {
+      if (
+        existing.backlogId !== item.backlogId ||
+        existing.ordinal !== item.ordinal ||
+        existing.title !== item.title ||
+        existing.description !== item.description
+      )
+        throw new IdempotencyConflictError('Backlog item', item.id);
+      return copy(existing);
+    }
+    const ordinalKey = `${item.backlogId}\u0000${String(item.ordinal)}`;
+    if (this.#backlogItemOrdinals.has(ordinalKey))
+      throw new IdempotencyConflictError(
+        'Backlog item ordinal',
+        `${item.backlogId}:${String(item.ordinal)}`,
+      );
+    const created = insertUnique(
+      this.#backlogItems,
+      item.id,
+      item,
+      'Backlog item',
+    );
+    this.#backlogItemOrdinals.set(ordinalKey, item.id);
+    if (item.runId !== undefined) this.#backlogItemRuns.set(item.runId, item.id);
+    return created;
+  }
+
+  async listBacklogItems(
+    backlogId: BacklogId,
+    page: ListPage<number> = {},
+  ): Promise<readonly BacklogItem[]> {
+    return copy(
+      [...this.#backlogItems.values()]
+        .filter(
+          (item) =>
+            item.backlogId === backlogId &&
+            (page.after === undefined || item.ordinal > page.after),
+        )
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .slice(0, boundedListLimit(page.limit)),
+    );
+  }
+
+  async updateBacklogItem(request: {
+    readonly id: BacklogItemId;
+    readonly expected: readonly BacklogItemStatus[];
+    readonly status: BacklogItemStatus;
+    readonly runId?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<BacklogItem | undefined> {
+    const existing = this.#backlogItems.get(request.id);
+    if (existing === undefined || !request.expected.includes(existing.status))
+      return undefined;
+    if (request.runId !== undefined) {
+      // One run per item, deployment-wide: the unique index in Postgres, and
+      // this map here, are what make a racing dispatch produce one run.
+      const owner = this.#backlogItemRuns.get(request.runId);
+      if (owner !== undefined && owner !== request.id) return undefined;
+      if (existing.runId !== undefined && existing.runId !== request.runId)
+        return undefined;
+    }
+    const updated: BacklogItem = {
+      ...existing,
+      status: request.status,
+      ...(request.runId === undefined ? {} : { runId: request.runId }),
+      updatedAt: request.updatedAt,
+    };
+    this.#backlogItems.set(request.id, copy(updated));
+    if (updated.runId !== undefined)
+      this.#backlogItemRuns.set(updated.runId, updated.id);
+    return copy(updated);
   }
 }

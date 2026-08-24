@@ -63,7 +63,10 @@ describePostgres('PostgreSQL persistence integration', () => {
       connection: { options: `-c search_path=${schemaName}` },
     });
     repository = new NeonDomainRepository(drizzle(client, { schema }) as never);
-  }, 30_000);
+    // Every migration in the directory, in order, against a possibly cold
+    // remote compute. The 30s this used to allow was already most of the
+    // budget at twenty migrations and does not grow as they accumulate.
+  }, 180_000);
 
   afterAll(async () => {
     if (client !== undefined) await client.end();

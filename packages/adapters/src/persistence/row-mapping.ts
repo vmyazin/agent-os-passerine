@@ -1,6 +1,8 @@
 import type {
   Approval,
   ArtifactRecord,
+  Backlog,
+  BacklogItem,
   ConfigRevision,
   ConfigSnapshot,
   DomainEvent,
@@ -33,6 +35,8 @@ import {
   usageRecords,
   webhookReceipts,
   workflowRuns,
+  backlogs,
+  backlogItems,
 } from './schema.js';
 
 type SqlRow = Readonly<Record<string, unknown>>;
@@ -103,11 +107,15 @@ export const artifactSelection = getTableColumns(artifacts);
 export const usageRecordSelection = getTableColumns(usageRecords);
 export const webhookReceiptSelection = getTableColumns(webhookReceipts);
 export const goalCriterionSelection = getTableColumns(goalCriteria);
+export const backlogSelection = getTableColumns(backlogs);
+export const backlogItemSelection = getTableColumns(backlogItems);
 export const goalProgressSelection = {
   ...getTableColumns(goalProgress),
   payloadPresent: present(goalProgress.payload, 'payload_present'),
 };
 
+export const mapBacklogRow = (row: SqlRow): Backlog => mapRow(row);
+export const mapBacklogItemRow = (row: SqlRow): BacklogItem => mapRow(row);
 export const mapProjectRow = (row: SqlRow): Project => mapRow(row);
 export const mapConfigRevisionRow = (row: SqlRow): ConfigRevision =>
   mapRow(row, { requiredJson: ['config'] });

@@ -15,7 +15,9 @@ export type PersistenceIdKind =
   | 'usage'
   | 'webhookDelivery'
   | 'goalCriterion'
-  | 'goalProgress';
+  | 'goalProgress'
+  | 'backlog'
+  | 'backlogItem';
 
 export type PersistenceId<Kind extends PersistenceIdKind> = string & {
   readonly [persistenceIdBrand]: Kind;
@@ -34,6 +36,15 @@ export type UsageId = PersistenceId<'usage'>;
 export type WebhookDeliveryId = PersistenceId<'webhookDelivery'>;
 export type GoalCriterionId = PersistenceId<'goalCriterion'>;
 export type GoalProgressId = PersistenceId<'goalProgress'>;
+export type BacklogId = PersistenceId<'backlog'>;
+export type BacklogItemId = PersistenceId<'backlogItem'>;
+
+import type {
+  Backlog,
+  BacklogItem,
+  BacklogItemStatus,
+  BacklogStatus,
+} from './backlog.js';
 
 export type IsoTimestamp = string & {
   readonly [isoTimestampBrand]: 'IsoTimestamp';
@@ -636,4 +647,39 @@ export interface DomainRepository {
     runId: WorkflowRunId,
     page?: ListPage<TimestampListCursor<GoalProgressId>>,
   ): Promise<readonly GoalProgress[]>;
+
+  createBacklog(backlog: Backlog): Promise<Backlog>;
+  getBacklog(id: BacklogId): Promise<Backlog | undefined>;
+  listBacklogs(
+    projectId: ProjectId,
+    page?: ListPage<TimestampListCursor<BacklogId>>,
+  ): Promise<readonly Backlog[]>;
+  /**
+   * CAS on status: the caller states what it believes the backlog is, so a
+   * pause racing a resume cannot silently overwrite the other.
+   */
+  updateBacklogStatus(request: {
+    readonly id: BacklogId;
+    readonly expected: readonly BacklogStatus[];
+    readonly status: BacklogStatus;
+    readonly pausedReason?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<Backlog | undefined>;
+  createBacklogItemIdempotently(item: BacklogItem): Promise<BacklogItem>;
+  listBacklogItems(
+    backlogId: BacklogId,
+    page?: ListPage<number>,
+  ): Promise<readonly BacklogItem[]>;
+  /**
+   * Binds the run an item produced, and settles the item's own status.
+   * Attaching requires the item to be `pending` with no run, so two
+   * reconciliation passes racing produce one run and not two.
+   */
+  updateBacklogItem(request: {
+    readonly id: BacklogItemId;
+    readonly expected: readonly BacklogItemStatus[];
+    readonly status: BacklogItemStatus;
+    readonly runId?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<BacklogItem | undefined>;
 }

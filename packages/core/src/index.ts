@@ -2,6 +2,7 @@ export * from './acceptance-tests.js';
 export * from './attestation.js';
 export * from './artifact-capability.js';
 export * from './artifacts.js';
+export * from './backlog.js';
 export * from './budget.js';
 export * from './config.js';
 export * from './dod.js';

@@ -5,6 +5,7 @@ import {
 } from '@agentos/core';
 import { describe, expect, it } from 'vitest';
 
+import { IdempotencyConflictError } from './errors.js';
 import type { RepositoryFactory } from './repository-contract.js';
 
 const at = isoTimestamp('2026-08-17T08:00:00.000000Z');
@@ -1024,6 +1025,135 @@ export function repositoryParityContract(
           digest: 'digest-a1',
         }),
       ).rejects.toMatchObject({ name: 'StaleConfigurationError' });
+    });
+
+    it('orders backlog items and enforces both uniqueness rules', async () => {
+      const repository = await createRepository();
+      const { projectId, runId } = await seed(
+        repository,
+        `${implementation}-backlog`,
+      );
+      const backlogId = persistenceId('backlog', `${implementation}-backlog-1`);
+      await repository.createBacklog({
+        id: backlogId,
+        projectId,
+        title: 'Todo app',
+        status: 'active',
+        createdAt: at,
+        updatedAt: at,
+      });
+      const item = (ordinal: number, suffix = String(ordinal)) => ({
+        id: persistenceId('backlogItem', `${implementation}-item-${suffix}`),
+        backlogId,
+        ordinal,
+        title: `Feature ${String(ordinal)}`,
+        description: `Build feature ${String(ordinal)}.`,
+        status: 'pending' as const,
+        createdAt: at,
+        updatedAt: at,
+      });
+      // Inserted out of order: the list is ordered by ordinal, not arrival.
+      await repository.createBacklogItemIdempotently(item(2));
+      await repository.createBacklogItemIdempotently(item(1));
+      expect(
+        (await repository.listBacklogItems(backlogId)).map(
+          (entry) => entry.ordinal,
+        ),
+      ).toEqual([1, 2]);
+
+      // Replaying an identical item is the same item, not a second one.
+      await repository.createBacklogItemIdempotently(item(1));
+      expect(await repository.listBacklogItems(backlogId)).toHaveLength(2);
+
+      await expect(
+        repository.createBacklogItemIdempotently(item(2, 'clash')),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+      expect(await repository.listBacklogs(projectId)).toHaveLength(1);
+      expect(
+        await repository.listBacklogs(
+          persistenceId('project', `${implementation}-backlog-absent`),
+        ),
+      ).toHaveLength(0);
+
+      // One run per item, deployment-wide: this is what makes a racing
+      // dispatch produce one run rather than two.
+      expect(
+        await repository.updateBacklogItem({
+          id: item(1).id,
+          expected: ['pending'],
+          status: 'running',
+          runId,
+          updatedAt: at,
+        }),
+      ).toMatchObject({ status: 'running', runId });
+      expect(
+        await repository.updateBacklogItem({
+          id: item(2).id,
+          expected: ['pending'],
+          status: 'running',
+          runId,
+          updatedAt: at,
+        }),
+      ).toBeUndefined();
+      // And the attach is a CAS: the item must still be pending.
+      expect(
+        await repository.updateBacklogItem({
+          id: item(1).id,
+          expected: ['pending'],
+          status: 'running',
+          runId,
+          updatedAt: at,
+        }),
+      ).toBeUndefined();
+    });
+
+    it('moves backlog status only from an expected state, and clears a stale reason', async () => {
+      const repository = await createRepository();
+      const { projectId } = await seed(
+        repository,
+        `${implementation}-backlog-status`,
+      );
+      const id = persistenceId('backlog', `${implementation}-backlog-2`);
+      await repository.createBacklog({
+        id,
+        projectId,
+        title: 'Todo app',
+        status: 'active',
+        createdAt: at,
+        updatedAt: at,
+      });
+
+      expect(
+        await repository.updateBacklogStatus({
+          id,
+          expected: ['active'],
+          status: 'paused',
+          pausedReason: 'item_run_failed',
+          updatedAt: at,
+        }),
+      ).toMatchObject({ status: 'paused', pausedReason: 'item_run_failed' });
+
+      // A pause racing a resume must not overwrite the other's decision.
+      expect(
+        await repository.updateBacklogStatus({
+          id,
+          expected: ['active'],
+          status: 'completed',
+          updatedAt: at,
+        }),
+      ).toBeUndefined();
+
+      const resumed = await repository.updateBacklogStatus({
+        id,
+        expected: ['paused'],
+        status: 'active',
+        updatedAt: at,
+      });
+      expect(resumed?.status).toBe('active');
+      // A resumed backlog carrying its old reason would tell the operator it
+      // is still stuck on something it is not.
+      expect(resumed?.pausedReason).toBeUndefined();
     });
 
     it('scopes the latest configuration revision per project', async () => {

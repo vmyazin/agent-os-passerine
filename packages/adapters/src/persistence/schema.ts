@@ -63,6 +63,18 @@ export const approvalStatus = pgEnum('approval_status', [
   'expired',
 ]);
 export const inboxStatus = pgEnum('inbox_status', ['pending', 'replied']);
+export const backlogStatus = pgEnum('backlog_status', [
+  'active',
+  'paused',
+  'completed',
+]);
+export const backlogItemStatus = pgEnum('backlog_item_status', [
+  'pending',
+  'running',
+  'succeeded',
+  'skipped',
+  'failed',
+]);
 export const goalStatus = pgEnum('goal_status', [
   'pending',
   'satisfied',
@@ -702,6 +714,57 @@ export const goalProgress = pgTable(
       table.recordedAt,
       bytewise(table.id),
     ),
+  ],
+);
+
+export const backlogs = pgTable(
+  'backlogs',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    status: backlogStatus('status').notNull(),
+    pausedReason: text('paused_reason'),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    index('backlogs_project_order_idx').on(
+      table.projectId,
+      table.createdAt,
+      bytewise(table.id),
+    ),
+  ],
+);
+
+export const backlogItems = pgTable(
+  'backlog_items',
+  {
+    id: text('id').primaryKey(),
+    backlogId: text('backlog_id')
+      .notNull()
+      .references(() => backlogs.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    status: backlogItemStatus('status').notNull(),
+    // One run per item, and one item per run: the second constraint is what
+    // makes a racing dispatch produce one run instead of two.
+    runId: text('run_id').references(() => workflowRuns.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    unique('backlog_items_backlog_ordinal_unique').on(
+      table.backlogId,
+      table.ordinal,
+    ),
+    unique('backlog_items_run_unique').on(table.runId),
+    check('backlog_items_ordinal_positive', sql`${table.ordinal} >= 1`),
   ],
 );
 

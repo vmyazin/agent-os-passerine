@@ -59,6 +59,12 @@ import type {
   WorkflowRun,
   WorkflowRunId,
   WorkflowRunUpdate,
+  Backlog,
+  BacklogId,
+  BacklogItem,
+  BacklogItemId,
+  BacklogItemStatus,
+  BacklogStatus,
 } from '@agentos/core';
 import {
   and,
@@ -112,6 +118,10 @@ import {
   stepRunSelection,
   usageRecordSelection,
   workflowRunSelection,
+  backlogSelection,
+  backlogItemSelection,
+  mapBacklogRow,
+  mapBacklogItemRow,
 } from './row-mapping.js';
 import * as schema from './schema.js';
 import {
@@ -128,6 +138,8 @@ import {
   stepRuns,
   usageRecords,
   workflowRuns,
+  backlogs,
+  backlogItems,
 } from './schema.js';
 import {
   assertNonNegativeSafeInteger,
@@ -180,12 +192,20 @@ function mappedRows<T>(
   return rows.map(mapper);
 }
 
+/**
+ * Drizzle wraps driver errors, so the 23505 the database reported arrives as
+ * the `cause` of a `Failed query: ...` error rather than on the error the
+ * catch block sees. Checking only the top level turns every unique violation
+ * into an opaque 500 where the caller expects a conflict, so this walks the
+ * chain. The depth bound keeps a self-referential cause from spinning.
+ */
 function isPostgresUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    Reflect.get(error, 'code') === '23505'
-  );
+  for (let current = error, depth = 0; depth < 8; depth += 1) {
+    if (typeof current !== 'object' || current === null) return false;
+    if (Reflect.get(current, 'code') === '23505') return true;
+    current = Reflect.get(current, 'cause');
+  }
+  return false;
 }
 
 function validateArtifactQuotaRequest(
@@ -1818,6 +1838,159 @@ export class NeonDomainRepository implements DomainRepository {
         .limit(boundedListLimit(page.limit)),
       mapGoalProgressRow,
     );
+  }
+
+  async createBacklog(backlog: Backlog): Promise<Backlog> {
+    return mappedOne(
+      await this.database
+        .insert(backlogs)
+        .values(backlog)
+        .returning(backlogSelection),
+      'Backlog',
+      mapBacklogRow,
+    );
+  }
+
+  async getBacklog(id: BacklogId): Promise<Backlog | undefined> {
+    const [row] = await this.database
+      .select(backlogSelection)
+      .from(backlogs)
+      .where(eq(backlogs.id, id))
+      .limit(1);
+    return row === undefined ? undefined : mapBacklogRow(row);
+  }
+
+  async listBacklogs(
+    projectId: ProjectId,
+    page: ListPage<TimestampListCursor<BacklogId>> = {},
+  ): Promise<readonly Backlog[]> {
+    return mappedRows(
+      await this.database
+        .select(backlogSelection)
+        .from(backlogs)
+        .where(
+          and(
+            eq(backlogs.projectId, projectId),
+            afterTimestamp(backlogs.createdAt, backlogs.id, page.after),
+          ),
+        )
+        .orderBy(asc(backlogs.createdAt), asc(bytewiseText(backlogs.id)))
+        .limit(boundedListLimit(page.limit)),
+      mapBacklogRow,
+    );
+  }
+
+  async updateBacklogStatus(request: {
+    readonly id: BacklogId;
+    readonly expected: readonly BacklogStatus[];
+    readonly status: BacklogStatus;
+    readonly pausedReason?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<Backlog | undefined> {
+    const [row] = await this.database
+        .update(backlogs)
+        .set({
+          status: request.status,
+          // Leaving a stale reason on a resumed backlog would tell the
+          // operator it is still stuck on something it is not.
+          pausedReason:
+            request.status === 'paused' ? (request.pausedReason ?? null) : null,
+          updatedAt: request.updatedAt,
+        })
+        .where(
+          and(
+            eq(backlogs.id, request.id),
+            inArray(backlogs.status, [...request.expected]),
+          ),
+        )
+        .returning(backlogSelection);
+    return row === undefined ? undefined : mapBacklogRow(row);
+  }
+
+  async createBacklogItemIdempotently(
+    item: BacklogItem,
+  ): Promise<BacklogItem> {
+    try {
+      const rows = await this.database
+        .insert(backlogItems)
+        .values(item)
+        .onConflictDoUpdate({ target: backlogItems.id, set: { id: item.id } })
+        .returning(backlogItemSelection);
+      const existing = mapBacklogItemRow(one(rows, 'Backlog item'));
+      if (
+        existing.backlogId !== item.backlogId ||
+        existing.ordinal !== item.ordinal ||
+        existing.title !== item.title ||
+        existing.description !== item.description
+      )
+        throw new IdempotencyConflictError('Backlog item', item.id);
+      return existing;
+    } catch (error) {
+      if (isPostgresUniqueViolation(error))
+        throw new IdempotencyConflictError(
+          'Backlog item ordinal',
+          `${item.backlogId}:${String(item.ordinal)}`,
+        );
+      throw error;
+    }
+  }
+
+  async listBacklogItems(
+    backlogId: BacklogId,
+    page: ListPage<number> = {},
+  ): Promise<readonly BacklogItem[]> {
+    return mappedRows(
+      await this.database
+        .select(backlogItemSelection)
+        .from(backlogItems)
+        .where(
+          and(
+            eq(backlogItems.backlogId, backlogId),
+            page.after === undefined
+              ? undefined
+              : gt(backlogItems.ordinal, page.after),
+          ),
+        )
+        .orderBy(asc(backlogItems.ordinal))
+        .limit(boundedListLimit(page.limit)),
+      mapBacklogItemRow,
+    );
+  }
+
+  async updateBacklogItem(request: {
+    readonly id: BacklogItemId;
+    readonly expected: readonly BacklogItemStatus[];
+    readonly status: BacklogItemStatus;
+    readonly runId?: string;
+    readonly updatedAt: IsoTimestamp;
+  }): Promise<BacklogItem | undefined> {
+    try {
+      const [row] = await this.database
+          .update(backlogItems)
+          .set({
+            status: request.status,
+            ...(request.runId === undefined ? {} : { runId: request.runId }),
+            updatedAt: request.updatedAt,
+          })
+          .where(
+            and(
+              eq(backlogItems.id, request.id),
+              inArray(backlogItems.status, [...request.expected]),
+              // Attaching a run requires the item to have none yet, so a
+              // racing dispatch loses here rather than at the unique index.
+              request.runId === undefined
+                ? undefined
+                : isNull(backlogItems.runId),
+            ),
+          )
+          .returning(backlogItemSelection);
+      return row === undefined ? undefined : mapBacklogItemRow(row);
+    } catch (error) {
+      // Another item already owns that run: the same race, seen from the
+      // deployment-wide constraint.
+      if (isPostgresUniqueViolation(error)) return undefined;
+      throw error;
+    }
   }
 }
 
