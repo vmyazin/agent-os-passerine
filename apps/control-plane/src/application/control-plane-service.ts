@@ -19,6 +19,12 @@ import type {
   Project,
   RunStatus,
   WorkflowRun,
+  Backlog,
+  BacklogId,
+  BacklogItem,
+  BacklogItemRun,
+  BacklogItemStatus,
+  BacklogStatus,
 } from '@agentos/core';
 import {
   canonicalConfigHash,
@@ -30,6 +36,7 @@ import {
   parseAgentOsConfig,
   persistenceId,
   resolveProjectVerificationPolicy,
+  advanceBacklog,
 } from '@agentos/core';
 
 export type IdGenerator = <Kind extends PersistenceIdKind>(
@@ -522,6 +529,23 @@ function inputForRun(
       ? { criteria: goalDefinitions(input.criteria) }
       : {}),
   };
+}
+
+export interface BacklogProjection {
+  readonly id: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly status: BacklogStatus;
+  readonly pausedReason?: string;
+  readonly items: readonly {
+    readonly id: string;
+    readonly ordinal: number;
+    readonly title: string;
+    readonly status: BacklogItemStatus;
+    readonly runId?: string;
+  }[];
+  readonly createdAt: IsoTimestamp;
+  readonly updatedAt: IsoTimestamp;
 }
 
 export interface RunProjection extends PersistenceDigests {
@@ -1267,6 +1291,249 @@ export class ControlPlaneService {
         422,
       );
     return { baseRunId, baseBranch, baseCommitSha };
+  }
+
+  async createBacklog(
+    idempotencyKey: string,
+    input: {
+      readonly projectId: string;
+      readonly title: string;
+      readonly items: readonly {
+        readonly title: string;
+        readonly description: string;
+      }[];
+    },
+  ): Promise<BacklogProjection> {
+    const projectId = persistenceId('project', input.projectId);
+    if ((await this.repository.getProject(projectId)) === undefined)
+      throw new ServiceError('project_not_found', 'project not found', 404);
+    const now = this.clock();
+    const id = this.generateId('backlog', `backlog:${idempotencyKey}`);
+    const existing = await this.repository.getBacklog(id);
+    const backlog =
+      existing ??
+      (await this.repository.createBacklog({
+        id,
+        projectId,
+        title: input.title,
+        status: 'active',
+        createdAt: now,
+        updatedAt: now,
+      }));
+    for (const [index, item] of input.items.entries()) {
+      const ordinal = index + 1;
+      await this.repository.createBacklogItemIdempotently({
+        id: this.generateId('backlogItem', `${id}:item:${String(ordinal)}`),
+        backlogId: backlog.id,
+        ordinal,
+        title: item.title,
+        description: item.description,
+        status: 'pending',
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    return this.backlogProjection(backlog);
+  }
+
+  async listBacklogs(projectId: string): Promise<readonly BacklogProjection[]> {
+    const backlogs = await this.repository.listBacklogs(
+      persistenceId('project', projectId),
+      { limit: 100 },
+    );
+    return mapWithConcurrency(backlogs, DIGEST_QUERY_CONCURRENCY, (backlog) =>
+      this.backlogProjection(backlog),
+    );
+  }
+
+  async setBacklogStatus(
+    id: string,
+    status: 'active' | 'paused',
+  ): Promise<BacklogProjection> {
+    const updated = await this.repository.updateBacklogStatus({
+      id: persistenceId('backlog', id),
+      // Resuming a completed backlog would re-open work that is done, so
+      // only the other state is a legal source for each move.
+      expected: status === 'active' ? ['paused'] : ['active'],
+      status,
+      updatedAt: this.clock(),
+    });
+    if (updated === undefined)
+      throw new ServiceError(
+        'backlog_state_conflict',
+        `backlog is not in a state that can become ${status}`,
+        409,
+      );
+    return this.backlogProjection(updated);
+  }
+
+  private async backlogProjection(
+    backlog: Backlog,
+  ): Promise<BacklogProjection> {
+    const items = await this.repository.listBacklogItems(backlog.id, {
+      limit: 100,
+    });
+    return {
+      id: backlog.id,
+      projectId: backlog.projectId,
+      title: redactText(backlog.title).slice(0, 200),
+      status: backlog.status,
+      ...(backlog.pausedReason === undefined
+        ? {}
+        : { pausedReason: backlog.pausedReason }),
+      items: items.map((item) => ({
+        id: item.id,
+        ordinal: item.ordinal,
+        title: redactText(item.title).slice(0, 200),
+        status: item.status,
+        ...(item.runId === undefined ? {} : { runId: item.runId }),
+      })),
+      createdAt: backlog.createdAt,
+      updatedAt: backlog.updatedAt,
+    };
+  }
+
+  /**
+   * Runs the advance decision for every backlog in a project and acts on it.
+   * Called from reconciliation, so it must be safe to run repeatedly and
+   * concurrently: the dispatch key is deterministic and the attach is a CAS,
+   * so a second pass over the same state creates nothing.
+   */
+  async advanceBacklogs(projectId: string): Promise<void> {
+    const backlogs = await this.repository.listBacklogs(
+      persistenceId('project', projectId),
+      { limit: 100 },
+    );
+    for (const backlog of backlogs) {
+      if (backlog.status !== 'active') continue;
+      const items = await this.repository.listBacklogItems(backlog.id, {
+        limit: 100,
+      });
+      const runs = new Map<string, BacklogItemRun>();
+      for (const item of items) {
+        if (item.runId === undefined) continue;
+        const run = await this.repository.getRun(
+          persistenceId('run', item.runId),
+        );
+        if (run === undefined) continue;
+        const outcome = record(run.output);
+        const publishedBranch = outcome?.publishedBranch;
+        const publishedCommitSha = outcome?.publishedCommitSha;
+        runs.set(item.runId, {
+          runId: item.runId,
+          status: run.status,
+          ...(typeof publishedBranch === 'string' ? { publishedBranch } : {}),
+          ...(typeof publishedCommitSha === 'string'
+            ? { publishedCommitSha }
+            : {}),
+        });
+      }
+      await this.settleBacklogItems(items, runs);
+      const settled = await this.repository.listBacklogItems(backlog.id, {
+        limit: 100,
+      });
+      const decision = advanceBacklog(backlog, settled, runs);
+      if (decision.kind === 'idle') continue;
+      if (decision.kind === 'complete') {
+        await this.repository.updateBacklogStatus({
+          id: backlog.id,
+          expected: ['active'],
+          status: 'completed',
+          updatedAt: this.clock(),
+        });
+        continue;
+      }
+      if (decision.kind === 'pause') {
+        await this.pauseBacklog(backlog.id, decision.reason);
+        continue;
+      }
+      await this.dispatchBacklogItem(backlog, decision.item, decision.baseRunId);
+    }
+  }
+
+  private async pauseBacklog(id: BacklogId, reason: string): Promise<void> {
+    await this.repository.updateBacklogStatus({
+      id,
+      expected: ['active'],
+      status: 'paused',
+      pausedReason: reason,
+      updatedAt: this.clock(),
+    });
+  }
+
+  /** Mirrors a terminal run onto the item that produced it. */
+  private async settleBacklogItems(
+    items: readonly BacklogItem[],
+    runs: ReadonlyMap<string, BacklogItemRun>,
+  ): Promise<void> {
+    for (const item of items) {
+      if (item.runId === undefined || item.status !== 'running') continue;
+      const run = runs.get(item.runId);
+      if (run === undefined) continue;
+      if (run.status === 'succeeded' || run.status === 'failed')
+        await this.repository.updateBacklogItem({
+          id: item.id,
+          expected: ['running'],
+          status: run.status,
+          updatedAt: this.clock(),
+        });
+      else if (run.status === 'cancelled')
+        await this.repository.updateBacklogItem({
+          id: item.id,
+          expected: ['running'],
+          status: 'failed',
+          updatedAt: this.clock(),
+        });
+    }
+  }
+
+  private async dispatchBacklogItem(
+    backlog: Backlog,
+    item: BacklogItem,
+    baseRunId: string | undefined,
+  ): Promise<void> {
+    const revision = await this.repository.getLatestConfigRevision(
+      backlog.projectId,
+    );
+    if (revision === undefined) {
+      await this.pauseBacklog(backlog.id, 'project_unconfigured');
+      return;
+    }
+    try {
+      const run = await this.createFeatureRun(
+        `backlog:${backlog.id}:item:${String(item.ordinal)}`,
+        {
+          projectId: backlog.projectId,
+          title: item.title,
+          description: item.description,
+          repositorySha: revision.repositorySha,
+          configDigest: revision.configDigest,
+          modelDigest: revision.modelDigest,
+          promptDigest: revision.promptDigest,
+          environmentDigest: revision.environmentDigest,
+          policyDigest: revision.policyDigest,
+          ...(baseRunId === undefined ? {} : { baseRunId }),
+        },
+      );
+      const attached = await this.repository.updateBacklogItem({
+        id: item.id,
+        expected: ['pending'],
+        status: 'running',
+        runId: run.id,
+        updatedAt: this.clock(),
+      });
+      // Another pass won the attach: it owns the run, and this one stops
+      // rather than pausing a backlog that is proceeding normally.
+      if (attached === undefined) return;
+    } catch (error) {
+      // Creation refusals are the operator's business -- a chain that went
+      // stale, a configuration applied mid-backlog, a project that vanished.
+      // The code is the reason, and the backlog stops on it.
+      await this.pauseBacklog(
+        backlog.id,
+        error instanceof ServiceError ? error.code : 'dispatch_failed',
+      );
+    }
   }
 
   private async createRun(

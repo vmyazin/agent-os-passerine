@@ -1642,6 +1642,166 @@ runtime: { provider: local }
   });
 }
 
+describe('project backlog', () => {
+  const config = () =>
+    loadAgentOsConfig(`
+version: 1
+project: { name: Passerine, repository: https://github.com/team/repo, defaultBranch: main }
+models: { standard: { provider: local, model: test } }
+agents: { implementer: { model: standard } }
+environments: { default: { runtime: process } }
+pipelines: { feature: { steps: [{ id: implement, agent: implementer }] } }
+policies: {}
+budgets: { workflowMicrodollars: 1, dailyMicrodollars: 2, concurrency: 1 }
+goals: { maxSteps: 2, maxRetries: 1, timeoutMs: 1000 }
+runtime: { provider: local }
+`);
+
+  const configured = async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+    );
+    const applied = await service.applyConfiguration('backlog-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const backlog = await service.createBacklog('backlog-1', {
+      projectId: applied.projectId,
+      title: 'Todo app',
+      items: [
+        { title: 'Add the store', description: 'The first feature.' },
+        { title: 'List by due date', description: 'Builds on the store.' },
+      ],
+    });
+    return { repository, service, applied, backlog };
+  };
+
+  it('dispatches the first item, and only the first, until it finishes', async () => {
+    const { service, backlog, applied } = await configured();
+
+    await service.advanceBacklogs(applied.projectId);
+    const afterFirst = (await service.listBacklogs(applied.projectId))[0];
+    expect(afterFirst?.items[0]).toMatchObject({ status: 'running' });
+    expect(afterFirst?.items[1]).toMatchObject({ status: 'pending' });
+
+    // A second pass over unchanged state must not start anything else.
+    await service.advanceBacklogs(applied.projectId);
+    const afterSecond = (await service.listBacklogs(applied.projectId))[0];
+    expect(afterSecond?.items[1]).toMatchObject({ status: 'pending' });
+    expect(afterSecond?.items[0]?.runId).toBe(afterFirst?.items[0]?.runId);
+    expect(backlog.items).toHaveLength(2);
+  });
+
+  it('chains the second item onto the first run once it publishes', async () => {
+    const { repository, service, applied } = await configured();
+    await service.advanceBacklogs(applied.projectId);
+    const first = (await service.listBacklogs(applied.projectId))[0]?.items[0];
+    const firstRunId = persistenceId('run', first!.runId!);
+    await repository.transitionRun(
+      firstRunId,
+      ['pending'],
+      {
+        status: 'succeeded',
+        output: {
+          status: 'succeeded',
+          publishedBranch: 'agentos/run-1-abcdef01',
+          publishedCommitSha: 'd'.repeat(40),
+        },
+        updatedAt: now,
+        completedAt: now,
+      },
+      0,
+    );
+
+    await service.advanceBacklogs(applied.projectId);
+
+    const backlog = (await service.listBacklogs(applied.projectId))[0];
+    expect(backlog?.items[0]).toMatchObject({ status: 'succeeded' });
+    expect(backlog?.items[1]).toMatchObject({ status: 'running' });
+    const second = await repository.getRun(
+      persistenceId('run', backlog!.items[1]!.runId!),
+    );
+    expect(
+      (second?.input as { chain?: Record<string, unknown> } | undefined)?.chain,
+    ).toMatchObject({
+      baseRunId: first!.runId,
+      baseCommitSha: 'd'.repeat(40),
+    });
+  });
+
+  it('pauses on a failed run instead of moving on', async () => {
+    const { repository, service, applied } = await configured();
+    await service.advanceBacklogs(applied.projectId);
+    const first = (await service.listBacklogs(applied.projectId))[0]?.items[0];
+    await repository.transitionRun(
+      persistenceId('run', first!.runId!),
+      ['pending'],
+      {
+        status: 'failed',
+        error: { code: 'workflow_deadline_exceeded' },
+        updatedAt: now,
+        completedAt: now,
+      },
+      0,
+    );
+
+    await service.advanceBacklogs(applied.projectId);
+
+    const backlog = (await service.listBacklogs(applied.projectId))[0];
+    expect(backlog).toMatchObject({
+      status: 'paused',
+      // The run is why it stopped, and naming the run rather than the item
+      // is what tells the operator where to look.
+      pausedReason: 'item_run_failed',
+    });
+    expect(backlog?.items[1]).toMatchObject({ status: 'pending' });
+
+    // And a paused backlog stays put until the operator says otherwise.
+    await service.advanceBacklogs(applied.projectId);
+    expect(
+      (await service.listBacklogs(applied.projectId))[0]?.items[1],
+    ).toMatchObject({ status: 'pending' });
+  });
+
+  it('completes when every item has succeeded', async () => {
+    const { repository, service, applied } = await configured();
+    for (let pass = 0; pass < 2; pass += 1) {
+      await service.advanceBacklogs(applied.projectId);
+      const item = (await service.listBacklogs(applied.projectId))[0]?.items[
+        pass
+      ];
+      await repository.transitionRun(
+        persistenceId('run', item!.runId!),
+        ['pending'],
+        {
+          status: 'succeeded',
+          output: {
+            status: 'succeeded',
+            publishedBranch: `agentos/run-${String(pass)}-abcdef01`,
+            publishedCommitSha: String(pass).repeat(40).slice(0, 40),
+          },
+          updatedAt: now,
+          completedAt: now,
+        },
+        0,
+      );
+    }
+
+    await service.advanceBacklogs(applied.projectId);
+
+    expect((await service.listBacklogs(applied.projectId))[0]).toMatchObject({
+      status: 'completed',
+    });
+  });
+});
+
 describe('run chaining', () => {
   const publishedRun = async (
     repository: InMemoryDomainRepository,

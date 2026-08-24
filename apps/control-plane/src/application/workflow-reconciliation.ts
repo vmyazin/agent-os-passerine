@@ -202,7 +202,15 @@ export async function reconcileWorkflowOutbox(
   outbox: WorkflowDispatchOutbox,
   clock: () => string = () => new Date().toISOString(),
   cursorStore?: WorkflowReconciliationCursorStore,
-  options?: { readonly projectId?: ProjectId },
+  options?: {
+    readonly projectId?: ProjectId;
+    /**
+     * Advances this project's backlogs after the run scan. Injected rather
+     * than imported so reconciliation keeps depending on the repository and
+     * the outbox alone, and so a test can watch it without a service.
+     */
+    readonly advanceBacklogs?: (projectId: ProjectId) => Promise<void>;
+  },
 ): Promise<{ scannedRuns: number; delivered: number; failed: number }> {
   let scannedRuns = 0;
   let delivered = 0;
@@ -593,5 +601,24 @@ export async function reconcileWorkflowOutbox(
     }
   }
   if (completedCycle) await cursorStore?.save(undefined);
+  // After the scan, because an item's run may have just been settled by it:
+  // advancing first would decide against state this pass is about to change.
+  if (options?.advanceBacklogs !== undefined) {
+    const projectIds =
+      options.projectId === undefined
+        ? (await repository.listProjects({ limit: 100 })).map(
+            (project) => project.id,
+          )
+        : [options.projectId];
+    for (const projectId of projectIds) {
+      try {
+        await options.advanceBacklogs(projectId);
+      } catch {
+        // A backlog that cannot advance must not stop the reconciliation
+        // pass that other runs depend on; the next pass tries again.
+        failed += 1;
+      }
+    }
+  }
   return { scannedRuns, delivered, failed };
 }

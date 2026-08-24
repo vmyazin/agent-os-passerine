@@ -1,6 +1,6 @@
 import { createNeonWorkflowReconciliationCursorStore } from '@agentos/adapters';
 import { repositoryFromEnv } from '../persistence/repository-factory';
-import { workflowDispatchFromEnv } from './runtime';
+import { controlPlaneService, workflowDispatchFromEnv } from './runtime';
 import { reconcileWorkflowOutbox } from './workflow-reconciliation';
 
 export async function runConfiguredWorkflowReconciliation(): Promise<unknown> {
@@ -18,7 +18,12 @@ export async function runConfiguredWorkflowReconciliation(): Promise<unknown> {
       outbox,
       undefined,
       createNeonWorkflowReconciliationCursorStore(process.env, project.id),
-      { projectId: project.id },
+      {
+        projectId: project.id,
+        advanceBacklogs: async (projectId) => {
+          await controlPlaneService().advanceBacklogs(projectId);
+        },
+      },
     );
     scannedRuns += result.scannedRuns;
     delivered += result.delivered;
