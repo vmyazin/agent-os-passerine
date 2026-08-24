@@ -939,6 +939,92 @@ div.inbox-message-copy {
   gap: 0.75rem;
 }
 
+/* A backlog on the project page: an ordered list the operator reads top to
+   bottom, where the item that is running and the reason a stopped one
+   stopped are the two things worth finding at a glance. */
+.backlog {
+  display: grid;
+  gap: 0.9rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.75rem;
+  background: var(--surface-sheet);
+  padding: 1.15rem;
+}
+
+.backlog + .backlog {
+  margin-top: 1rem;
+}
+
+.backlog-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.backlog-status {
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.backlog-status-active {
+  color: var(--signal-violet-dark);
+}
+
+.backlog-paused {
+  margin: 0;
+  border-radius: 0.6rem;
+  background: var(--surface-inset);
+  padding: 0.8rem 1rem;
+  color: var(--ink-command);
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+.backlog-items {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backlog-items li {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr auto;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.backlog-item-ordinal {
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.backlog-item-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.backlog-item-status {
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+
+.backlog-item-status-running {
+  color: var(--signal-violet-dark);
+  font-weight: 700;
+}
+
+.backlog-item-status-failed {
+  color: var(--danger-ink);
+  font-weight: 700;
+}
+
 /* Frozen acceptance tests in a spec approval. The operator has to be able
    to read the file that will decide the run, so the body is a real code
    block -- inset, monospace, and scrolling inside itself. Without the

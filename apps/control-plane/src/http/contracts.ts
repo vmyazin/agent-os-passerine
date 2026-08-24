@@ -134,6 +134,53 @@ export const inboxReplySchema = z
   })
   .strict();
 
+export const createBacklogSchema = z
+  .object({
+    projectId: id,
+    title: z.string().trim().min(1).max(200),
+    items: z
+      .array(
+        z
+          .object({
+            title: z.string().trim().min(1).max(200),
+            description: z.string().trim().min(1).max(10_000),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+export const backlogProjectionSchema = z
+  .object({
+    id: id,
+    projectId: id,
+    title: z.string(),
+    status: z.enum(['active', 'paused', 'completed']),
+    pausedReason: z.string().max(200).optional(),
+    items: z.array(
+      z
+        .object({
+          id: id,
+          ordinal: z.number().int().positive(),
+          title: z.string(),
+          status: z.enum([
+            'pending',
+            'running',
+            'succeeded',
+            'skipped',
+            'failed',
+          ]),
+          runId: z.string().optional(),
+        })
+        .strict(),
+    ),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
+
 export const runProjectionSchema = z
   .object({
     id: id,

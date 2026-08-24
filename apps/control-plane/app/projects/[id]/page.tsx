@@ -30,6 +30,7 @@ export default async function ProjectDetailPage({
       notFound();
     throw error;
   }
+  const backlogs = await controlPlaneService().listBacklogs(project.id);
 
   const runCountLabel =
     project.runCount === 1 ? '1 run' : `${project.runCount} runs`;
@@ -113,6 +114,56 @@ export default async function ProjectDetailPage({
           </div>
         </dl>
       </section>
+      {backlogs.length === 0 ? null : (
+        <section aria-labelledby="project-backlogs">
+          <div className="section-heading">
+            <h2 id="project-backlogs">Backlogs</h2>
+          </div>
+          {backlogs.map((backlog) => (
+            <article className="backlog" key={backlog.id}>
+              <div className="backlog-header">
+                <strong>{backlog.title}</strong>
+                <span className={`backlog-status backlog-status-${backlog.status}`}>
+                  {backlog.status}
+                </span>
+              </div>
+              {backlog.status !== 'paused' ? null : (
+                <p className="backlog-paused">
+                  {backlog.pausedReason === undefined ? (
+                    // No reason means nothing refused: an operator stopped it.
+                    <>You paused this backlog.</>
+                  ) : (
+                    <>
+                      Stopped on <code>{backlog.pausedReason}</code>.
+                    </>
+                  )}{' '}
+                  Nothing else starts until you resume it, and the work already
+                  published stays where it is.
+                </p>
+              )}
+              <ol className="backlog-items">
+                {backlog.items.map((item) => (
+                  <li key={item.id}>
+                    <span className="backlog-item-ordinal">{item.ordinal}</span>
+                    <span className="backlog-item-title">
+                      {item.runId === undefined ? (
+                        item.title
+                      ) : (
+                        <a href={`/runs/${item.runId}`}>{item.title}</a>
+                      )}
+                    </span>
+                    <span
+                      className={`backlog-item-status backlog-item-status-${item.status}`}
+                    >
+                      {item.status}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </article>
+          ))}
+        </section>
+      )}
       <section aria-labelledby="project-runs">
         <div className="section-heading">
           <h2 id="project-runs">Recent runs</h2>

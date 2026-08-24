@@ -170,5 +170,26 @@ untouched), and every refusal has its own credential-free case. What has
 needs paid model calls and a Trigger deployment, so it stays an explicit
 gap rather than an implied pass.
 
+Project backlogs are implemented
+([design](./superpowers/specs/2026-08-23-project-backlog-design.md),
+[plan](./superpowers/plans/2026-08-23-project-backlog.md)): an ordered list
+of feature requests per project, advanced by the reconciliation loop one
+chained item at a time, pausing on anything that is not a plain success.
+Together with chaining this is the difference between executing a feature
+and executing a project: the operator writes the list once and answers each
+run's spec/DoD approval, instead of hand-issuing every run and merging
+between them. The scheduler itself is a pure decision function, so its whole
+contract is a case table that runs without a database.
+
+Verification boundary for backlogs: the decision table, the dispatch
+idempotence, the pause-on-failure rule, and completion all run
+credential-free; both repository adapters agree through the parity contract,
+validated against real PostgreSQL on a disposable Neon branch (integration
+suite 33/33) — which is where the parity cases surfaced that this adapter's
+unique-violation check ignored drizzle's error wrapping, so every conflict in
+it, including two pre-existing goal-criterion paths, reported an opaque
+failure instead. No backlog has been driven end to end by real agent
+sessions; that needs paid model calls and a Trigger deployment.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

@@ -202,6 +202,37 @@ export async function POST(request: Request): Promise<Response> {
       createdAt: at,
       updatedAt: at,
     });
+  // A backlog mid-flight: one item published, one running, two waiting.
+  const backlogId = persistenceId('backlog', 'e2e-backlog');
+  if (!(await repository.getBacklog(backlogId))) {
+    await repository.createBacklog({
+      id: backlogId,
+      projectId,
+      title: 'Todo app, end to end',
+      status: 'active',
+      createdAt: at,
+      updatedAt: at,
+    });
+    const items = [
+      ['Add the todo store', 'succeeded', 'e2e-chain-base'],
+      ['List todos by due date', 'running', 'e2e-chain-next'],
+      ['Filter completed todos', 'pending', undefined],
+      ['Persist to disk', 'pending', undefined],
+    ] as const;
+    for (const [index, [title, status, runId]] of items.entries()) {
+      await repository.createBacklogItemIdempotently({
+        id: persistenceId('backlogItem', `e2e-backlog-item-${String(index + 1)}`),
+        backlogId,
+        ordinal: index + 1,
+        title,
+        description: `${title}.`,
+        status,
+        ...(runId === undefined ? {} : { runId }),
+        createdAt: at,
+        updatedAt: at,
+      });
+    }
+  }
   const messageId = persistenceId('inboxMessage', 'e2e-message');
   if (!(await repository.getInboxMessage(messageId)))
     await repository.createInboxMessage({

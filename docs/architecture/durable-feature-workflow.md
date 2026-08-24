@@ -96,6 +96,36 @@ A base branch that moved underneath a chained run hits the existing
 stale-base check at publication and fails without a partial write. The
 system still never merges: the stack is the operator's to land.
 
+## Backlogs
+
+A backlog is an ordered list of feature requests bound to a project. The
+operator writes it once; the system runs the items one at a time, each
+chained onto the last.
+
+`advanceBacklog` (`packages/core/src/backlog.ts`) is the whole scheduler as
+one pure function over durable state: given a backlog, its items in order,
+and the runs those items produced, is there an item to start now and on what
+base? Reconciliation calls it per project *after* its run scan — an item's
+run may have just been settled by that scan — and acts on the answer:
+dispatch through the ordinary `createFeatureRun` with `baseRunId`, complete
+the backlog, or pause it.
+
+Pause is the only failure mode. A run that fails, is cancelled, or publishes
+nothing to build on stops the backlog with that reason; so does any refusal
+from run creation, whose error code becomes the reason. The backlog never
+retries, never skips an item to keep going, and never dispatches past a
+non-success. Resuming is an explicit operator act.
+
+The chain depth bound is the release valve: when a stack reaches
+`config.chains.maxDepth`, the next dispatch would be refused, the backlog
+pauses, and the operator merges to continue. An unmerged stack of five
+features is five features' worth of conflict surface and review debt, and
+the bound is where the project said to stop.
+
+Two reconciliation passes over the same state start nothing twice: the
+dispatch idempotency key is `backlog:<id>:item:<ordinal>` and the attach of
+a run to an item is a CAS, backed by a `unique(run_id)` index.
+
 ## Replay and failure model
 
 `workflow_effects` records a fingerprint before every Trigger, runtime,
