@@ -10,6 +10,35 @@ import { z } from 'zod';
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 
+/**
+ * Why an artifact failed its schema, in terms an operator can act on.
+ *
+ * "artifact did not match its required schema" is true of every artifact in
+ * the workflow: it names neither which one nor what about it. The usual
+ * cause is a configuration whose agent prompts predate a schema version, and
+ * that is only diagnosable if the message says which artifact and which
+ * fields.
+ *
+ * Paths only. An issue's `received` value would echo agent-authored content
+ * into a durable error message stored on the run.
+ */
+export function artifactSchemaFailureMessage(
+  expected: { readonly stepId: string; readonly artifactId: string },
+  issues: readonly { readonly path: readonly PropertyKey[] }[],
+): string {
+  const fields = [
+    ...new Set(
+      issues
+        .map((issue) => issue.path.map((part) => String(part)).join('.'))
+        .filter((path) => path !== ''),
+    ),
+  ].slice(0, 5);
+  return (
+    `the ${expected.stepId} step's "${expected.artifactId}" artifact did not match its required schema` +
+    (fields.length === 0 ? '' : ` (${fields.join(', ')})`)
+  );
+}
+
 /** Where a chained run reads its source, resolved by the control plane. */
 export const runChainSchema = z
   .object({

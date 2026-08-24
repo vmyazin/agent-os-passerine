@@ -5,6 +5,7 @@ import {
   draftPublicationResultSchema,
   localPublicationResultSchema,
   publicationResultSchema,
+  artifactSchemaFailureMessage,
 } from './schemas.js';
 
 const validDraft = {
@@ -172,5 +173,49 @@ describe('definitionOfDoneSchema', () => {
         ],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('artifactSchemaFailureMessage', () => {
+  it('names the artifact, its step, and the fields that failed', () => {
+    // The case that cost a real run: a project whose applied configuration
+    // still tells the specifier to write definition-of-done-v1.
+    const parsed = definitionOfDoneSchema.safeParse({
+      version: 'definition-of-done-v1',
+      criteria: [
+        { id: 'tests', description: 'Tests pass', verifier: 'test-report' },
+      ],
+    });
+    expect(parsed.success).toBe(false);
+    const message = artifactSchemaFailureMessage(
+      { stepId: 'specification', artifactId: 'dod' },
+      parsed.success ? [] : parsed.error.issues,
+    );
+    expect(message).toContain('specification');
+    expect(message).toContain('"dod"');
+    expect(message).toMatch(/version|acceptanceTests/);
+  });
+
+  it('reports paths and never the values behind them', () => {
+    // An issue's received value is agent-authored; this message is stored on
+    // the run and rendered to the operator.
+    const message = artifactSchemaFailureMessage(
+      { stepId: 'implementation', artifactId: 'changes' },
+      [{ path: ['changes', 0, 'content'] }],
+    );
+    expect(message).toBe(
+      'the implementation step\'s "changes" artifact did not match its required schema (changes.0.content)',
+    );
+  });
+
+  it('still names the artifact when the failure has no path', () => {
+    expect(
+      artifactSchemaFailureMessage(
+        { stepId: 'review', artifactId: 'review' },
+        [{ path: [] }],
+      ),
+    ).toBe(
+      'the review step\'s "review" artifact did not match its required schema',
+    );
   });
 });

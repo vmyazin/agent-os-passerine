@@ -22,6 +22,7 @@ import {
 import type { ZodType } from 'zod';
 
 import {
+  artifactSchemaFailureMessage,
   changeSetSchema,
   definitionOfDoneSchema,
   featureSpecificationSchema,
@@ -249,7 +250,7 @@ async function parseArtifact<T>(
   const result = schema.safeParse(decoded);
   if (!result.success)
     throw new WorkflowPermanentError(
-      'artifact did not match its required schema',
+      artifactSchemaFailureMessage(expected, result.error.issues),
     );
   return result.data;
 }

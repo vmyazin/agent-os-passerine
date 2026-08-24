@@ -158,6 +158,17 @@ judged it. Approvals also have their own 24-hour TTL, and the 60-minute
 execution budget starts when the approval is consumed, so acceptance tests
 can be read overnight without spending the run's clock.
 
+**Applied configurations predating frozen acceptance tests must be
+re-applied.** The specifier prompt now has to write `definition-of-done-v2`
+with one `test/acceptance/<criterionId>.test.mjs` per criterion, and those
+prompts live in each project's *applied revision* -- not in the code. A
+project configured before that change runs its specification step
+successfully, produces a v1 Definition of Done, and fails the workflow when
+trusted code parses it. Re-apply the project's configuration (Configuration
+-> Change configuration, or `agentos config apply`) from the updated
+`agentos/passerine.yaml`. The failure message names the artifact, its step,
+and the offending fields so this is diagnosable from the run page.
+
 Run chaining is implemented
 ([design](./superpowers/specs/2026-08-23-run-chaining-design.md),
 [plan](./superpowers/plans/2026-08-23-run-chaining.md)): a feature run may

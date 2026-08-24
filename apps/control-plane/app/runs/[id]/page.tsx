@@ -78,6 +78,30 @@ export default async function RunPage({
           <CancelRunAction runId={run.id} />
         )}
       </section>
+      {run.error === undefined ? null : (
+        <section
+          aria-labelledby="failure-title"
+          className="dispatch-diagnosis dispatch-diagnosis-actionable"
+        >
+          <h2 className="dispatch-heading" id="failure-title">
+            Why it failed
+          </h2>
+          <p>{run.error.message ?? 'No reason was recorded.'}</p>
+          {run.error.details === undefined ||
+          run.error.details.length === 0 ? null : (
+            <ul>
+              {run.error.details.map((detail) => (
+                <li key={detail}>{detail}</li>
+              ))}
+            </ul>
+          )}
+          {run.error.code === undefined ? null : (
+            <p className="dispatch-ref">
+              <code>{run.error.code}</code>
+            </p>
+          )}
+        </section>
+      )}
       {diagnosis === undefined ? null : (
         <section
           aria-labelledby="dispatch-title"
