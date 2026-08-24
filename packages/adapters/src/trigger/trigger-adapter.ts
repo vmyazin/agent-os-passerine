@@ -35,6 +35,19 @@ export interface TriggerSdkBoundary {
     output: unknown,
   ): Promise<{ readonly success: boolean }>;
   cancelRun(id: string): Promise<void>;
+  /**
+   * What the executor did with a run this control plane handed off. Read-only
+   * and best-effort: an unknown id, a revoked key, or an unreachable API all
+   * answer `undefined` rather than throwing, because this exists to explain a
+   * page and must never be the reason one fails to render.
+   */
+  retrieveRun(id: string): Promise<
+    | {
+        readonly status: string;
+        readonly error?: string;
+      }
+    | undefined
+  >;
 }
 
 export function createTriggerSdkBoundary(): TriggerSdkBoundary {
@@ -72,6 +85,24 @@ export function createTriggerSdkBoundary(): TriggerSdkBoundary {
     },
     async cancelRun(id: string) {
       await runs.cancel(id);
+    },
+    async retrieveRun(id: string) {
+      try {
+        const run = (await runs.retrieve(id)) as {
+          readonly status?: unknown;
+          readonly error?: { readonly message?: unknown; readonly name?: unknown };
+        };
+        if (typeof run.status !== 'string') return undefined;
+        const message = run.error?.message ?? run.error?.name;
+        return {
+          status: run.status,
+          ...(typeof message === 'string' && message !== ''
+            ? { error: message.slice(0, 500) }
+            : {}),
+        };
+      } catch {
+        return undefined;
+      }
     },
   };
   return Object.freeze(boundary);

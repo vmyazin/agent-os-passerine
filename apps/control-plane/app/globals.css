@@ -939,6 +939,49 @@ div.inbox-message-copy {
   gap: 0.75rem;
 }
 
+/* Why a run has not started. Reads as prose rather than a stack trace,
+   because the operator's next move is usually outside this app. */
+.dispatch-diagnosis {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--line-soft);
+  border-radius: 0.75rem;
+  background: var(--surface-sheet);
+  padding: 1.15rem;
+  max-width: 46rem;
+}
+
+/* Something has to be done, as opposed to something has to be waited for. */
+.dispatch-diagnosis-actionable {
+  border-color: var(--danger-ink);
+  background: var(--danger-surface);
+}
+
+.dispatch-heading {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+.dispatch-diagnosis p {
+  margin: 0;
+  color: var(--ink-command);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.dispatch-remedy {
+  border-radius: 0.5rem;
+  background: var(--surface-sheet);
+  padding: 0.7rem 0.85rem;
+}
+
+.dispatch-ref {
+  color: var(--ink-secondary);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
 /* A run's status, in words. The badge says which state; this says how long
    it has been true and what has to happen next -- the part an operator is
    actually deciding on when they look at a page that has not changed. */

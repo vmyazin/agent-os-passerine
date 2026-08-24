@@ -12,6 +12,7 @@ import {
   createLocalSourceSnapshotIngestor,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
+  createTriggerSdkBoundary,
   createRepositoryRuntimeHandleVault,
   createRoutingRuntimeProvider,
   createRuntimeStartRecoveryResolver,
@@ -590,6 +591,40 @@ export function approvalArtifactStoreFromEnv() {
     secretAccessKey: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY'),
     manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
   });
+}
+
+/**
+ * The workflow checkpoint store, when this deployment has one. Reading the
+ * dispatch record needs it; a deployment without a database simply has no
+ * record to show.
+ */
+export function workflowCheckpointsFromEnv() {
+  if ((process.env.DATABASE_URL?.trim() ?? '') === '') return undefined;
+  try {
+    return createNeonWorkflowCheckpointStore(process.env);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What Trigger says about a run this control plane handed off.
+ *
+ * Enqueueing succeeds whether or not a worker exists, so this is the only
+ * source that can distinguish "queued behind other work" from "waiting for a
+ * worker that will never arrive". Gated on the same key that enables
+ * dispatch, and silent when it cannot answer.
+ */
+export async function externalRunStateFromEnv(externalRef: string): Promise<
+  | { readonly status: string; readonly error?: string }
+  | undefined
+> {
+  if ((process.env.TRIGGER_SECRET_KEY?.trim() ?? '') === '') return undefined;
+  try {
+    return await createTriggerSdkBoundary().retrieveRun(externalRef);
+  } catch {
+    return undefined;
+  }
 }
 
 export function controlPlaneService(): ControlPlaneService {

@@ -13,6 +13,10 @@ function fakeSdk() {
       calls.push({ method: 'triggerTask', args });
       return { id: 'trigger-run-safe-ref' };
     },
+    async retrieveRun(...args) {
+      calls.push({ method: 'retrieveRun', args });
+      return { status: 'QUEUED' };
+    },
     async createWaitpoint(...args) {
       calls.push({ method: 'createWaitpoint', args });
       return { id: 'waitpoint-safe-ref' };

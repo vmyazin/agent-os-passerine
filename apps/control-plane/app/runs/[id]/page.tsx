@@ -1,8 +1,12 @@
-import { loadRunPageModel } from '../../../src/application/run-page-model';
+import {
+  loadRunDispatch,
+  loadRunPageModel,
+} from '../../../src/application/run-page-model';
 import { requirePageSession } from '../../../src/auth/page-session';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import { CancelRunAction } from '../../../src/ui/mutation-forms';
+import { diagnoseDispatch } from '../../../src/ui/dispatch-diagnostics-model';
 import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
 import { explainRunStatus } from '../../../src/ui/run-status-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
@@ -29,6 +33,15 @@ export default async function RunPage({
     createdAt: run.createdAt,
     now,
   });
+  // Only for a run that has produced nothing yet: once steps exist, the
+  // steps are the better answer to "what is happening", and asking the
+  // executor on every render would be a request nobody reads.
+  const dispatch =
+    run.steps.length === 0 && !TERMINAL_STATUSES.has(run.status)
+      ? await loadRunDispatch(run.id)
+      : undefined;
+  const diagnosis =
+    dispatch === undefined ? undefined : diagnoseDispatch(dispatch);
   const explanation = explainRunStatus({
     status: run.status,
     stepCount: run.steps.length,
@@ -58,7 +71,28 @@ export default async function RunPage({
           <CancelRunAction runId={run.id} />
         )}
       </section>
-      {awaitingDispatch ? <UndispatchedRunNotice /> : null}
+      {diagnosis === undefined ? null : (
+        <section
+          aria-labelledby="dispatch-title"
+          className={`dispatch-diagnosis${diagnosis.actionable ? ' dispatch-diagnosis-actionable' : ''}`}
+        >
+          <h2 className="dispatch-heading" id="dispatch-title">
+            {diagnosis.headline}
+          </h2>
+          {diagnosis.detail === undefined ? null : <p>{diagnosis.detail}</p>}
+          {diagnosis.remedy === undefined ? null : (
+            <p className="dispatch-remedy">{diagnosis.remedy}</p>
+          )}
+          {diagnosis.externalRef === undefined ? null : (
+            <p className="dispatch-ref">
+              Trigger run <code>{diagnosis.externalRef}</code>
+            </p>
+          )}
+        </section>
+      )}
+      {awaitingDispatch && diagnosis?.fromExecutor !== true ? (
+        <UndispatchedRunNotice />
+      ) : null}
       <dl className="metadata">
         <div>
           <dt>Repository SHA</dt>
