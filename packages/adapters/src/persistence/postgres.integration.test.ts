@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  ProjectSourceIdentityConflictError,
   StaleConfigurationError,
 } from './errors.js';
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
@@ -80,6 +81,96 @@ describePostgres('PostgreSQL persistence integration', () => {
   });
 
   repositoryParityContract('postgresql', () => repository);
+
+  it('rolls back the losing project in concurrent import identity races', async () => {
+    const at = isoTimestamp('2026-08-24T12:00:00.000Z');
+    const localProjects = ['one', 'two'].map((name) => ({
+      id: persistenceId(
+        'project',
+        `import-idempotency-${name}-${randomUUID()}`,
+      ),
+      name,
+      createdAt: at,
+      updatedAt: at,
+    }));
+    const localResults = await Promise.allSettled(
+      localProjects.map((project, index) =>
+        repository.importProjectSource(
+          project,
+          {
+            kind: 'local',
+            projectId: project.id,
+            sourceKey: `local:/integration/${project.id}`,
+            localPath: `/integration/${project.id}`,
+            defaultBranch: 'main',
+            createdAt: at,
+            updatedAt: at,
+          },
+          {
+            idempotencyKey: `shared-import-${localProjects[0]!.id}`,
+            fingerprint: `fingerprint-${String(index)}`,
+          },
+        ),
+      ),
+    );
+    expect(
+      localResults.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      localResults.find((result) => result.status === 'rejected'),
+    ).toMatchObject({
+      reason: expect.any(IdempotencyConflictError),
+    });
+    const retainedLocalProjects = await Promise.all(
+      localProjects.map((project) => repository.getProject(project.id)),
+    );
+    expect(retainedLocalProjects.filter(Boolean)).toHaveLength(1);
+
+    const repositoryId = Math.floor(Math.random() * 1_000_000_000) + 1;
+    const githubProjects = ['before-rename', 'after-rename'].map((name) => ({
+      id: persistenceId('project', `import-github-${name}-${randomUUID()}`),
+      name,
+      createdAt: at,
+      updatedAt: at,
+    }));
+    const githubResults = await Promise.allSettled(
+      githubProjects.map((project, index) => {
+        const name = index === 0 ? 'before-rename' : 'after-rename';
+        return repository.importProjectSource(
+          project,
+          {
+            kind: 'github',
+            projectId: project.id,
+            sourceKey: `github:integration/${name}`,
+            repositoryUrl: `https://github.com/integration/${name}`,
+            owner: 'integration',
+            name,
+            repositoryId,
+            readerInstallationId: 7,
+            defaultBranch: 'main',
+            createdAt: at,
+            updatedAt: at,
+          },
+          {
+            idempotencyKey: `github-import-${project.id}`,
+            fingerprint: `github-fingerprint-${String(index)}`,
+          },
+        );
+      }),
+    );
+    expect(
+      githubResults.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      githubResults.find((result) => result.status === 'rejected'),
+    ).toMatchObject({
+      reason: expect.any(ProjectSourceIdentityConflictError),
+    });
+    const retainedGitHubProjects = await Promise.all(
+      githubProjects.map((project) => repository.getProject(project.id)),
+    );
+    expect(retainedGitHubProjects.filter(Boolean)).toHaveLength(1);
+  });
 
   it('atomically checkpoints effects and enforces durable workflow admission', async () => {
     const suffix = randomUUID();

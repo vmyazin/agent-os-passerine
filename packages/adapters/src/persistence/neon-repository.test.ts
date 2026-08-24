@@ -100,6 +100,47 @@ function eventWithSequence(sequence = 1) {
 }
 
 describe('NeonDomainRepository', () => {
+  it('keeps project, source, and idempotency ledger in one rollback-safe statement', async () => {
+    const { execute, repository } = repositoryWithRows([
+      {
+        project_id: 'project-import',
+        created: false,
+        idempotency_conflict: true,
+      },
+    ]);
+    const at = isoTimestamp('2026-08-24T12:00:00.000Z');
+    await expect(
+      repository.importProjectSource(
+        {
+          id: persistenceId('project', 'project-import'),
+          name: 'Imported',
+          createdAt: at,
+          updatedAt: at,
+        },
+        {
+          kind: 'local',
+          projectId: persistenceId('project', 'project-import'),
+          sourceKey: 'local:/work/imported',
+          localPath: '/work/imported',
+          defaultBranch: 'main',
+          createdAt: at,
+          updatedAt: at,
+        },
+        { idempotencyKey: 'import-key', fingerprint: 'fingerprint' },
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+
+    const statement = executedSql(execute);
+    expect(statement).toContain('insert into project_source_import_requests');
+    expect(statement).toContain('select 1 from inserted_project');
+    expect(statement).not.toMatch(
+      /insert into project_sources[\s\S]+on conflict do nothing[\s\S]+returning project_id/,
+    );
+    expect(statement).not.toMatch(
+      /insert into project_source_import_requests[\s\S]+on conflict do nothing[\s\S]+returning project_id/,
+    );
+  });
+
   it('does not require or connect to a database during import', () => {
     expect(NeonDomainRepository).toBeTypeOf('function');
   });

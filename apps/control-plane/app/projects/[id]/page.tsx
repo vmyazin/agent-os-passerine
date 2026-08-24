@@ -14,6 +14,8 @@ import {
 } from '../../../src/ui/backlog-forms';
 import { backlogView } from '../../../src/ui/backlog-view-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
+import { CommitFeed } from '../../../src/ui/commit-feed';
+import { ImportProjectDialog } from '../../../src/ui/import-project-dialog';
 
 export const dynamic = 'force-dynamic';
 
@@ -54,7 +56,10 @@ export default async function ProjectDetailPage({
     <div className="page-stack">
       <PageToolbar
         action={
-          <a className="secondary-link" href={`/configuration?projectId=${encodeURIComponent(project.id)}`}>
+          <a
+            className="secondary-link"
+            href={`/configuration?projectId=${encodeURIComponent(project.id)}`}
+          >
             View configuration
           </a>
         }
@@ -72,11 +77,18 @@ export default async function ProjectDetailPage({
           {...(project.drifted === true &&
           project.appliedSha !== undefined &&
           project.headSha !== undefined
-            ? { drift: { appliedSha: project.appliedSha, headSha: project.headSha } }
+            ? {
+                drift: {
+                  appliedSha: project.appliedSha,
+                  headSha: project.headSha,
+                },
+              }
             : {})}
           {...(project.workflowBudgetMicrodollars === undefined
             ? {}
-            : { workflowBudgetMicrodollars: project.workflowBudgetMicrodollars })}
+            : {
+                workflowBudgetMicrodollars: project.workflowBudgetMicrodollars,
+              })}
           {...(project.dailyBudgetMicrodollars === undefined
             ? {}
             : { dailyBudgetMicrodollars: project.dailyBudgetMicrodollars })}
@@ -91,7 +103,9 @@ export default async function ProjectDetailPage({
         <article>
           <span className="metric-label">Latest revision</span>
           <strong className="metric-value">
-            {project.latestRevision === undefined ? '—' : `r${project.latestRevision}`}
+            {project.latestRevision === undefined
+              ? '—'
+              : `r${project.latestRevision}`}
           </strong>
           <span className="metric-detail">
             {project.configDigest === undefined
@@ -128,6 +142,12 @@ export default async function ProjectDetailPage({
             <dt>Binding</dt>
             <dd>{project.binding}</dd>
           </div>
+          {project.source === undefined ? null : (
+            <div>
+              <dt>Source</dt>
+              <dd>{project.source.location}</dd>
+            </div>
+          )}
           <div>
             <dt>Updated</dt>
             <dd>{formatDisplayDate(project.updatedAt)}</dd>
@@ -148,6 +168,25 @@ export default async function ProjectDetailPage({
             </dd>
           </div>
         </dl>
+      </section>
+      <section aria-labelledby="project-commits">
+        <div className="section-heading">
+          <h2 id="project-commits">Commit history</h2>
+        </div>
+        {project.source === undefined ? (
+          <div className="source-less-project">
+            <p>
+              This project has no imported repository source, so live commit
+              history is not available yet.
+            </p>
+            <ImportProjectDialog triggerLabel="Import source" />
+          </div>
+        ) : (
+          <CommitFeed
+            defaultBranch={project.source.defaultBranch}
+            projectId={project.id}
+          />
+        )}
       </section>
       <section aria-labelledby="project-backlogs">
         <div className="section-heading">
@@ -197,7 +236,9 @@ export default async function ProjectDetailPage({
                 <ol className="backlog-items">
                   {view.items.map((item) => (
                     <li key={item.id}>
-                      <span className="backlog-item-ordinal">{item.ordinal}</span>
+                      <span className="backlog-item-ordinal">
+                        {item.ordinal}
+                      </span>
                       <span className="backlog-item-title">
                         {item.runId === undefined ? (
                           item.title
@@ -224,12 +265,14 @@ export default async function ProjectDetailPage({
       <section aria-labelledby="project-runs">
         <div className="section-heading">
           <h2 id="project-runs">Recent runs</h2>
-          <a href={`/runs?projectId=${encodeURIComponent(project.id)}`}>View all</a>
+          <a href={`/runs?projectId=${encodeURIComponent(project.id)}`}>
+            View all
+          </a>
         </div>
         {project.recentRuns.length === 0 ? (
           <EmptyState title="No runs yet">
-            Start a feature from{' '}
-            <a href="/setup">Setup</a> or the API to see activity here.
+            Start a feature from <a href="/setup">Setup</a> or the API to see
+            activity here.
           </EmptyState>
         ) : (
           <ul className="run-list">

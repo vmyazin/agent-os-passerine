@@ -45,6 +45,11 @@ import type {
   BacklogItemStatus,
   BacklogStatus,
 } from './backlog.js';
+import type {
+  ProjectSource,
+  ProjectSourceImportRequest,
+  ProjectSourceImportResult,
+} from './project-source.js';
 
 export type IsoTimestamp = string & {
   readonly [isoTimestampBrand]: 'IsoTimestamp';
@@ -470,6 +475,13 @@ export interface DomainRepository {
   listProjects(
     page?: ListPage<TimestampListCursor<ProjectId>>,
   ): Promise<readonly Project[]>;
+  importProjectSource(
+    project: Project,
+    source: ProjectSource,
+    request?: ProjectSourceImportRequest,
+  ): Promise<ProjectSourceImportResult>;
+  getProjectSource(projectId: ProjectId): Promise<ProjectSource | undefined>;
+  getProjectSourceByKey(sourceKey: string): Promise<ProjectSource | undefined>;
 
   createConfigRevision(revision: ConfigRevision): Promise<ConfigRevision>;
   applyConfigRevision(
@@ -504,7 +516,9 @@ export interface DomainRepository {
    * silently saturates at the page cap, which turns a displayed total into a
    * number that stops moving once a project gets busy.
    */
-  countRuns(filter?: Pick<RunListFilter, 'projectId' | 'status'>): Promise<number>;
+  countRuns(
+    filter?: Pick<RunListFilter, 'projectId' | 'status'>,
+  ): Promise<number>;
   updateRun(id: WorkflowRunId, update: WorkflowRunUpdate): Promise<WorkflowRun>;
   transitionRun(
     id: WorkflowRunId,

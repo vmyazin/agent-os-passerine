@@ -35,6 +35,12 @@ reconciliation loop. Treat a wiki claim as a hint to verify, never as evidence: 
 the file, not the wiki. Never hand-edit it either, since the next generation silently
 discards the edit; fix the code or the doc it was generated from and regenerate.
 
+## Auto-load routing
+
+- Project import, repository trust, source identity, or commit browsing → first
+  read `docs/architecture/project-sources.md`, because the import registry grants
+  inspection only and must not be mistaken for runtime or publication authority.
+
 ## Session workflow (worktree → smoke-test → ship → wipe)
 
 Assume several agent sessions run against this repo in parallel. The main checkout

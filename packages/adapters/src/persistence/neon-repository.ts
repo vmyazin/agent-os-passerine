@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { neon, types } from '@neondatabase/serverless';
 import {
@@ -7,6 +7,8 @@ import {
   canonicalJsonValue,
   isoTimestamp,
   isoTimestampEpochMicroseconds,
+  assertValidProjectSource,
+  assertValidProjectSourceImportRequest,
 } from '@agentos/core';
 import type {
   Approval,
@@ -45,6 +47,9 @@ import type {
   ListPage,
   Project,
   ProjectId,
+  ProjectSource,
+  ProjectSourceImportRequest,
+  ProjectSourceImportResult,
   ReplyInboxMessageRequest,
   RunListFilter,
   RunStatus,
@@ -90,6 +95,7 @@ import {
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  ProjectSourceIdentityConflictError,
   StaleConfigurationError,
 } from './errors.js';
 import {
@@ -112,11 +118,13 @@ import {
   mapGoalProgressRow,
   mapInboxMessageRow,
   mapProjectRow,
+  mapProjectSourceRow,
   mapStepRunRow,
   mapUsageRecordRow,
   mapWebhookReceiptRow,
   mapWorkflowRunRow,
   projectSelection,
+  projectSourceSelection,
   stepRunSelection,
   usageRecordSelection,
   workflowRunSelection,
@@ -137,6 +145,7 @@ import {
   goalProgress,
   inboxMessages,
   projects,
+  projectSources,
   stepRuns,
   usageRecords,
   workflowRuns,
@@ -391,6 +400,194 @@ export class NeonDomainRepository implements DomainRepository {
       .where(eq(projects.id, id))
       .limit(1);
     return row === undefined ? undefined : mapProjectRow(row);
+  }
+
+  async importProjectSource(
+    project: Project,
+    source: ProjectSource,
+    request?: ProjectSourceImportRequest,
+  ): Promise<ProjectSourceImportResult> {
+    if (source.projectId !== project.id)
+      throw new TypeError('project source projectId must match project id');
+    assertValidProjectSource(source);
+    const implicitFingerprint = createHash('sha256')
+      .update(source.sourceKey)
+      .digest('hex');
+    const effectiveRequest = request ?? {
+      idempotencyKey: `implicit:${implicitFingerprint}`,
+      fingerprint: implicitFingerprint,
+    };
+    assertValidProjectSourceImportRequest(effectiveRequest);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = executionRows(
+          await this.database.execute(sql`
+        with existing_request as materialized (
+          select fingerprint, source_key, project_id
+          from project_source_import_requests
+          where idempotency_key = ${effectiveRequest.idempotencyKey}
+        ), source_lock as materialized (
+          select
+            pg_advisory_xact_lock(hashtextextended(${source.sourceKey}, 0)),
+            pg_advisory_xact_lock(hashtextextended(${source.kind === 'github' ? `github-repository-id:${String(source.repositoryId)}` : source.sourceKey}, 0)),
+            pg_advisory_xact_lock(hashtextextended(${`project-source-import:${effectiveRequest.idempotencyKey}`}, 0))
+        ), existing_source as materialized (
+          select ps.project_id
+          from project_sources ps
+          cross join source_lock
+          where ps.source_key = ${source.sourceKey}
+        ), existing_repository as materialized (
+          select ps.project_id
+          from project_sources ps
+          cross join source_lock
+          where ${source.kind === 'github'}
+            and ps.repository_id = ${source.kind === 'github' ? source.repositoryId : null}
+        ), inserted_project as (
+          insert into projects (id, name, repository, created_at, updated_at)
+          select ${project.id}, ${project.name}, ${project.repository ?? null},
+                 ${project.createdAt}, ${project.updatedAt}
+          from source_lock
+          where not exists (select 1 from existing_request)
+            and not exists (select 1 from existing_source)
+            and not exists (select 1 from existing_repository)
+          on conflict (id) do nothing
+          returning id
+        ), inserted_source as (
+          insert into project_sources (
+            project_id, kind, source_key, default_branch, repository_url,
+            github_owner, github_name, repository_id, reader_installation_id,
+            publisher_installation_id, local_path, created_at, updated_at
+          )
+          select
+            ${source.projectId}, ${source.kind}, ${source.sourceKey},
+            ${source.defaultBranch},
+            ${source.kind === 'github' ? source.repositoryUrl : null},
+            ${source.kind === 'github' ? source.owner : null},
+            ${source.kind === 'github' ? source.name : null},
+            ${source.kind === 'github' ? source.repositoryId : null},
+            ${source.kind === 'github' ? source.readerInstallationId : null},
+            ${source.kind === 'github' ? (source.publisherInstallationId ?? null) : null},
+            ${source.kind === 'local' ? source.localPath : null},
+            ${source.createdAt}, ${source.updatedAt}
+          from source_lock
+          where not exists (select 1 from existing_request)
+            and not exists (select 1 from existing_source)
+            and not exists (select 1 from existing_repository)
+            and (
+              exists (select 1 from inserted_project where id = ${project.id})
+              or exists (select 1 from projects where id = ${project.id})
+            )
+          returning project_id
+        ), chosen_source as materialized (
+          select project_id
+          from (
+            select project_id from existing_source
+            union all
+            select project_id from existing_repository
+            union all
+            select project_id from inserted_source
+            union all
+            select project_id from project_sources where source_key = ${source.sourceKey}
+          ) candidates
+          group by project_id
+        ), inserted_request as (
+          insert into project_source_import_requests (
+            idempotency_key, fingerprint, source_key, project_id, created_at
+          )
+          select ${effectiveRequest.idempotencyKey},
+                 ${effectiveRequest.fingerprint},
+                 ${source.sourceKey},
+                 chosen_source.project_id,
+                 ${source.createdAt}
+          from chosen_source
+          where not exists (select 1 from existing_request)
+          returning project_id
+        )
+        select
+          coalesce(
+            (select project_id from existing_request),
+            (select project_id from inserted_request),
+            (select project_id from chosen_source)
+          ) as project_id,
+          exists (select 1 from inserted_project) as created,
+          exists (
+            select 1 from existing_request
+            where fingerprint <> ${effectiveRequest.fingerprint}
+               or source_key <> ${source.sourceKey}
+          ) as idempotency_conflict
+        from source_lock
+      `),
+        );
+        const importRow = one(result, 'Project source import');
+        if (importRow.idempotency_conflict === true)
+          throw new IdempotencyConflictError(
+            'Project source import',
+            effectiveRequest.idempotencyKey,
+          );
+        const importedProjectId = importRow.project_id;
+        if (typeof importedProjectId !== 'string') {
+          if (attempt < 2) continue;
+          throw new Error(`Project ${project.id} already has a source`);
+        }
+
+        const importedProject = await this.getProject(
+          importedProjectId as ProjectId,
+        );
+        const importedSource = await this.getProjectSource(
+          importedProjectId as ProjectId,
+        );
+        if (importedProject === undefined || importedSource === undefined) {
+          if (attempt < 2) continue;
+          throw new Error('Imported project source was not returned');
+        }
+        if (
+          source.kind === 'github' &&
+          (importedSource.kind !== 'github' ||
+            importedSource.repositoryId !== source.repositoryId ||
+            importedSource.sourceKey !== source.sourceKey)
+        )
+          throw new ProjectSourceIdentityConflictError();
+        return {
+          project: importedProject,
+          source: importedSource,
+          created: importRow.created === true,
+        };
+      } catch (error) {
+        if (
+          error instanceof IdempotencyConflictError ||
+          error instanceof ProjectSourceIdentityConflictError
+        )
+          throw error;
+        if (isPostgresUniqueViolation(error) && attempt < 2) continue;
+        if (isPostgresUniqueViolation(error))
+          throw new ProjectSourceIdentityConflictError();
+        throw error;
+      }
+    }
+    throw new Error('Project source import retries were exhausted');
+  }
+
+  async getProjectSource(
+    projectId: ProjectId,
+  ): Promise<ProjectSource | undefined> {
+    const [row] = await this.database
+      .select(projectSourceSelection)
+      .from(projectSources)
+      .where(eq(projectSources.projectId, projectId))
+      .limit(1);
+    return row === undefined ? undefined : mapProjectSourceRow(row);
+  }
+
+  async getProjectSourceByKey(
+    sourceKey: string,
+  ): Promise<ProjectSource | undefined> {
+    const [row] = await this.database
+      .select(projectSourceSelection)
+      .from(projectSources)
+      .where(eq(projectSources.sourceKey, sourceKey))
+      .limit(1);
+    return row === undefined ? undefined : mapProjectSourceRow(row);
   }
 
   async listProjects(
@@ -1890,28 +2087,26 @@ export class NeonDomainRepository implements DomainRepository {
     readonly updatedAt: IsoTimestamp;
   }): Promise<Backlog | undefined> {
     const [row] = await this.database
-        .update(backlogs)
-        .set({
-          status: request.status,
-          // Leaving a stale reason on a resumed backlog would tell the
-          // operator it is still stuck on something it is not.
-          pausedReason:
-            request.status === 'paused' ? (request.pausedReason ?? null) : null,
-          updatedAt: request.updatedAt,
-        })
-        .where(
-          and(
-            eq(backlogs.id, request.id),
-            inArray(backlogs.status, [...request.expected]),
-          ),
-        )
-        .returning(backlogSelection);
+      .update(backlogs)
+      .set({
+        status: request.status,
+        // Leaving a stale reason on a resumed backlog would tell the
+        // operator it is still stuck on something it is not.
+        pausedReason:
+          request.status === 'paused' ? (request.pausedReason ?? null) : null,
+        updatedAt: request.updatedAt,
+      })
+      .where(
+        and(
+          eq(backlogs.id, request.id),
+          inArray(backlogs.status, [...request.expected]),
+        ),
+      )
+      .returning(backlogSelection);
     return row === undefined ? undefined : mapBacklogRow(row);
   }
 
-  async createBacklogItemIdempotently(
-    item: BacklogItem,
-  ): Promise<BacklogItem> {
+  async createBacklogItemIdempotently(item: BacklogItem): Promise<BacklogItem> {
     try {
       const rows = await this.database
         .insert(backlogItems)
@@ -1994,24 +2189,24 @@ export class NeonDomainRepository implements DomainRepository {
   }): Promise<BacklogItem | undefined> {
     try {
       const [row] = await this.database
-          .update(backlogItems)
-          .set({
-            status: request.status,
-            ...(request.runId === undefined ? {} : { runId: request.runId }),
-            updatedAt: request.updatedAt,
-          })
-          .where(
-            and(
-              eq(backlogItems.id, request.id),
-              inArray(backlogItems.status, [...request.expected]),
-              // Attaching a run requires the item to have none yet, so a
-              // racing dispatch loses here rather than at the unique index.
-              request.runId === undefined
-                ? undefined
-                : isNull(backlogItems.runId),
-            ),
-          )
-          .returning(backlogItemSelection);
+        .update(backlogItems)
+        .set({
+          status: request.status,
+          ...(request.runId === undefined ? {} : { runId: request.runId }),
+          updatedAt: request.updatedAt,
+        })
+        .where(
+          and(
+            eq(backlogItems.id, request.id),
+            inArray(backlogItems.status, [...request.expected]),
+            // Attaching a run requires the item to have none yet, so a
+            // racing dispatch loses here rather than at the unique index.
+            request.runId === undefined
+              ? undefined
+              : isNull(backlogItems.runId),
+          ),
+        )
+        .returning(backlogItemSelection);
       return row === undefined ? undefined : mapBacklogItemRow(row);
     } catch (error) {
       // Another item already owns that run: the same race, seen from the

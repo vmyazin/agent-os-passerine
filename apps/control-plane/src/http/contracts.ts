@@ -390,9 +390,114 @@ export const projectListProjectionSchema = z
   })
   .strict();
 
+export const projectSourceImportInputSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('github'),
+      repositoryUrl: z.string().trim().min(1).max(2_048),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('local'),
+      localPath: z.string().trim().min(1).max(4_096).startsWith('/'),
+      defaultBranch: z.string().trim().min(1).max(255).optional(),
+    })
+    .strict(),
+]);
+
+export const projectSourceInspectionSchema = z
+  .object({
+    kind: z.enum(['github', 'local']),
+    sourceKey: z.string().min(1).max(4_096),
+    canonicalLocation: z.string().min(1).max(4_096),
+    suggestedName: z.string().min(1).max(200),
+    defaultBranch: z.string().min(1).max(255),
+    headSha: z.string().regex(/^[0-9a-f]{40}$/),
+    publisherReady: z.boolean().optional(),
+  })
+  .strict();
+
+const projectSourceCommon = {
+  projectId: id,
+  sourceKey: z.string().min(1).max(4_096),
+  defaultBranch: z.string().min(1).max(255),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+};
+
+export const projectSourceSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      ...projectSourceCommon,
+      kind: z.literal('github'),
+      repositoryUrl: z.string().url().max(2_048),
+      owner: z.string().min(1).max(100),
+      name: z.string().min(1).max(100),
+      repositoryId: z.number().int().positive().safe(),
+      readerInstallationId: z.number().int().positive().safe(),
+      publisherInstallationId: z.number().int().positive().safe().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ...projectSourceCommon,
+      kind: z.literal('local'),
+      localPath: z.string().min(1).max(4_096).startsWith('/'),
+    })
+    .strict(),
+]);
+
+export const projectSourceImportResultSchema = z
+  .object({
+    project: z
+      .object({
+        id,
+        name: z.string().min(1).max(200),
+        repository: z.string().max(4_096).optional(),
+        createdAt: z.string(),
+        updatedAt: z.string(),
+      })
+      .strict(),
+    source: projectSourceSchema,
+    created: z.boolean(),
+  })
+  .strict();
+
+export const commitPageSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            sha: z.string().regex(/^[0-9a-f]{40}$/),
+            subject: z.string().max(500),
+            authorName: z.string().min(1).max(200),
+            committedAt: z.string(),
+            url: z.string().url().max(4_096).optional(),
+          })
+          .strict(),
+      )
+      .max(25),
+    nextCursor: z.string().min(1).max(2_048).optional(),
+  })
+  .strict();
+
 export const projectDetailProjectionSchema = projectListProjectionSchema.extend({
   workflowBudgetMicrodollars: z.number().int().positive().optional(),
   dailyBudgetMicrodollars: z.number().int().positive().optional(),
+  appliedSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  drifted: z.boolean().optional(),
+  source: z
+    .object({
+      kind: z.enum(['github', 'local']),
+      location: z.string().min(1).max(4_096),
+      defaultBranch: z.string().min(1).max(255),
+      publisherReady: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
   recentRuns: z.array(runProjectionSchema),
 });
 

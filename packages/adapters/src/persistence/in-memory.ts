@@ -1,7 +1,11 @@
+import { createHash } from 'node:crypto';
+
 import {
   ARTIFACT_CAPABILITY_MAX_CALLS,
   ARTIFACT_CAPABILITY_MAX_CUMULATIVE_BYTES,
   canonicalJsonValue,
+  assertValidProjectSource,
+  assertValidProjectSourceImportRequest,
   isoTimestamp,
   isoTimestampEpochMicroseconds,
 } from '@agentos/core';
@@ -46,6 +50,9 @@ import type {
   ListPage,
   Project,
   ProjectId,
+  ProjectSource,
+  ProjectSourceImportRequest,
+  ProjectSourceImportResult,
   ReplyInboxMessageRequest,
   RunListFilter,
   RunStatus,
@@ -65,6 +72,7 @@ import type {
 import {
   EventFingerprintConflictError,
   IdempotencyConflictError,
+  ProjectSourceIdentityConflictError,
   StaleConfigurationError,
 } from './errors.js';
 import { boundedListLimit } from './pagination.js';
@@ -84,6 +92,7 @@ export {
   EventFingerprintConflictError,
   EventSequenceConflictError,
   IdempotencyConflictError,
+  ProjectSourceIdentityConflictError,
   StaleConfigurationError,
 } from './errors.js';
 
@@ -247,6 +256,17 @@ function immutableArtifactMatches(
 
 export class InMemoryDomainRepository implements DomainRepository {
   readonly #projects = new Map<string, Project>();
+  readonly #projectSources = new Map<string, ProjectSource>();
+  readonly #projectSourceKeys = new Map<string, string>();
+  readonly #githubRepositoryIds = new Map<number, string>();
+  readonly #projectSourceImportRequests = new Map<
+    string,
+    {
+      readonly fingerprint: string;
+      readonly sourceKey: string;
+      readonly projectId: string;
+    }
+  >();
   readonly #configRevisions = new Map<string, ConfigRevision>();
   readonly #configRevisionKeys = new Map<string, string>();
   readonly #configSnapshots = new Map<string, ConfigSnapshot>();
@@ -315,6 +335,148 @@ export class InMemoryDomainRepository implements DomainRepository {
           ),
         )
         .slice(0, boundedListLimit(page.limit)),
+    );
+  }
+
+  async importProjectSource(
+    project: Project,
+    source: ProjectSource,
+    request?: ProjectSourceImportRequest,
+  ): Promise<ProjectSourceImportResult> {
+    if (source.projectId !== project.id)
+      throw new TypeError('project source projectId must match project id');
+    assertPersistenceTimestamps(project);
+    assertValidProjectSource(source);
+    const implicitFingerprint = createHash('sha256')
+      .update(source.sourceKey)
+      .digest('hex');
+    const effectiveRequest = request ?? {
+      idempotencyKey: `implicit:${implicitFingerprint}`,
+      fingerprint: implicitFingerprint,
+    };
+    assertValidProjectSourceImportRequest(effectiveRequest);
+    const sourceProjectForIdentity = this.#projectSourceKeys.get(
+      source.sourceKey,
+    );
+    if (source.kind === 'github' && sourceProjectForIdentity !== undefined) {
+      const attachedSource = requireEntry(
+        this.#projectSources,
+        sourceProjectForIdentity,
+        'Project source',
+      );
+      if (
+        attachedSource.kind !== 'github' ||
+        attachedSource.repositoryId !== source.repositoryId
+      )
+        throw new ProjectSourceIdentityConflictError();
+    }
+    const replay = this.#projectSourceImportRequests.get(
+      effectiveRequest.idempotencyKey,
+    );
+    if (replay !== undefined) {
+      if (
+        replay.fingerprint !== effectiveRequest.fingerprint ||
+        replay.sourceKey !== source.sourceKey
+      )
+        throw new IdempotencyConflictError(
+          'Project source import',
+          effectiveRequest.idempotencyKey,
+        );
+      const replayProject = requireEntry(
+        this.#projects,
+        replay.projectId,
+        'Project',
+      );
+      const replaySource = requireEntry(
+        this.#projectSources,
+        replay.projectId,
+        'Project source',
+      );
+      return copy({
+        project: replayProject,
+        source: replaySource,
+        created: false,
+      });
+    }
+
+    const existingSourceProjectId = this.#projectSourceKeys.get(
+      source.sourceKey,
+    );
+    if (existingSourceProjectId !== undefined) {
+      const existingProject = requireEntry(
+        this.#projects,
+        existingSourceProjectId,
+        'Project',
+      );
+      const existingSource = requireEntry(
+        this.#projectSources,
+        existingSourceProjectId,
+        'Project source',
+      );
+      if (
+        source.kind === 'github' &&
+        (existingSource.kind !== 'github' ||
+          existingSource.repositoryId !== source.repositoryId)
+      )
+        throw new ProjectSourceIdentityConflictError();
+      this.failBeforeCommit('importProjectSource');
+      this.#projectSourceImportRequests.set(effectiveRequest.idempotencyKey, {
+        fingerprint: effectiveRequest.fingerprint,
+        sourceKey: source.sourceKey,
+        projectId: existingSourceProjectId,
+      });
+      return copy({
+        project: existingProject,
+        source: existingSource,
+        created: false,
+      });
+    }
+
+    if (
+      source.kind === 'github' &&
+      this.#githubRepositoryIds.has(source.repositoryId)
+    )
+      throw new ProjectSourceIdentityConflictError();
+
+    const sourceForProject = this.#projectSources.get(project.id);
+    if (sourceForProject !== undefined)
+      throw new Error(`Project ${project.id} already has a source`);
+
+    const existingProject = this.#projects.get(project.id);
+    this.failBeforeCommit('importProjectSource');
+    if (existingProject === undefined)
+      this.#projects.set(project.id, copy(project));
+    this.#projectSources.set(project.id, copy(source));
+    this.#projectSourceKeys.set(source.sourceKey, project.id);
+    if (source.kind === 'github')
+      this.#githubRepositoryIds.set(source.repositoryId, project.id);
+    this.#projectSourceImportRequests.set(effectiveRequest.idempotencyKey, {
+      fingerprint: effectiveRequest.fingerprint,
+      sourceKey: source.sourceKey,
+      projectId: project.id,
+    });
+
+    return copy({
+      project: existingProject ?? project,
+      source,
+      created: existingProject === undefined,
+    });
+  }
+
+  async getProjectSource(
+    projectId: ProjectId,
+  ): Promise<ProjectSource | undefined> {
+    const value = this.#projectSources.get(projectId);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async getProjectSourceByKey(
+    sourceKey: string,
+  ): Promise<ProjectSource | undefined> {
+    const projectId = this.#projectSourceKeys.get(sourceKey);
+    if (projectId === undefined) return undefined;
+    return copy(
+      requireEntry(this.#projectSources, projectId, 'Project source'),
     );
   }
 
@@ -568,7 +730,8 @@ export class InMemoryDomainRepository implements DomainRepository {
   ): Promise<number> {
     return [...this.#runs.values()].filter(
       (run) =>
-        (filter.projectId === undefined || run.projectId === filter.projectId) &&
+        (filter.projectId === undefined ||
+          run.projectId === filter.projectId) &&
         (filter.status === undefined || run.status === filter.status),
     ).length;
   }
@@ -1662,14 +1825,13 @@ export class InMemoryDomainRepository implements DomainRepository {
         : {}),
       updatedAt: request.updatedAt,
     };
-    if (request.status !== 'paused') delete (updated as { pausedReason?: string }).pausedReason;
+    if (request.status !== 'paused')
+      delete (updated as { pausedReason?: string }).pausedReason;
     this.#backlogs.set(request.id, copy(updated));
     return copy(updated);
   }
 
-  async createBacklogItemIdempotently(
-    item: BacklogItem,
-  ): Promise<BacklogItem> {
+  async createBacklogItemIdempotently(item: BacklogItem): Promise<BacklogItem> {
     requireEntry(this.#backlogs, item.backlogId, 'Backlog');
     const existing = this.#backlogItems.get(item.id);
     if (existing !== undefined) {
@@ -1695,7 +1857,8 @@ export class InMemoryDomainRepository implements DomainRepository {
       'Backlog item',
     );
     this.#backlogItemOrdinals.set(ordinalKey, item.id);
-    if (item.runId !== undefined) this.#backlogItemRuns.set(item.runId, item.id);
+    if (item.runId !== undefined)
+      this.#backlogItemRuns.set(item.runId, item.id);
     return created;
   }
 

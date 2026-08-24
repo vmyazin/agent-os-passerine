@@ -27,3 +27,13 @@ export {
   createTrustedRepositoryHeadResolver,
   type TrustedRepositoryHeadResolver,
 } from './repository-head.js';
+export {
+  createGitHubProjectSourceReader,
+  createGitHubProjectSourceReaderForTest,
+  GitHubProjectSourceError,
+} from './project-source.js';
+export type {
+  GitHubProjectSourceInspectionResult,
+  GitHubProjectSourceReader,
+  GitHubProjectSourceReaderOptions,
+} from './project-source.js';

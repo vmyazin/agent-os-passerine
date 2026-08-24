@@ -1,5 +1,11 @@
 Refer to AGENTS.md for the agent instructions.
 
+## Auto-load routing
+
+- Project import, repository trust, source identity, or commit browsing → first
+  read `docs/architecture/project-sources.md`, because the import registry grants
+  inspection only and must not be mistaken for runtime or publication authority.
+
 <!-- TRIGGER.DEV SKILLS START -->
 
 ## Trigger.dev agent skills

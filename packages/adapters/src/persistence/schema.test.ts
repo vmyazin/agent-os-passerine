@@ -12,6 +12,8 @@ import {
   goalProgress,
   inboxMessages,
   projects,
+  projectSources,
+  projectSourceImportRequests,
   stepRuns,
   usageRecords,
   webhookReceipts,
@@ -36,6 +38,37 @@ describe('Drizzle persistence schema', () => {
       )?.primary,
     ).toBe(true);
     expect(getTableConfig(webhookReceipts).primaryKeys).toHaveLength(1);
+    expect(
+      getTableConfig(projectSourceImportRequests).columns.find(
+        (column) => column.name === 'idempotency_key',
+      )?.primary,
+    ).toBe(true);
+    expect(
+      getTableConfig(projectSources).uniqueConstraints.map(
+        (constraint) => constraint.name,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        'project_sources_source_key_unique',
+        'project_sources_repository_id_unique',
+      ]),
+    );
+  });
+
+  it('enforces one exact provider-shaped source per project', () => {
+    const config = getTableConfig(projectSources);
+    expect(
+      config.columns.find((column) => column.name === 'project_id')?.primary,
+    ).toBe(true);
+    expect(config.checks.map((item) => item.name)).toEqual(
+      expect.arrayContaining([
+        'project_sources_kind_valid',
+        'project_sources_provider_shape',
+        'project_sources_repository_id_safe',
+        'project_sources_reader_installation_id_safe',
+        'project_sources_publisher_installation_id_safe',
+      ]),
+    );
   });
 
   it('keeps operational indexes in the executable schema', () => {

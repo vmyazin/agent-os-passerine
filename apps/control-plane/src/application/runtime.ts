@@ -9,7 +9,10 @@ import {
   createAesWorkflowHandleSealer,
   createKimiLocalAccessStore,
   createKimiRuntimeProviderFromEnv,
+  createGitHubProjectSourceReader,
   createLocalSourceSnapshotIngestor,
+  inspectLocalProjectSource,
+  listLocalProjectCommits,
   createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
   createTriggerSdkBoundary,
@@ -21,23 +24,31 @@ import {
   createTrustedRepositoryHeadResolver,
   createTriggerApprovalWaiter,
   createTriggerWorkflowDispatcher,
+  githubOwnerNameFromUrl,
   githubRepositoryBindingKey,
   parseGitHubRepositoryAllowlist,
   runGit,
   selectGitHubRepositoryFromUrl,
   kimiFromEnv,
   type TrustedSourceSnapshotIngestor,
+  type GitHubProjectSourceReader,
 } from '@agentos/adapters';
 import {
   isoTimestamp,
   parseAgentOsConfig,
   persistenceId,
   type GitHubPublicationRepository,
+  type ProjectSource,
+  type ProjectSourceImportInput,
   type RuntimeHandle,
   type RuntimeProvider,
 } from '@agentos/core';
 
-import { ControlPlaneService, type IdGenerator } from './control-plane-service';
+import {
+  ControlPlaneService,
+  type IdGenerator,
+  type ProjectSourceGateway,
+} from './control-plane-service';
 import { repositoryFromEnv } from '../persistence/repository-factory';
 
 const deterministicId: IdGenerator = (kind, idempotencyKey) =>
@@ -47,6 +58,78 @@ const deterministicId: IdGenerator = (kind, idempotencyKey) =>
   );
 
 let service: ControlPlaneService | undefined;
+let githubProjectSources: GitHubProjectSourceReader | undefined;
+
+function githubProjectSourceReaderFromEnv(): GitHubProjectSourceReader {
+  if (githubProjectSources !== undefined) return githubProjectSources;
+  const readerAppId = Number(requiredRuntime('GITHUB_READER_APP_ID'));
+  const publisherAppId = Number(process.env.GITHUB_APP_ID);
+  const publisherPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
+  githubProjectSources = createGitHubProjectSourceReader({
+    readerApp: {
+      appId: readerAppId,
+      privateKey: requiredRuntime('GITHUB_READER_APP_PRIVATE_KEY'),
+    },
+    ...(Number.isSafeInteger(publisherAppId) &&
+    publisherAppId > 0 &&
+    publisherPrivateKey !== undefined &&
+    publisherPrivateKey !== ''
+      ? {
+          publisherApp: {
+            appId: publisherAppId,
+            privateKey: publisherPrivateKey,
+          },
+        }
+      : {}),
+  });
+  return githubProjectSources;
+}
+
+export function projectSourceGatewayFromEnv(): ProjectSourceGateway {
+  return {
+    async inspect(input: ProjectSourceImportInput) {
+      if (input.kind === 'local') {
+        const inspection = await inspectLocalProjectSource(input);
+        return {
+          inspection,
+          source: {
+            kind: 'local',
+            sourceKey: inspection.sourceKey,
+            localPath: inspection.canonicalLocation,
+            defaultBranch: inspection.defaultBranch,
+          },
+        };
+      }
+      const result = await githubProjectSourceReaderFromEnv().inspect(
+        input.repositoryUrl,
+      );
+      const { owner, name } = githubOwnerNameFromUrl(
+        result.inspection.canonicalLocation,
+      );
+      return {
+        inspection: result.inspection,
+        source: {
+          kind: 'github',
+          sourceKey: result.inspection.sourceKey,
+          repositoryUrl: result.inspection.canonicalLocation,
+          owner,
+          name,
+          repositoryId: result.repositoryId,
+          readerInstallationId: result.readerInstallationId,
+          ...(result.publisherInstallationId === undefined
+            ? {}
+            : { publisherInstallationId: result.publisherInstallationId }),
+          defaultBranch: result.inspection.defaultBranch,
+        },
+      };
+    },
+    async listCommits(source: ProjectSource, cursor?: string) {
+      return source.kind === 'local'
+        ? listLocalProjectCommits(source, cursor)
+        : githubProjectSourceReaderFromEnv().listCommits(source, cursor);
+    },
+  };
+}
 
 /** Goal creation stays fail-closed when the trusted allowlist is absent. */
 function trustedGoalCommandsFromEnv(): ReadonlySet<string> | undefined {
@@ -655,6 +738,7 @@ export function controlPlaneService(): ControlPlaneService {
       trustedGoalCommandsFromEnv(),
       deploymentRegistryHostsFromEnv(),
       approvalArtifacts,
+      projectSourceGatewayFromEnv(),
     );
   }
   return service;
@@ -665,4 +749,5 @@ export function resetControlPlaneServiceForTests(): void {
     throw new Error('control-plane service reset is test-only');
   }
   service = undefined;
+  githubProjectSources = undefined;
 }

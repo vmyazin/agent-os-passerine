@@ -112,6 +112,76 @@ export const projects = pgTable(
   ],
 );
 
+export const projectSources = pgTable(
+  'project_sources',
+  {
+    projectId: text('project_id')
+      .primaryKey()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    sourceKey: text('source_key').notNull(),
+    defaultBranch: text('default_branch').notNull(),
+    repositoryUrl: text('repository_url'),
+    githubOwner: text('github_owner'),
+    githubName: text('github_name'),
+    repositoryId: bigint('repository_id', { mode: 'number' }),
+    readerInstallationId: bigint('reader_installation_id', { mode: 'number' }),
+    publisherInstallationId: bigint('publisher_installation_id', {
+      mode: 'number',
+    }),
+    localPath: text('local_path'),
+    createdAt: instant('created_at').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    unique('project_sources_source_key_unique').on(table.sourceKey),
+    unique('project_sources_repository_id_unique').on(table.repositoryId),
+    check(
+      'project_sources_kind_valid',
+      sql`${table.kind} in ('github','local')`,
+    ),
+    check(
+      'project_sources_provider_shape',
+      sql`(${table.kind} = 'github' and ${table.repositoryUrl} is not null and ${table.githubOwner} is not null and ${table.githubName} is not null and ${table.repositoryId} is not null and ${table.readerInstallationId} is not null and ${table.localPath} is null) or (${table.kind} = 'local' and ${table.repositoryUrl} is null and ${table.githubOwner} is null and ${table.githubName} is null and ${table.repositoryId} is null and ${table.readerInstallationId} is null and ${table.publisherInstallationId} is null and ${table.localPath} is not null)`,
+    ),
+    check(
+      'project_sources_repository_id_safe',
+      sql`${table.repositoryId} is null or (${table.repositoryId} > 0 and ${table.repositoryId} <= 9007199254740991)`,
+    ),
+    check(
+      'project_sources_reader_installation_id_safe',
+      sql`${table.readerInstallationId} is null or (${table.readerInstallationId} > 0 and ${table.readerInstallationId} <= 9007199254740991)`,
+    ),
+    check(
+      'project_sources_publisher_installation_id_safe',
+      sql`${table.publisherInstallationId} is null or (${table.publisherInstallationId} > 0 and ${table.publisherInstallationId} <= 9007199254740991)`,
+    ),
+    check(
+      'project_sources_required_text',
+      sql`length(${table.sourceKey}) between 1 and 4096 and length(${table.defaultBranch}) between 1 and 255`,
+    ),
+  ],
+);
+
+export const projectSourceImportRequests = pgTable(
+  'project_source_import_requests',
+  {
+    idempotencyKey: text('idempotency_key').primaryKey(),
+    fingerprint: text('fingerprint').notNull(),
+    sourceKey: text('source_key').notNull(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    createdAt: instant('created_at').notNull(),
+  },
+  (table) => [
+    check(
+      'project_source_import_requests_required_text',
+      sql`length(${table.idempotencyKey}) between 1 and 200 and length(${table.fingerprint}) between 1 and 512 and length(${table.sourceKey}) between 1 and 4096`,
+    ),
+  ],
+);
+
 export const configRevisions = pgTable(
   'config_revisions',
   {

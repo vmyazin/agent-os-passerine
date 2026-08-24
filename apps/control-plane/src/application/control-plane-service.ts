@@ -25,6 +25,13 @@ import type {
   BacklogItemRun,
   BacklogItemStatus,
   BacklogStatus,
+  CommitPage,
+  GitHubProjectSource,
+  LocalProjectSource,
+  ProjectSource,
+  ProjectSourceImportInput,
+  ProjectSourceImportResult,
+  ProjectSourceInspection,
 } from '@agentos/core';
 import {
   canonicalConfigHash,
@@ -135,6 +142,13 @@ export interface ProjectListProjection {
   readonly updatedAt: IsoTimestamp;
 }
 
+export interface ProjectSourceProjection {
+  readonly kind: ProjectSource['kind'];
+  readonly location: string;
+  readonly defaultBranch: string;
+  readonly publisherReady?: boolean;
+}
+
 export interface ProjectDetailProjection extends ProjectListProjection {
   readonly workflowBudgetMicrodollars?: number;
   readonly dailyBudgetMicrodollars?: number;
@@ -148,6 +162,19 @@ export interface ProjectDetailProjection extends ProjectListProjection {
   readonly appliedSha?: string;
   readonly headSha?: string;
   readonly drifted?: boolean;
+  readonly source?: ProjectSourceProjection;
+}
+
+export type ProjectSourceDraft =
+  | Omit<GitHubProjectSource, 'projectId' | 'createdAt' | 'updatedAt'>
+  | Omit<LocalProjectSource, 'projectId' | 'createdAt' | 'updatedAt'>;
+
+export interface ProjectSourceGateway {
+  inspect(input: ProjectSourceImportInput): Promise<{
+    readonly inspection: ProjectSourceInspection;
+    readonly source: ProjectSourceDraft;
+  }>;
+  listCommits(source: ProjectSource, cursor?: string): Promise<CommitPage>;
 }
 
 export interface ConfigurationProjection {
@@ -273,8 +300,7 @@ function withoutVariableValues(value: unknown): unknown {
  * config itself is withheld from one.
  */
 function describeConfigValue(path: string, value: unknown): string {
-  if (/^environments\.[^.]+\.variables(\.|$)/.test(path))
-    return REDACTED_VALUE;
+  if (/^environments\.[^.]+\.variables(\.|$)/.test(path)) return REDACTED_VALUE;
   if (value === null) return 'null';
   if (typeof value === 'string') return value.slice(0, 200);
   if (typeof value === 'number' || typeof value === 'boolean')
@@ -560,7 +586,9 @@ function goalDefinitions(
  * immutable input. Commands never travel through the browser for this --
  * the run already holds the exact allowlist keys it was admitted with.
  */
-function restartCriteria(value: JsonValue | undefined): readonly CommandCriterion[] {
+function restartCriteria(
+  value: JsonValue | undefined,
+): readonly CommandCriterion[] {
   if (!Array.isArray(value))
     throw new ServiceError(
       'run_not_restartable',
@@ -759,9 +787,7 @@ function safeHttpUrl(
  * immutable run input, which the control plane wrote from the base run's
  * own publication record, so nothing agent-influenced reaches the page.
  */
-function projectRunChain(
-  value: JsonValue | undefined,
-): RunProjection['chain'] {
+function projectRunChain(value: JsonValue | undefined): RunProjection['chain'] {
   const chain = record(record(value)?.chain);
   const baseRunId = chain?.baseRunId;
   const baseBranch = chain?.baseBranch;
@@ -907,10 +933,80 @@ export class ControlPlaneService {
         };
         readonly limit: number;
       }): Promise<{
-        readonly items: readonly { readonly artifactId: string; readonly key: string }[];
+        readonly items: readonly {
+          readonly artifactId: string;
+          readonly key: string;
+        }[];
       }>;
     },
+    private readonly projectSources?: ProjectSourceGateway,
   ) {}
+
+  private requireProjectSources(): ProjectSourceGateway {
+    if (this.projectSources === undefined)
+      throw new ServiceError(
+        'project_source_unavailable',
+        'Project source inspection is not configured',
+        503,
+      );
+    return this.projectSources;
+  }
+
+  private projectSourceFailure(error: unknown): never {
+    const code =
+      typeof error === 'object' && error !== null
+        ? Reflect.get(error, 'code')
+        : undefined;
+    const known: Readonly<Record<string, { message: string; status: number }>> =
+      {
+        invalid_repository_url: {
+          message: 'Use a canonical https://github.com/owner/repository URL',
+          status: 422,
+        },
+        invalid_path: {
+          message: 'Enter an existing absolute local path',
+          status: 422,
+        },
+        not_a_repository: {
+          message: 'Choose a non-bare Git working tree',
+          status: 422,
+        },
+        not_top_level: {
+          message:
+            'Choose the exact top-level directory of the Git working tree',
+          status: 422,
+        },
+        unavailable_branch: {
+          message: 'The selected branch is unavailable',
+          status: 422,
+        },
+        missing_reader_installation: {
+          message:
+            'Install the AgentOS reader GitHub App on this repository first',
+          status: 409,
+        },
+        repository_mismatch: {
+          message: 'The repository identity changed during inspection',
+          status: 409,
+        },
+        invalid_cursor: {
+          message: 'The commit cursor is invalid',
+          status: 422,
+        },
+        provider_unavailable: {
+          message: 'Repository history is temporarily unavailable',
+          status: 502,
+        },
+      };
+    const failure = typeof code === 'string' ? known[code] : undefined;
+    if (failure !== undefined)
+      throw new ServiceError(code as string, failure.message, failure.status);
+    throw new ServiceError(
+      'project_source_unavailable',
+      'Repository inspection is temporarily unavailable',
+      502,
+    );
+  }
 
   private bindingKey(config: AgentOsConfig): string {
     if (config.project.repository !== undefined)
@@ -971,6 +1067,107 @@ export class ControlPlaneService {
         400,
       );
     return projects[0]?.id;
+  }
+
+  async inspectProjectSource(
+    input: ProjectSourceImportInput,
+  ): Promise<ProjectSourceInspection> {
+    try {
+      return (await this.requireProjectSources().inspect(input)).inspection;
+    } catch (error) {
+      this.projectSourceFailure(error);
+    }
+  }
+
+  async importProjectSource(
+    idempotencyKey: string,
+    input: ProjectSourceImportInput,
+  ): Promise<ProjectSourceImportResult> {
+    if (idempotencyKey.trim().length === 0 || idempotencyKey.length > 200)
+      throw new ServiceError(
+        'idempotency_key_required',
+        'Idempotency-Key header is required',
+        400,
+      );
+    let inspected: Awaited<ReturnType<ProjectSourceGateway['inspect']>>;
+    try {
+      inspected = await this.requireProjectSources().inspect(input);
+    } catch (error) {
+      this.projectSourceFailure(error);
+    }
+
+    const configuredBinding =
+      inspected.source.kind === 'github'
+        ? `repository:${inspected.source.repositoryUrl}`
+        : `localPath:${inspected.source.localPath}`;
+    const configuredProjectId =
+      await this.projectIdForBindingKey(configuredBinding);
+    const configuredProject =
+      await this.repository.getProject(configuredProjectId);
+    const projectId =
+      configuredProject === undefined
+        ? this.generateId('project', `binding:${inspected.source.sourceKey}`)
+        : configuredProjectId;
+    const at = this.clock();
+    const project: Project = configuredProject ?? {
+      id: projectId,
+      name: inspected.inspection.suggestedName,
+      ...(inspected.source.kind === 'github'
+        ? { repository: inspected.source.repositoryUrl }
+        : {}),
+      createdAt: at,
+      updatedAt: at,
+    };
+    const source: ProjectSource = {
+      ...inspected.source,
+      projectId,
+      createdAt: at,
+      updatedAt: at,
+    } as ProjectSource;
+    try {
+      return await this.repository.importProjectSource(project, source, {
+        idempotencyKey,
+        fingerprint: fingerprint(input),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'IdempotencyConflictError')
+        throw new ServiceError(
+          'idempotency_conflict',
+          'idempotency key was already used with another project source',
+          409,
+        );
+      if (
+        error instanceof Error &&
+        error.name === 'ProjectSourceIdentityConflictError'
+      )
+        throw new ServiceError(
+          'project_source_identity_conflict',
+          'repository identity is already attached to another project source',
+          409,
+        );
+      throw error;
+    }
+  }
+
+  async listProjectCommits(
+    projectId: string,
+    cursor?: string,
+  ): Promise<CommitPage> {
+    const id = persistenceId('project', projectId);
+    if ((await this.repository.getProject(id)) === undefined)
+      throw new ServiceError('project_not_found', 'project not found', 404);
+    const source = await this.repository.getProjectSource(id);
+    if (source === undefined)
+      throw new ServiceError(
+        'project_source_not_found',
+        'This project has no imported source',
+        404,
+      );
+    try {
+      return await this.requireProjectSources().listCommits(source, cursor);
+    } catch (error) {
+      this.projectSourceFailure(error);
+    }
   }
 
   /** Lightweight project count for navigation badges. */
@@ -1036,10 +1233,8 @@ export class ControlPlaneService {
 
   async listProjects(limit = 100): Promise<readonly ProjectListProjection[]> {
     const projects = await this.repository.listProjects({ limit });
-    return mapWithConcurrency(
-      projects,
-      DIGEST_QUERY_CONCURRENCY,
-      (project) => this.projectListProjection(project),
+    return mapWithConcurrency(projects, DIGEST_QUERY_CONCURRENCY, (project) =>
+      this.projectListProjection(project),
     );
   }
 
@@ -1048,10 +1243,11 @@ export class ControlPlaneService {
     const project = await this.repository.getProject(id);
     if (project === undefined)
       throw new ServiceError('project_not_found', 'project not found', 404);
-    const [summary, recentRuns, latest] = await Promise.all([
+    const [summary, recentRuns, latest, projectSource] = await Promise.all([
       this.projectListProjection(project),
       this.listRuns(6, projectId),
       this.repository.getLatestConfigRevision(id),
+      this.repository.getProjectSource(id),
     ]);
     let workflowBudgetMicrodollars: number | undefined;
     let dailyBudgetMicrodollars: number | undefined;
@@ -1089,6 +1285,24 @@ export class ControlPlaneService {
       ...(latest === undefined || headSha === undefined
         ? {}
         : { drifted: headSha !== latest.repositorySha }),
+      ...(projectSource === undefined
+        ? {}
+        : {
+            source: {
+              kind: projectSource.kind,
+              location:
+                projectSource.kind === 'github'
+                  ? projectSource.repositoryUrl
+                  : projectSource.localPath,
+              defaultBranch: projectSource.defaultBranch,
+              ...(projectSource.kind === 'github'
+                ? {
+                    publisherReady:
+                      projectSource.publisherInstallationId !== undefined,
+                  }
+                : {}),
+            },
+          }),
       recentRuns,
     };
   }
@@ -1119,7 +1333,9 @@ export class ControlPlaneService {
     readonly projectId: string;
     readonly active: ConfigurationProjection | null;
   }> {
-    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    const projectId = await this.projectIdForBindingKey(
+      this.bindingKey(config),
+    );
     const active = await this.repository.getLatestConfigRevision(projectId);
     return {
       projectId,
@@ -1142,9 +1358,7 @@ export class ControlPlaneService {
    * path in an Agent OS config names models, budgets, pipelines, and
    * policies, which are the whole point of reading a plan.
    */
-  async planConfigurationChange(
-    yaml: string,
-  ): Promise<{
+  async planConfigurationChange(yaml: string): Promise<{
     readonly projectId: string;
     readonly changed: boolean;
     readonly fromRevision: number | null;
@@ -1167,7 +1381,9 @@ export class ControlPlaneService {
         422,
       );
     }
-    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    const projectId = await this.projectIdForBindingKey(
+      this.bindingKey(config),
+    );
     const active = await this.repository.getLatestConfigRevision(projectId);
     if (active === undefined)
       return { projectId, changed: true, fromRevision: null, changes: [] };
@@ -1273,7 +1489,9 @@ export class ControlPlaneService {
         configDigest: digest,
       }).slice(0, 40);
     }
-    const projectId = await this.projectIdForBindingKey(this.bindingKey(config));
+    const projectId = await this.projectIdForBindingKey(
+      this.bindingKey(config),
+    );
     if (input.projectId !== undefined && input.projectId !== projectId)
       throw new ServiceError(
         'project_mismatch',
@@ -1589,8 +1807,7 @@ export class ControlPlaneService {
       existing += 1;
       const run = await this.repository.getRun(persistenceId('run', ancestor));
       ancestor = record(record(run?.input)?.chain)?.baseRunId as
-        | string
-        | undefined;
+        string | undefined;
     }
     if (existing + 1 > maxDepth)
       throw new ServiceError(
@@ -1772,7 +1989,11 @@ export class ControlPlaneService {
         await this.pauseBacklog(backlog.id, decision.reason);
         continue;
       }
-      await this.dispatchBacklogItem(backlog, decision.item, decision.baseRunId);
+      await this.dispatchBacklogItem(
+        backlog,
+        decision.item,
+        decision.baseRunId,
+      );
     }
   }
 
@@ -2359,7 +2580,8 @@ export class ControlPlaneService {
     const pages = await mapWithConcurrency(
       runs,
       DIGEST_QUERY_CONCURRENCY,
-      (run) => this.repository.listApprovals(run.id, { status: 'pending', limit }),
+      (run) =>
+        this.repository.listApprovals(run.id, { status: 'pending', limit }),
     );
     const now = this.clock();
     // "Pending" has to mean actionable. The repository filters on the stored
@@ -2432,11 +2654,9 @@ export class ControlPlaneService {
       const bounded = (value: unknown): string | undefined =>
         typeof value === 'string' ? redactText(value).slice(0, 500) : undefined;
       const specification = (await bodyOf('specification')) as
-        | { requirements?: unknown }
-        | undefined;
+        { requirements?: unknown } | undefined;
       const dod = (await bodyOf('dod')) as
-        | { criteria?: unknown; acceptanceTests?: unknown }
-        | undefined;
+        { criteria?: unknown; acceptanceTests?: unknown } | undefined;
       const requirements = Array.isArray(specification?.requirements)
         ? specification.requirements
             .slice(0, 20)
@@ -2627,9 +2847,7 @@ export class ControlPlaneService {
         stepKey: step.stepKey,
         attempt: step.attempt,
         status: step.status,
-        ...(stepModels.has(step.id)
-          ? { model: stepModels.get(step.id)! }
-          : {}),
+        ...(stepModels.has(step.id) ? { model: stepModels.get(step.id)! } : {}),
       })),
       timeline: events.map((event) => {
         const payload = projectEventPayload(event.payload);
@@ -2764,10 +2982,7 @@ export class ControlPlaneService {
               'draftPullRequestUrl',
             );
             const localBranch = safeString(output, 'localBranch');
-            const localRepositoryUrl = safeString(
-              output,
-              'localRepositoryUrl',
-            );
+            const localRepositoryUrl = safeString(output, 'localRepositoryUrl');
             return {
               step,
               runId,

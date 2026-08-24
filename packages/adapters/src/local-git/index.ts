@@ -13,6 +13,11 @@ export {
   initializeLocalRepository,
   LocalRepositoryAlreadyExistsError,
 } from './initialize.js';
+export {
+  inspectLocalProjectSource,
+  listLocalProjectCommits,
+  LocalProjectSourceError,
+} from './project-source.js';
 export type {
   InitializeLocalRepositoryOptions,
   InitializeLocalRepositoryResult,

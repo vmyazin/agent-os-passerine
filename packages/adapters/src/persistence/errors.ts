@@ -21,6 +21,13 @@ export class IdempotencyConflictError extends Error {
   }
 }
 
+export class ProjectSourceIdentityConflictError extends Error {
+  public constructor() {
+    super('Repository identity is already attached to another project source');
+    this.name = 'ProjectSourceIdentityConflictError';
+  }
+}
+
 export class StaleConfigurationError extends Error {
   public constructor() {
     super('Active configuration changed before apply');

@@ -18,8 +18,36 @@ const boundedGoalMigration = readFileSync(
   resolve(migrationDirectory, '0018_bounded_goal_records.sql'),
   'utf8',
 ).toLowerCase();
+const projectSourceMigration = readFileSync(
+  resolve(migrationDirectory, '0022_stormy_maginty.sql'),
+  'utf8',
+).toLowerCase();
+const projectSourceImportLedgerMigration = readFileSync(
+  resolve(migrationDirectory, '0023_nappy_valeria_richards.sql'),
+  'utf8',
+).toLowerCase();
 
 describe('domain persistence migration', () => {
+  it('adds only the durable project source registry in its upgrade', () => {
+    expect(projectSourceMigration).toContain('create table "project_sources"');
+    expect(projectSourceMigration).toContain(
+      'constraint "project_sources_source_key_unique"',
+    );
+    expect(projectSourceMigration).toContain(
+      'constraint "project_sources_repository_id_unique"',
+    );
+    expect(projectSourceImportLedgerMigration).toContain(
+      'create table "project_source_import_requests"',
+    );
+    expect(projectSourceMigration).toContain(
+      'foreign key ("project_id") references "public"."projects"',
+    );
+    expect(projectSourceMigration).not.toContain('create table "backlogs"');
+    expect(projectSourceMigration).not.toContain(
+      'create type "public"."backlog',
+    );
+  });
+
   it('terminates legacy goals and removes history whose definitions and steps are unknowable', () => {
     expect(boundedGoalMigration).toContain('update "workflow_runs"');
     expect(boundedGoalMigration).toContain('"pipeline" = \'goal\'');

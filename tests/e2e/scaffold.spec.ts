@@ -6,7 +6,7 @@ import {
 } from '../../apps/control-plane/src/auth/auth';
 import { timeOfDayGreeting } from '../../apps/control-plane/src/ui/time-of-day-greeting';
 
-test.beforeEach(async ({ context, page }) => {
+test.beforeEach(async ({ context, page }, testInfo) => {
   const session = issueSession(
     {
       clientId: 'e2e',
@@ -32,6 +32,10 @@ test.beforeEach(async ({ context, page }) => {
   // evaluate() context. Hit a public JSON route so the origin cookie
   // is available without rendering the app shell or HomePage first.
   await page.goto('/api/health');
+  // The import flow deliberately starts from an empty in-memory directory and
+  // does not need the unrelated artifact fixture (which is immutable across
+  // repeated local smoke runs).
+  if (testInfo.title.includes('keyboard-import')) return;
   const seeded = await page.evaluate(
     async () => (await fetch('/api/test/seed', { method: 'POST' })).ok,
   );
@@ -70,6 +74,57 @@ test('operator can open the projects directory', async ({ page }) => {
     'aria-current',
     'page',
   );
+});
+
+test('operator can keyboard-import a local project and browse commits', async ({
+  page,
+}) => {
+  await page.goto('/projects');
+  const trigger = page.getByRole('button', { name: 'Import project' });
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Import an existing project' });
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  const local = page.getByRole('radio', { name: 'Local repository' });
+  await local.focus();
+  await page.keyboard.press('Space');
+  await expect(local).toBeChecked();
+  await page.getByLabel('Repository path').fill(process.cwd());
+  await page.getByRole('button', { name: 'Inspect repository' }).click();
+  await expect(page.getByText('Repository found')).toBeVisible();
+  await expect(page.getByLabel('Default branch')).toHaveValue(
+    'codex/import-existing-projects',
+  );
+  await page.getByRole('button', { name: 'Import and open project' }).click();
+
+  await expect(page).toHaveURL(/\/projects\/project_/);
+  await expect(
+    page.getByRole('heading', { level: 2, name: 'Commit history' }),
+  ).toBeVisible();
+  await expect(page.getByText('Default branch')).toBeVisible();
+  await expect(page.locator('.commit-feed-item').first()).toBeVisible();
+
+  const loadMore = page.getByRole('button', { name: 'Load 25 more' });
+  if (await loadMore.isVisible()) {
+    const loadedRows = await page.locator('.commit-feed-item').count();
+    await page.route('**/api/projects/*/commits?cursor=*', async (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'provider_unavailable', message: 'Unavailable' },
+        }),
+      }),
+    );
+    await loadMore.click();
+    await expect(page.getByText('Could not load more commits.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+    await expect(page.locator('.commit-feed-item')).toHaveCount(loadedRows);
+  }
 });
 
 test('operator can monitor a waiting run and consume a scoped approval', async ({

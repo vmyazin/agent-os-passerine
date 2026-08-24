@@ -61,6 +61,43 @@ export function repositoryParityContract(
   createRepository: RepositoryFactory,
 ): void {
   describe(`${implementation} PostgreSQL parity contract`, () => {
+    it('atomically imports and deduplicates project sources', async () => {
+      const repository = await createRepository();
+      const projectId = persistenceId(
+        'project',
+        `${implementation}-source-project`,
+      );
+      const project = {
+        id: projectId,
+        name: 'Imported source',
+        createdAt: at,
+        updatedAt: at,
+      };
+      const source = {
+        kind: 'local' as const,
+        projectId,
+        sourceKey: `local:/tmp/${implementation}-source`,
+        localPath: `/tmp/${implementation}-source`,
+        defaultBranch: 'main',
+        createdAt: at,
+        updatedAt: at,
+      };
+
+      await expect(repository.getProjectSource(projectId)).resolves.toBeUndefined();
+      const imported = await repository.importProjectSource(project, source);
+      expect(imported).toEqual({ project, source, created: true });
+      await expect(repository.getProjectSource(projectId)).resolves.toEqual(source);
+      await expect(
+        repository.getProjectSourceByKey(source.sourceKey),
+      ).resolves.toEqual(source);
+
+      await expect(repository.importProjectSource(project, source)).resolves.toEqual({
+        project,
+        source,
+        created: false,
+      });
+    });
+
     it('rejects every missing parent foreign key', async () => {
       const repository = await createRepository();
       const ids = await seed(repository, `${implementation}-fk`);

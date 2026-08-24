@@ -11,6 +11,7 @@ import type {
   GoalProgress,
   InboxMessage,
   Project,
+  ProjectSource,
   StepRun,
   UsageRecordEntry,
   WebhookReceipt,
@@ -31,6 +32,7 @@ import {
   goalProgress,
   inboxMessages,
   projects,
+  projectSources,
   stepRuns,
   usageRecords,
   webhookReceipts,
@@ -76,6 +78,7 @@ function present(column: PgColumn, alias: string) {
 }
 
 export const projectSelection = getTableColumns(projects);
+export const projectSourceSelection = getTableColumns(projectSources);
 export const configRevisionSelection = getTableColumns(configRevisions);
 export const configSnapshotSelection = getTableColumns(configSnapshots);
 export const workflowRunSelection = {
@@ -117,6 +120,34 @@ export const goalProgressSelection = {
 export const mapBacklogRow = (row: SqlRow): Backlog => mapRow(row);
 export const mapBacklogItemRow = (row: SqlRow): BacklogItem => mapRow(row);
 export const mapProjectRow = (row: SqlRow): Project => mapRow(row);
+export const mapProjectSourceRow = (row: SqlRow): ProjectSource => {
+  const common = {
+    projectId: row.projectId as ProjectSource['projectId'],
+    sourceKey: row.sourceKey as string,
+    defaultBranch: row.defaultBranch as string,
+    createdAt: row.createdAt as ProjectSource['createdAt'],
+    updatedAt: row.updatedAt as ProjectSource['updatedAt'],
+  };
+  if (row.kind === 'github') {
+    return {
+      ...common,
+      kind: 'github',
+      repositoryUrl: row.repositoryUrl as string,
+      owner: row.githubOwner as string,
+      name: row.githubName as string,
+      repositoryId: row.repositoryId as number,
+      readerInstallationId: row.readerInstallationId as number,
+      ...(row.publisherInstallationId === null
+        ? {}
+        : { publisherInstallationId: row.publisherInstallationId as number }),
+    };
+  }
+  return {
+    ...common,
+    kind: 'local',
+    localPath: row.localPath as string,
+  };
+};
 export const mapConfigRevisionRow = (row: SqlRow): ConfigRevision =>
   mapRow(row, { requiredJson: ['config'] });
 export const mapConfigSnapshotRow = (row: SqlRow): ConfigSnapshot =>

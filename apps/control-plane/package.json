@@ -13,6 +13,8 @@
   "dependencies": {
     "@agentos/adapters": "workspace:*",
     "@agentos/core": "workspace:*",
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-radio-group": "1.4.7",
     "next": "16.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",

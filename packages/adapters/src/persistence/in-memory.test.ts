@@ -8,6 +8,7 @@ import type {
   GoalCriterion,
   IsoTimestamp,
   Project,
+  ProjectSource,
   WorkflowRun,
 } from '@agentos/core';
 
@@ -74,6 +75,179 @@ async function seededRepository(): Promise<InMemoryDomainRepository> {
 }
 
 describe('InMemoryDomainRepository', () => {
+  it('atomically imports one exact source and converges duplicate imports', async () => {
+    const repository = new InMemoryDomainRepository();
+    const source: ProjectSource = {
+      kind: 'local',
+      projectId: project.id,
+      sourceKey: 'local:/workspaces/passerine',
+      localPath: '/workspaces/passerine',
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+
+    await expect(
+      repository.getProjectSource(project.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.getProjectSourceByKey(source.sourceKey),
+    ).resolves.toBeUndefined();
+
+    const first = await repository.importProjectSource(project, source);
+    expect(first).toEqual({ project, source, created: true });
+    await expect(repository.getProject(project.id)).resolves.toEqual(project);
+    await expect(repository.getProjectSource(project.id)).resolves.toEqual(
+      source,
+    );
+    await expect(
+      repository.getProjectSourceByKey(source.sourceKey),
+    ).resolves.toEqual(source);
+
+    const replay = await repository.importProjectSource(
+      { ...project, name: 'ignored replay name' },
+      { ...source, updatedAt: isoTimestamp('2026-08-16T12:05:00.000Z') },
+    );
+    expect(replay).toEqual({ project, source, created: false });
+  });
+
+  it('rejects reusing an import idempotency key for another source', async () => {
+    const repository = new InMemoryDomainRepository();
+    const source: ProjectSource = {
+      kind: 'local',
+      projectId: project.id,
+      sourceKey: 'local:/workspaces/passerine',
+      localPath: '/workspaces/passerine',
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    await repository.importProjectSource(project, source, {
+      idempotencyKey: 'import-1',
+      fingerprint: 'fingerprint-a',
+    });
+    const other = { ...project, id: persistenceId('project', 'project-other') };
+
+    await expect(
+      repository.importProjectSource(
+        other,
+        {
+          ...source,
+          projectId: other.id,
+          sourceKey: 'local:/workspaces/other',
+          localPath: '/workspaces/other',
+        },
+        { idempotencyKey: 'import-1', fingerprint: 'fingerprint-b' },
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
+  });
+
+  it('attaches an imported source to a matching existing project', async () => {
+    const repository = new InMemoryDomainRepository();
+    await repository.createProject(project);
+    const source: ProjectSource = {
+      kind: 'github',
+      projectId: project.id,
+      sourceKey: 'github:acme/passerine',
+      repositoryUrl: 'https://github.com/acme/passerine',
+      owner: 'acme',
+      name: 'passerine',
+      repositoryId: 42,
+      readerInstallationId: 7,
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+
+    await expect(
+      repository.importProjectSource(project, source),
+    ).resolves.toEqual({
+      project,
+      source,
+      created: false,
+    });
+  });
+
+  it('rejects a changed immutable GitHub identity for an existing source key', async () => {
+    const repository = new InMemoryDomainRepository();
+    const source: ProjectSource = {
+      kind: 'github',
+      projectId: project.id,
+      sourceKey: 'github:acme/passerine',
+      repositoryUrl: 'https://github.com/acme/passerine',
+      owner: 'acme',
+      name: 'passerine',
+      repositoryId: 42,
+      readerInstallationId: 7,
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    await repository.importProjectSource(project, source);
+
+    await expect(
+      repository.importProjectSource(project, {
+        ...source,
+        repositoryId: 43,
+      }),
+    ).rejects.toMatchObject({ name: 'ProjectSourceIdentityConflictError' });
+  });
+
+  it('rejects attaching one GitHub repository id under another source key', async () => {
+    const repository = new InMemoryDomainRepository();
+    const source: ProjectSource = {
+      kind: 'github',
+      projectId: project.id,
+      sourceKey: 'github:acme/passerine',
+      repositoryUrl: 'https://github.com/acme/passerine',
+      owner: 'acme',
+      name: 'passerine',
+      repositoryId: 42,
+      readerInstallationId: 7,
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    await repository.importProjectSource(project, source);
+    const renamedProject = {
+      ...project,
+      id: persistenceId('project', 'renamed-project'),
+    };
+
+    await expect(
+      repository.importProjectSource(renamedProject, {
+        ...source,
+        projectId: renamedProject.id,
+        sourceKey: 'github:acme/renamed',
+        repositoryUrl: 'https://github.com/acme/renamed',
+        name: 'renamed',
+      }),
+    ).rejects.toMatchObject({ name: 'ProjectSourceIdentityConflictError' });
+  });
+
+  it('returns the canonical existing project when a source key races with another id', async () => {
+    const repository = new InMemoryDomainRepository();
+    const source: ProjectSource = {
+      kind: 'local',
+      projectId: project.id,
+      sourceKey: 'local:/workspaces/passerine',
+      localPath: '/workspaces/passerine',
+      defaultBranch: 'main',
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    };
+    await repository.importProjectSource(project, source);
+    const other = {
+      ...project,
+      id: persistenceId('project', 'project-other'),
+      name: 'Other',
+    };
+
+    await expect(
+      repository.importProjectSource(other, { ...source, projectId: other.id }),
+    ).resolves.toEqual({ project, source, created: false });
+  });
+
   it('creates, gets, lists, and updates runs using defensive copies', async () => {
     const repository = await seededRepository();
     const persistedRun = { ...run, stateVersion: 0 };
