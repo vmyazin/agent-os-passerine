@@ -129,11 +129,20 @@ mode, and no GitHub Apps required.
 Multi-project operation is implemented — all five phases of
 [the multi-project design](./superpowers/specs/2026-08-20-multi-project-parallel-design.md):
 project-scoped configuration and CAS preconditions, per-project session
-leases and queues, multi-repo GitHub binding with split deployment/project
-readiness, a live projects UI with per-project filters, and budgets read
-from each project's configuration. One caveat stands: the per-project
-Trigger queues are exercised only against a mocked SDK boundary, so
-cross-project parallelism is unverified against real Trigger.dev.
+leases, multi-repo GitHub binding with split deployment/project readiness, a
+live projects UI with per-project filters, and budgets read from each
+project's configuration.
+
+Per-project *execution* concurrency is keyed, not queued, and that caveat
+came due. Phase 2 dispatched each run to a queue named for its project;
+Trigger parks a run on a queue that no task declares in `PENDING_VERSION`
+until its TTL expires, so from 2026-08-20 every run was enqueued, reported
+as dispatched, and never executed. The unit tests asserted what the
+dispatcher passed to a fake SDK and could not see it. Dispatch now sets
+`concurrencyKey` on the task's declared queue, which copies that queue per
+project -- the behaviour Phase 2 wanted. `pnpm --filter @agentos/adapters
+smoke:trigger-dispatch` proves a dispatched run reaches a worker, against
+real Trigger, and is the check that would have caught it.
 
 The Definition of Done is now executable and frozen. A feature run's
 specifier writes one `test/acceptance/<criterionId>.test.mjs` file per

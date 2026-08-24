@@ -52,7 +52,10 @@ describe('Trigger SDK boundary', () => {
           expect.objectContaining({
             idempotencyKey: 'feature-workflow:run-1:v1',
             idempotencyKeyTTL: '30d',
-            queue: 'agentos-feature-project-1',
+            // The project keys the task's declared queue; it does not name a
+            // new one. A queue no task declares does not exist, and Trigger
+            // parks the run in PENDING_VERSION until its TTL expires.
+            concurrencyKey: 'project-1',
           }),
         ],
       },
@@ -75,11 +78,29 @@ describe('Trigger SDK boundary', () => {
           expect.objectContaining({
             idempotencyKey: 'goal-workflow:goal-1:v1',
             idempotencyKeyTTL: '30d',
-            queue: 'agentos-goal-project-2',
+            concurrencyKey: 'project-2',
           }),
         ],
       },
     ]);
+  });
+
+  it('never sends a queue name Trigger has not been told about', async () => {
+    // The regression this replaces: dispatch overrode `queue` with a
+    // per-project name that no task declares. Every run since sat in
+    // PENDING_VERSION and expired without executing, while the control plane
+    // showed a healthy dispatch.
+    const { sdk, calls } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    await dispatcher.startFeature('run-2', 'project-3');
+    await dispatcher.startGoal('goal-2', 'project-3');
+
+    for (const call of calls) {
+      const options = call.args[2] as Record<string, unknown>;
+      expect(options).not.toHaveProperty('queue');
+      expect(options.concurrencyKey).toBe('project-3');
+    }
   });
 
   it('uses waitpoints only as wake signals and never returns public tokens', async () => {

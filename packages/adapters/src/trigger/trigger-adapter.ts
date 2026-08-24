@@ -5,15 +5,21 @@ import {
   GOAL_WORKFLOW_TASK_ID,
   type WorkflowApprovalWaiter,
 } from './types.js';
-import {
-  featureWorkflowQueueName,
-  goalWorkflowQueueName,
-} from './queue-names.js';
-
 export interface TriggerTaskOptions {
   readonly idempotencyKey: string;
   readonly idempotencyKeyTTL: string;
-  readonly queue?: string;
+  /**
+   * Serializes runs that share a value, without inventing a queue.
+   *
+   * Overriding `queue` with a per-project name looks like the obvious way to
+   * get per-project concurrency, and it silently does the opposite: a queue
+   * that no task declares does not exist, so Trigger parks the run in
+   * PENDING_VERSION until something creates it, and it expires at its TTL
+   * having never run. `concurrencyKey` copies the task's *declared* queue --
+   * limit and all -- once per distinct value, which is the behaviour that
+   * was wanted.
+   */
+  readonly concurrencyKey?: string;
 }
 
 /** Stable local seam; no Trigger.dev SDK types cross this boundary. */
@@ -131,7 +137,7 @@ export function createTriggerWorkflowDispatcher(
         {
           idempotencyKey: `feature-workflow:${runId}:v1`,
           idempotencyKeyTTL: '30d',
-          queue: featureWorkflowQueueName(projectId),
+          concurrencyKey: projectId,
         },
       );
       return { externalRunRef: result.id };
@@ -143,7 +149,7 @@ export function createTriggerWorkflowDispatcher(
         {
           idempotencyKey: `goal-workflow:${runId}:v1`,
           idempotencyKeyTTL: '30d',
-          queue: goalWorkflowQueueName(projectId),
+          concurrencyKey: projectId,
         },
       );
       return { externalRunRef: result.id };

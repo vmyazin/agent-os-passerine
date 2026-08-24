@@ -17,7 +17,8 @@
     "smoke:r2": "pnpm build && node scripts/r2-artifact-smoke.mjs",
     "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run --testTimeout=60000 --hookTimeout=60000 src/persistence/postgres.integration.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:trigger-dispatch": "pnpm build && node scripts/trigger-dispatch-smoke.mjs"
   },
   "dependencies": {
     "@agentos/core": "workspace:*",
