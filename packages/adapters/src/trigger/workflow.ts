@@ -255,6 +255,35 @@ async function parseArtifact<T>(
   return result.data;
 }
 
+/**
+ * Why a session produced no structured output, in the two shapes that mean
+ * different things.
+ *
+ * "no structured output" alone sent three real runs' worth of investigation
+ * after a protocol bug that was not there. A session that ran to its
+ * deadline in silence was cut off -- usually the agent is stuck, often on an
+ * instruction it cannot carry out. A session that ended early having said
+ * something ignored its output contract instead. The text itself is
+ * agent-authored and stays out of this durable message; whether it exists is
+ * the part that distinguishes the two.
+ */
+function noStructuredOutputDetail({
+  hasText,
+  elapsedMs,
+}: {
+  readonly hasText: boolean;
+  readonly elapsedMs: number;
+}): string {
+  const seconds = Math.max(0, Math.round(elapsedMs / 1_000));
+  const elapsed =
+    seconds < 60
+      ? `${String(seconds)}s`
+      : `${String(Math.floor(seconds / 60))}m${String(seconds % 60)}s`;
+  return hasText
+    ? `no structured output: the session ended after ${elapsed} having sent text instead of the required JSON message`
+    : `no structured output: the session ran ${elapsed} and ended silently, which is what a session cut off at its deadline looks like`;
+}
+
 async function putSealedChanges(
   dependencies: DurableFeatureWorkflowDependencies,
   workflow: FeatureWorkflowInput,
@@ -973,6 +1002,7 @@ async function runAgentStep<T>(
         if (handle.id !== started.externalRef)
           throw new WorkflowPermanentError('persisted runtime handle mismatch');
       }
+      const sessionStartedMs = Date.parse(dependencies.clock());
       const runtimeOutput: RuntimeOutput = await withTimeout(
         (async () => {
           await consumeEvents(dependencies, workflow.runId, handle!);
@@ -1001,7 +1031,15 @@ async function runAgentStep<T>(
           .join('; ')
           .slice(0, 700);
         throw new WorkflowPermanentError(
-          `runtime output for ${stepKey} is invalid (${candidate === undefined ? 'no structured output' : issues})`,
+          `runtime output for ${stepKey} is invalid (${
+            candidate === undefined
+              ? noStructuredOutputDetail({
+                  hasText: (runtimeOutput.text ?? '').trim() !== '',
+                  elapsedMs:
+                    Date.parse(dependencies.clock()) - sessionStartedMs,
+                })
+              : issues
+          })`,
         );
       }
       await dependencies.checkpoints.completeEffect(

@@ -29,7 +29,7 @@ agents:
       Write a precise, minimal specification and a measurable Definition of Done. Keep scope
       to exactly what is asked.
 
-      For each requirement, add one criterion and one node:test file at test/acceptance/<id>.test.mjs. The file must fail if that requirement is unmet, including negative cases the requirement names (mutation, missing ids, identity). Do not test only the easy half of a copy. Each criterion id must have exactly that file; no extra files. The suite runs from the repository root with node --test, so import the implementation by its repository-relative path and use only node:test and node:assert -- no test framework and no new dependencies.
+      For each requirement, add one criterion and one acceptance test. You have no write tools and never create files: each test is a string carried inside the dod artifact below, as one entry of acceptanceTests whose path is test/acceptance/<criterion id>.test.mjs and whose content is the whole file. It must fail if that requirement is unmet, including the negative cases the requirement names (mutation, missing ids, identity). Do not test only the easy half of a copy. Exactly one test per criterion and no others. Trusted code writes these files into the repository later and runs them from the repository root with node --test, so import the implementation by its repository-relative path and use only node:test and node:assert -- no test framework and no new dependencies.
 
       Store two artifacts with the artifact_put MCP tool. For each call use version 1,
       mediaType "application/json", and contentBase64 set to the base64 encoding of the JSON
