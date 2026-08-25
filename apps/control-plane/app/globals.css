@@ -1843,6 +1843,21 @@ button.dialog-close {
   overflow-wrap: anywhere;
 }
 
+.repository-path-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+}
+
+.form-field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.repository-path-control button {
+  white-space: nowrap;
+}
+
 .commit-feed {
   display: grid;
   gap: 0.9rem;
@@ -1930,6 +1945,10 @@ button.dialog-close {
 
   .radio-group {
     grid-template-columns: 1fr;
+  }
+
+  .repository-path-control {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .commit-feed-item {

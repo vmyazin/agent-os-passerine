@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 
 import {
   Dialog,
@@ -32,16 +32,20 @@ async function apiError(response: Response, fallback: string): Promise<string> {
 
 export function ImportProjectDialog({
   triggerLabel = 'Import project',
+  localPickerAvailable = false,
 }: {
   readonly triggerLabel?: string;
+  readonly localPickerAvailable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<'github' | 'local'>('github');
   const [location, setLocation] = useState('');
   const [inspection, setInspection] = useState<Inspection>();
   const [defaultBranch, setDefaultBranch] = useState('');
-  const [pending, setPending] = useState<'inspect' | 'import'>();
+  const [pending, setPending] = useState<'choose' | 'inspect' | 'import'>();
   const [message, setMessage] = useState('');
+  const pathInputRef = useRef<HTMLInputElement>(null);
+  const locationInputId = useId();
 
   const changeKind = (value: string) => {
     if (value !== 'github' && value !== 'local') return;
@@ -76,6 +80,43 @@ export function ImportProjectDialog({
       setDefaultBranch(result.defaultBranch);
     } catch {
       setMessage('Could not inspect this repository.');
+    } finally {
+      setPending(undefined);
+    }
+  };
+
+  const chooseDirectory = async () => {
+    if (pending !== undefined) return;
+    setPending('choose');
+    try {
+      const response = await fetch(
+        '/api/projects/import/select-directory',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+      );
+      if (!response.ok) {
+        setMessage(
+          await apiError(response, 'Could not open the macOS folder picker.'),
+        );
+        return;
+      }
+      const result = (await response.json()) as
+        | { readonly status: 'selected'; readonly path?: unknown }
+        | { readonly status: 'cancelled' };
+      if (result.status === 'cancelled') return;
+      if (typeof result.path !== 'string' || result.path === '') {
+        setMessage('The macOS folder picker returned an invalid path.');
+        return;
+      }
+      setLocation(result.path);
+      setInspection(undefined);
+      setMessage('');
+      pathInputRef.current?.focus();
+    } catch {
+      setMessage('Could not open the macOS folder picker.');
     } finally {
       setPending(undefined);
     }
@@ -167,24 +208,46 @@ export function ImportProjectDialog({
             void inspect();
           }}
         >
-          <label>
-            {kind === 'github' ? 'Repository URL' : 'Repository path'}
-            <input
-              autoComplete="off"
-              onChange={(event) => {
-                setLocation(event.target.value);
-                setInspection(undefined);
-                setMessage('');
-              }}
-              placeholder={
-                kind === 'github'
-                  ? 'https://github.com/owner/repository'
-                  : '/absolute/path/to/repository'
+          <div className="form-field">
+            <label htmlFor={locationInputId}>
+              {kind === 'github' ? 'Repository URL' : 'Repository path'}
+            </label>
+            <div
+              className={
+                kind === 'local' && localPickerAvailable
+                  ? 'repository-path-control'
+                  : undefined
               }
-              spellCheck={false}
-              value={location}
-            />
-          </label>
+            >
+              <input
+                autoComplete="off"
+                id={locationInputId}
+                onChange={(event) => {
+                  setLocation(event.target.value);
+                  setInspection(undefined);
+                  setMessage('');
+                }}
+                placeholder={
+                  kind === 'github'
+                    ? 'https://github.com/owner/repository'
+                    : '/absolute/path/to/repository'
+                }
+                ref={kind === 'local' ? pathInputRef : undefined}
+                spellCheck={false}
+                value={location}
+              />
+              {kind === 'local' && localPickerAvailable ? (
+                <button
+                  className="secondary"
+                  disabled={pending !== undefined}
+                  onClick={() => void chooseDirectory()}
+                  type="button"
+                >
+                  {pending === 'choose' ? 'Choosing…' : 'Choose folder…'}
+                </button>
+              ) : null}
+            </div>
+          </div>
           <button
             disabled={pending !== undefined || location.trim() === ''}
             type="submit"

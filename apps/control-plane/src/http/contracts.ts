@@ -464,6 +464,18 @@ export const projectSourceImportResultSchema = z
   })
   .strict();
 
+export const directoryPickerRequestSchema = z.object({}).strict();
+
+export const directoryPickerResultSchema = z.discriminatedUnion('status', [
+  z
+    .object({
+      status: z.literal('selected'),
+      path: z.string().min(1).max(4_096).startsWith('/'),
+    })
+    .strict(),
+  z.object({ status: z.literal('cancelled') }).strict(),
+]);
+
 export const commitPageSchema = z
   .object({
     items: z

@@ -35,7 +35,11 @@ test.beforeEach(async ({ context, page }, testInfo) => {
   // The import flow deliberately starts from an empty in-memory directory and
   // does not need the unrelated artifact fixture (which is immutable across
   // repeated local smoke runs).
-  if (testInfo.title.includes('keyboard-import')) return;
+  if (
+    testInfo.title.includes('keyboard-import') ||
+    testInfo.title.includes('folder picker')
+  )
+    return;
   const seeded = await page.evaluate(
     async () => (await fetch('/api/test/seed', { method: 'POST' })).ok,
   );
@@ -93,12 +97,12 @@ test('operator can keyboard-import a local project and browse commits', async ({
   await local.focus();
   await page.keyboard.press('Space');
   await expect(local).toBeChecked();
-  await page.getByLabel('Repository path').fill(process.cwd());
+  await page
+    .getByLabel('Repository path', { exact: true })
+    .fill(process.cwd());
   await page.getByRole('button', { name: 'Inspect repository' }).click();
   await expect(page.getByText('Repository found')).toBeVisible();
-  await expect(page.getByLabel('Default branch')).toHaveValue(
-    'codex/import-existing-projects',
-  );
+  await expect(page.getByLabel('Default branch')).toHaveValue(/\S+/);
   await page.getByRole('button', { name: 'Import and open project' }).click();
 
   await expect(page).toHaveURL(/\/projects\/project_/);
@@ -127,6 +131,64 @@ test('operator can keyboard-import a local project and browse commits', async ({
   }
 });
 
+test('operator can populate a local repository path with the folder picker', async ({
+  page,
+}) => {
+  let pickerRequest = 0;
+  await page.route(
+    '**/api/projects/import/select-directory',
+    async (route) => {
+      pickerRequest += 1;
+      if (pickerRequest === 1) {
+        await route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'selected',
+            path: process.cwd(),
+          }),
+        });
+        return;
+      }
+      if (pickerRequest === 2) {
+        await route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'directory_picker_failed',
+            message: 'Could not open the macOS folder picker.',
+          },
+        }),
+      });
+    },
+  );
+  await page.goto('/projects');
+  await page.getByRole('button', { name: 'Import project' }).click();
+  await page.getByRole('radio', { name: 'Local repository' }).click();
+
+  const path = page.getByLabel('Repository path', { exact: true });
+  const choose = page.getByRole('button', { name: 'Choose folder…' });
+  await choose.click();
+  await expect(path).toHaveValue(process.cwd());
+  await expect(path).toBeFocused();
+
+  await path.fill('/Users/operator/keep-this-path');
+  await choose.click();
+  await expect(path).toHaveValue('/Users/operator/keep-this-path');
+
+  await choose.click();
+  await expect(path).toHaveValue('/Users/operator/keep-this-path');
+  await expect(
+    page.getByText('Could not open the macOS folder picker.'),
+  ).toBeVisible();
+});
+
 test('operator can monitor a waiting run and consume a scoped approval', async ({
   page,
 }) => {
@@ -139,11 +201,16 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   await page.goto('/inbox');
   await expect(page.getByLabel('Agent requests')).toBeVisible();
   await expect(page.getByLabel('Selected request')).toBeVisible();
-  await page.getByRole('button', { name: /Approval requested/ }).click();
+  await page
+    .getByRole('button', { name: /Approval requested.*Merge pull request #42/ })
+    .click();
   await page.getByText('Review request details').click();
   await expect(page.getByText('scope_hash_42')).toBeVisible();
   await page.getByRole('button', { name: 'Approve request' }).click();
   await expect(page.getByText('scope_hash_42')).not.toBeVisible();
+  await page
+    .getByRole('button', { name: /Which deployment window should we use/ })
+    .click();
   await expect(
     page.getByRole('heading', {
       name: 'Which deployment window should we use?',

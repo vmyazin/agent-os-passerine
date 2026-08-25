@@ -1,6 +1,7 @@
 // app/projects/page.tsx
 import { controlPlaneService } from '../../src/application/runtime';
 import { requirePageSession } from '../../src/auth/page-session';
+import { isLocalDirectoryPickerAvailable } from '../../src/local-system/directory-picker';
 import { EmptyState } from '../../src/ui/components';
 import { ImportProjectDialog } from '../../src/ui/import-project-dialog';
 import { PageToolbar } from '../../src/ui/page-toolbar';
@@ -21,7 +22,9 @@ export default async function ProjectsPage() {
         action={
           <div className="project-toolbar-actions">
             <span className="project-count">{projectCountLabel}</span>
-            <ImportProjectDialog />
+            <ImportProjectDialog
+              localPickerAvailable={isLocalDirectoryPickerAvailable()}
+            />
           </div>
         }
         description="Workspaces the control plane can run against."

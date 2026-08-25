@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import { controlPlaneService } from '../../../src/application/runtime';
 import { ServiceError } from '../../../src/application/control-plane-service';
 import { requirePageSession } from '../../../src/auth/page-session';
+import { isLocalDirectoryPickerAvailable } from '../../../src/local-system/directory-picker';
 import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
 import { formatDisplayDate } from '../../../src/ui/format-timestamp';
 import { PageToolbar } from '../../../src/ui/page-toolbar';
@@ -179,7 +180,10 @@ export default async function ProjectDetailPage({
               This project has no imported repository source, so live commit
               history is not available yet.
             </p>
-            <ImportProjectDialog triggerLabel="Import source" />
+            <ImportProjectDialog
+              localPickerAvailable={isLocalDirectoryPickerAvailable()}
+              triggerLabel="Import source"
+            />
           </div>
         ) : (
           <CommitFeed
