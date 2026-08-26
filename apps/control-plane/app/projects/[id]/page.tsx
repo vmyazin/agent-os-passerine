@@ -5,7 +5,11 @@ import { controlPlaneService } from '../../../src/application/runtime';
 import { ServiceError } from '../../../src/application/control-plane-service';
 import { requirePageSession } from '../../../src/auth/page-session';
 import { isLocalDirectoryPickerAvailable } from '../../../src/local-system/directory-picker';
-import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
+import {
+  EmptyState,
+  MetricCard,
+  RunStatusBadge,
+} from '../../../src/ui/components';
 import { formatDisplayDate } from '../../../src/ui/format-timestamp';
 import { PageToolbar } from '../../../src/ui/page-toolbar';
 import {
@@ -96,37 +100,37 @@ export default async function ProjectDetailPage({
         />
       </section>
       <section aria-label="Project summary" className="metric-grid">
-        <article>
-          <span className="metric-label">Runs</span>
-          <strong className="metric-value">{project.runCount}</strong>
-          <span className="metric-detail">{runCountLabel}</span>
-        </article>
-        <article>
-          <span className="metric-label">Latest revision</span>
-          <strong className="metric-value">
-            {project.latestRevision === undefined
-              ? '—'
-              : `r${project.latestRevision}`}
-          </strong>
-          <span className="metric-detail">
-            {project.configDigest === undefined
+        <MetricCard
+          detail={runCountLabel}
+          label="Runs"
+          value={project.runCount}
+        />
+        <MetricCard
+          detail={
+            project.configDigest === undefined
               ? 'No configuration applied'
-              : `Digest ${project.configDigest.slice(0, 12)}…`}
-          </span>
-        </article>
-        <article>
-          <span className="metric-label">Budget</span>
-          <strong className="metric-value">
-            {project.workflowBudgetMicrodollars === undefined
+              : `Digest ${project.configDigest.slice(0, 12)}…`
+          }
+          label="Latest revision"
+          value={
+            project.latestRevision === undefined
               ? '—'
-              : formatBudgetMicrodollars(project.workflowBudgetMicrodollars)}
-          </strong>
-          <span className="metric-detail">
-            {project.dailyBudgetMicrodollars === undefined
+              : `r${project.latestRevision}`
+          }
+        />
+        <MetricCard
+          detail={
+            project.dailyBudgetMicrodollars === undefined
               ? 'Not configured'
-              : `${formatBudgetMicrodollars(project.dailyBudgetMicrodollars)} daily cap`}
-          </span>
-        </article>
+              : `${formatBudgetMicrodollars(project.dailyBudgetMicrodollars)} daily cap`
+          }
+          label="Budget"
+          value={
+            project.workflowBudgetMicrodollars === undefined
+              ? '—'
+              : formatBudgetMicrodollars(project.workflowBudgetMicrodollars)
+          }
+        />
       </section>
       <section aria-labelledby="project-provenance">
         <div className="section-heading">

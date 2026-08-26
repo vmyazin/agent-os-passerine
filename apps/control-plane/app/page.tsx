@@ -1,7 +1,7 @@
 // app/page.tsx
 import { controlPlaneService } from '../src/application/runtime';
 import { requirePageSession } from '../src/auth/page-session';
-import { EmptyState, RunStatusBadge } from '../src/ui/components';
+import { EmptyState, MetricCard, RunStatusBadge } from '../src/ui/components';
 import { countWaitingRuns } from '../src/ui/rail-status-model';
 import { timeOfDayGreeting } from '../src/ui/time-of-day-greeting';
 
@@ -33,21 +33,18 @@ export default async function HomePage() {
         </p>
       </section>
       <section aria-label="Workspace summary" className="metric-grid">
-        <article>
-          <span className="metric-label">Projects</span>
-          <strong className="metric-value">{projectCount}</strong>
-          <span className="metric-detail">{activeProjectsLabel}</span>
-        </article>
-        <article>
-          <span className="metric-label">Recent runs</span>
-          <strong className="metric-value">{runs.length}</strong>
-          <span className="metric-detail">{waitingLabel}</span>
-        </article>
-        <article>
-          <span className="metric-label">Budget</span>
-          <strong className="metric-value">—</strong>
-          <span className="metric-detail">Not configured</span>
-        </article>
+        <MetricCard
+          detail={activeProjectsLabel}
+          href="/projects"
+          label="Projects"
+          value={projectCount}
+        />
+        <MetricCard
+          detail={waitingLabel}
+          label="Recent runs"
+          value={runs.length}
+        />
+        <MetricCard detail="Not configured" label="Budget" value="—" />
       </section>
       <section aria-labelledby="recent-runs">
         <div className="section-heading">

@@ -66,6 +66,25 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Projects, 1' })).toBeVisible();
 });
 
+test('operator can open projects from the metric card by keyboard', async ({
+  page,
+}) => {
+  await page.goto('/');
+
+  const summary = page.getByRole('region', { name: 'Workspace summary' });
+  const projectsMetric = summary.getByRole('link', {
+    name: 'Projects 1 1 project',
+  });
+  await projectsMetric.focus();
+  await expect(projectsMetric).toBeFocused();
+  await page.keyboard.press('Enter');
+
+  await expect(page).toHaveURL('/projects');
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Projects' }),
+  ).toBeVisible();
+});
+
 test('operator can open the projects directory', async ({ page }) => {
   await page.goto('/projects');
 

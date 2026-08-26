@@ -56,3 +56,31 @@ export function EmptyState({
     createElement('p', null, children),
   );
 }
+
+export function MetricCard({
+  label,
+  value,
+  detail,
+  href,
+}: {
+  readonly label: string;
+  readonly value: ReactNode;
+  readonly detail: ReactNode;
+  readonly href?: string;
+}) {
+  const content = [
+    createElement('span', { className: 'metric-label' }, label),
+    createElement('strong', { className: 'metric-value' }, value),
+    createElement('span', { className: 'metric-detail' }, detail),
+  ];
+  const body =
+    href === undefined
+      ? createElement('div', { className: 'metric-card-body' }, ...content)
+      : createElement(
+          'a',
+          { className: 'metric-card-body metric-card-link', href },
+          ...content,
+        );
+
+  return createElement('article', { className: 'metric-card' }, body);
+}
