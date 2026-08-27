@@ -29,6 +29,22 @@ describe('control-plane UI components', () => {
     expect(markup).toContain('aria-label="Run status: Waiting"');
   });
 
+  it('spins only while a run is actively moving', () => {
+    for (const status of ['pending', 'running'] as const) {
+      const markup = renderToStaticMarkup(
+        createElement(RunStatusBadge, { status }),
+      );
+      expect(markup).toContain('class="status-spinner"');
+    }
+
+    for (const status of ['waiting', 'succeeded', 'failed', 'cancelled'] as const) {
+      const markup = renderToStaticMarkup(
+        createElement(RunStatusBadge, { status }),
+      );
+      expect(markup).not.toContain('status-spinner');
+    }
+  });
+
   it('renders a noninteractive metric card with article semantics', () => {
     const markup = renderToStaticMarkup(
       createElement(MetricCard, {

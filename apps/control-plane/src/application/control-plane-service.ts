@@ -2787,8 +2787,8 @@ export class ControlPlaneService {
    * Lightweight status count for navigation badges: one repository query,
    * no per-run projection (a full projection costs four queries per run).
    */
-  async countRunsByStatus(status: RunStatus, limit = 100): Promise<number> {
-    return (await this.repository.listRuns({ status, limit })).length;
+  async countRunsByStatus(status: RunStatus): Promise<number> {
+    return this.repository.countRuns({ status });
   }
 
   /**

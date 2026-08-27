@@ -596,6 +596,8 @@ export const inboxCountSchema = z
   .object({ count: z.number().int().nonnegative().safe() })
   .strict();
 
+export const activeRunCountSchema = inboxCountSchema;
+
 export function idempotencyKey(request: Request): string {
   const key = request.headers.get('idempotency-key')?.trim();
   if (!key || key.length > 200) {

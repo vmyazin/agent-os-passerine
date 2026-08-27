@@ -8,6 +8,10 @@ import {
   inboxAttentionPresentation,
   subscribeToInboxAttentionCount,
 } from './inbox-count-client';
+import {
+  activeRunPresentation,
+  subscribeToActiveRunCount,
+} from './active-run-count-client';
 import { subscribeToProjectCount } from './project-count-signal';
 
 const NAV_ITEMS = [
@@ -31,10 +35,12 @@ export function AppRailNav({
   children,
   inboxCount = 0,
   projectCount = 0,
+  activeRunCount = 0,
 }: {
   readonly children?: ReactNode;
   readonly inboxCount?: number;
   readonly projectCount?: number;
+  readonly activeRunCount?: number;
 }) {
   const pathname = usePathname();
   const [liveInboxCount, setLiveInboxCount] = useState(inboxCount);
@@ -46,6 +52,9 @@ export function AppRailNav({
   const [liveProjectCount, setLiveProjectCount] = useState(projectCount);
   useEffect(() => setLiveProjectCount(projectCount), [projectCount]);
   useEffect(() => subscribeToProjectCount(setLiveProjectCount), []);
+  const [liveActiveRunCount, setLiveActiveRunCount] = useState(activeRunCount);
+  useEffect(() => setLiveActiveRunCount(activeRunCount), [activeRunCount]);
+  useEffect(() => subscribeToActiveRunCount(setLiveActiveRunCount), []);
 
   return (
     <nav aria-label="Primary navigation">
@@ -56,6 +65,10 @@ export function AppRailNav({
           href === '/inbox'
             ? inboxAttentionPresentation(liveInboxCount)
             : undefined;
+        const runPresentation =
+          href === '/runs'
+            ? activeRunPresentation(liveActiveRunCount)
+            : undefined;
         const count =
           href === '/inbox'
             ? inboxPresentation?.badgeText
@@ -63,7 +76,7 @@ export function AppRailNav({
               ? liveProjectCount > 0
                 ? liveProjectCount
                 : undefined
-              : undefined;
+              : runPresentation?.badgeText;
 
         return (
           <a
@@ -71,11 +84,20 @@ export function AppRailNav({
             aria-current={isActive ? 'page' : undefined}
             aria-label={
               inboxPresentation?.ariaLabel ??
+              runPresentation?.ariaLabel ??
               (count === undefined ? undefined : `${label}, ${count}`)
             }
             href={href}
           >
-            <span className="rail-nav-label">{label}</span>
+            <span className="rail-nav-label">
+              <span className="rail-nav-label-text">{label}</span>
+              {runPresentation === undefined ? null : (
+                <span
+                  aria-hidden="true"
+                  className="status-spinner rail-nav-spinner"
+                />
+              )}
+            </span>
             {count === undefined ? null : (
               <span className="rail-nav-count">{count}</span>
             )}

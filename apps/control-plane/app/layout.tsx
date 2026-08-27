@@ -32,6 +32,7 @@ export default async function RootLayout({
                 Agent OS
               </a>
               <AppRailNav
+                activeRunCount={counts?.activeRunCount ?? 0}
                 inboxCount={counts?.inboxCount ?? 0}
                 projectCount={counts?.projectCount ?? 0}
               >

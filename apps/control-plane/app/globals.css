@@ -185,10 +185,22 @@ a:focus-visible {
 }
 
 .rail-nav-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.rail-nav-label-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rail-nav-spinner {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
 }
 
 .rail-nav-count {
