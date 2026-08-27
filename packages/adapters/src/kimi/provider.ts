@@ -237,7 +237,7 @@ interface KimiSession {
   loopPromise: Promise<KimiLoopResult>;
   usage: { inputTokens: number; outputTokens: number };
   result: unknown;
-  failure: string | undefined;
+  failure: unknown;
   status: KimiSessionStatus;
   nextEventSeq: number;
   mutex: Promise<void>;
@@ -484,7 +484,11 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       (error: unknown) => {
         const message = errorMessage(error);
         if (this.#terminate(session, 'failed', 'error', { message })) {
-          session.failure = message;
+          // Keep the original typed error for collectOutput(). Workflow
+          // retry classification depends on transport status/code fields;
+          // reducing the failure to display text makes transient upstream
+          // faults look permanent.
+          session.failure = error;
         }
         throw error;
       },
@@ -581,9 +585,12 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       // so awaiting loopPromise here would otherwise block forever.
       await session.loopPromise.catch(() => undefined);
     }
+    if (session.status === 'failed' && session.failure !== undefined) {
+      throw session.failure;
+    }
     if (session.status !== 'submitted') {
       const detail =
-        session.failure === undefined ? '' : `: ${session.failure}`;
+        session.failure === undefined ? '' : `: ${errorMessage(session.failure)}`;
       throw new KimiRuntimeProviderError(
         `session did not submit a result (status: ${session.status}${detail})`,
       );

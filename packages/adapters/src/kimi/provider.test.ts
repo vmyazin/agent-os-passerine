@@ -18,7 +18,7 @@ import {
   KimiRuntimeProviderError,
 } from './provider.js';
 import type { KimiSandbox } from './sandbox.js';
-import type { KimiTransport } from './types.js';
+import { KimiTransportError, type KimiTransport } from './types.js';
 
 /**
  * Records every runBash invocation the provider makes (the agent's `bash`
@@ -439,8 +439,26 @@ describe('createKimiRuntimeProvider', () => {
     ).toBe(true);
 
     await expect(provider.collectOutput(handle)).rejects.toThrow(
-      KimiRuntimeProviderError,
+      'transport exploded',
     );
+  });
+
+  it('preserves a typed transport failure for workflow retry classification', async () => {
+    const transportError = new KimiTransportError(
+      502,
+      'invalid JSON response from Kimi',
+    );
+    const { provider } = await makeProvider({
+      transport: {
+        async send() {
+          throw transportError;
+        },
+      },
+    });
+    const handle = await provider.start(baseRequest());
+    await collectEvents(provider, handle);
+
+    await expect(provider.collectOutput(handle)).rejects.toBe(transportError);
   });
 
   it('turn_limit resolution emits an error event and collectOutput rejects', async () => {
