@@ -4,14 +4,14 @@
   packages → domain → role, and where state lives, (b) the session workflow, (c) how
   to run locally. Everything deeper goes in `docs/<topic>.md`.
 - Maintain an **auto-load routing** section: task type → which doc/skill to read
-  *first*. Example: "UI consistency scan → run the `ui-consistency` skill, and first
+  _first_. Example: "UI consistency scan → run the `ui-consistency` skill, and first
   read `docs/ui-consistency-seeds.md`." The agent should not discover context by
   grepping; the route tells it what to load.
 - Mirror the file for other tools (`AGENTS.md`), and treat it as living: update it
   when a new component pattern, workflow, or convention is established — not at the
   end of the project.
 - Write rules **with their rationale inline**. "Use X" gets ignored under pressure;
-  "Use X because Y fails when Z" survives. Same for config: comment *why* the deploy
+  "Use X because Y fails when Z" survives. Same for config: comment _why_ the deploy
   order is app → content → mcp, not just that it is.
 
 ## Repository wiki (generated, `.qoder/repowiki/`)
@@ -40,6 +40,9 @@ discards the edit; fix the code or the doc it was generated from and regenerate.
 - Project import, repository trust, source identity, or commit browsing → first
   read `docs/architecture/project-sources.md`, because the import registry grants
   inspection only and must not be mistaken for runtime or publication authority.
+- Operator preferences, timezone selection, or UI timestamp formatting → first
+  read `docs/codex/specs/2026-08-27-user-timezone-preference.md`, because these
+  settings are user-scoped database records and must not leak into project YAML.
 
 ## Session workflow (worktree → smoke-test → ship → wipe)
 
@@ -80,7 +83,7 @@ cp ../../apps/control-plane/next-env.d.ts apps/control-plane/  # gitignored; tsc
 worktree looks cheaper and does not work: Turbopack resolves the link, sees a target
 above the project root, and fails every import with `Symlink ... points out of the
 filesystem root`. `pnpm install` in the worktree hardlinks from the shared store, so a
-second checkout costs seconds and almost no disk. Running `pnpm` *through* those
+second checkout costs seconds and almost no disk. Running `pnpm` _through_ those
 symlinks is worse — it decides `node_modules` is corrupt and tries to purge a directory
 the main checkout is using.
 
@@ -101,9 +104,9 @@ port authenticates both.
   state still works. Document how to create the first record via `curl` for anything
   that can't bootstrap itself.
 - **Auth bypass, tightly gated:** honor a dev identity var from a gitignored
-  `.dev.vars` (checked-in `.dev.vars.example`), gated on a signal that *cannot* be
+  `.dev.vars` (checked-in `.dev.vars.example`), gated on a signal that _cannot_ be
   present in production. Document the failed alternatives — e.g. a `Host ===
-  localhost` check does not work under a dev proxy that serves the production Host, so
+localhost` check does not work under a dev proxy that serves the production Host, so
   gate on an origin var pointing at localhost instead. Never set the bypass var as a
   production secret.
 - **Give production-only routing a local equivalent.** If a dimension lives in the
@@ -111,7 +114,7 @@ port authenticates both.
   a cookie so subsequent links stay scoped, and gate that on the same localhost
   signal. Make in-page links respect it so nothing bounces the agent to production
   mid-test.
-- Document the local *divergences* explicitly: which services aren't shared between
+- Document the local _divergences_ explicitly: which services aren't shared between
   processes, which auth paths have no bypass, and which features need a real key.
 
 ## Spec → plan → execute
@@ -119,8 +122,8 @@ port authenticates both.
 For anything beyond a small edit, write two documents under `docs/<agent>/`, named
 `YYYY-MM-DD-<slug>`:
 
-- **Spec** (`specs/`): Context, Goals, **Non-goals**, and an explicit *scope and
-  implementation boundary* naming which function/file the change lives inside and what
+- **Spec** (`specs/`): Context, Goals, **Non-goals**, and an explicit _scope and
+  implementation boundary_ naming which function/file the change lives inside and what
   it must not touch. Mark it `Status: Approved design` and treat it as the acceptance
   source.
 - **Plan** (`plans/`): a **File map** with `path:line-range` targets and a literal
@@ -136,8 +139,8 @@ When a generic skill or checklist would otherwise re-derive the same conclusions
 
 - Keep a **seeds file** that states the scan roots, the repo's canonical patterns
   (with the reference implementation's file and symbol), and a **baseline list of
-  things already extracted** — with the instruction: *do not propose re-creating
-  anything listed here.*
+  things already extracted** — with the instruction: _do not propose re-creating
+  anything listed here._
 - Prefer executable seeds: put the actual `rg` commands in the doc, each with a
   comment explaining what a hit means. The agent runs the query instead of inventing
   one.
@@ -158,7 +161,7 @@ inventing fake people or orgs beyond the seed, skip it.
 ## Shipping safety
 
 - Path-filter deploy triggers so doc/marketing pushes don't redeploy, and comment
-  which paths are bundled at build time and therefore *must* trigger one.
+  which paths are bundled at build time and therefore _must_ trigger one.
 - Use a non-cancelling concurrency group — let an in-flight deploy finish rather than
   killing it mid-upload.
 - Comment any ordering dependency between deploy steps at the step itself.
@@ -171,6 +174,7 @@ inventing fake people or orgs beyond the seed, skip it.
 - No agent attribution or "Generated with …" signature in commit messages.
 
 <!-- TRIGGER.DEV SKILLS START -->
+
 ## Trigger.dev agent skills
 
 This project has Trigger.dev agent skills installed in `.agents/skills/`. Before writing or changing Trigger.dev code (background tasks, scheduled tasks, realtime, or chat.agent AI agents), load the most relevant skill: `trigger-realtime-and-frontend`.

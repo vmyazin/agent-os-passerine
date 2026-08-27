@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 
-import { InMemoryDomainRepository, createInMemoryArtifactStorage } from '@agentos/adapters';
+import {
+  InMemoryDomainRepository,
+  createInMemoryArtifactStorage,
+} from '@agentos/adapters';
 import {
   canonicalConfigHash,
   canonicalConfigJson,
@@ -85,6 +88,27 @@ runtime: { provider: local }
 }
 
 describe('ControlPlaneService', () => {
+  it('stores validated timezone preferences per authenticated login', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+
+    expect(await service.getUserPreferences('alice')).toBeUndefined();
+    await expect(
+      service.updateUserTimeZone('alice', 'Mars/Olympus_Mons'),
+    ).rejects.toMatchObject({ code: 'invalid_time_zone', status: 422 });
+    expect(await service.getUserPreferences('alice')).toBeUndefined();
+
+    await service.updateUserTimeZone('alice', 'America/Sao_Paulo');
+    await service.updateUserTimeZone('bob', 'Europe/Helsinki');
+    expect(await service.getUserPreferences('alice')).toEqual({
+      timeZone: 'America/Sao_Paulo',
+      updatedAt: now,
+    });
+    expect((await service.getUserPreferences('bob'))?.timeZone).toBe(
+      'Europe/Helsinki',
+    );
+  });
+
   it('binds an applied workflow configuration to the trusted selected-repository head', async () => {
     const repository = new InMemoryDomainRepository();
     const resolve = vi.fn(async () => 'b'.repeat(40));
@@ -1804,7 +1828,9 @@ runtime: { provider: local }
 
   it('reports what would change without applying it', async () => {
     const service = await applied();
-    const plan = await service.planConfigurationChange(yaml(3, 'stored-secret'));
+    const plan = await service.planConfigurationChange(
+      yaml(3, 'stored-secret'),
+    );
 
     expect(plan).toMatchObject({ changed: true, fromRevision: 1 });
     expect(plan.changes).toContainEqual({
@@ -1814,7 +1840,9 @@ runtime: { provider: local }
       after: '3',
     });
     // Nothing was written: the active revision is still the first one.
-    const next = await service.planConfigurationChange(yaml(3, 'stored-secret'));
+    const next = await service.planConfigurationChange(
+      yaml(3, 'stored-secret'),
+    );
     expect(next.fromRevision).toBe(1);
   });
 
@@ -2427,7 +2455,10 @@ describe('run chaining', () => {
     repository: InMemoryDomainRepository,
     id: string,
     output: Record<string, unknown>,
-    overrides: { readonly projectId?: string; readonly status?: 'succeeded' | 'failed' } = {},
+    overrides: {
+      readonly projectId?: string;
+      readonly status?: 'succeeded' | 'failed';
+    } = {},
   ) => {
     const runId = persistenceId('run', id);
     await repository.createRun({
@@ -2443,7 +2474,10 @@ describe('run chaining', () => {
     return runId;
   };
 
-  const project = async (repository: InMemoryDomainRepository, id = 'project-1') => {
+  const project = async (
+    repository: InMemoryDomainRepository,
+    id = 'project-1',
+  ) => {
     await repository.createProject({
       id: persistenceId('project', id),
       name: id,
@@ -2462,10 +2496,13 @@ describe('run chaining', () => {
     await project(repository);
     await publishedRun(repository, 'base-1', publication);
 
-    const chained = await createService(repository).createFeatureRun('chain-1', {
-      ...feature,
-      baseRunId: 'base-1',
-    });
+    const chained = await createService(repository).createFeatureRun(
+      'chain-1',
+      {
+        ...feature,
+        baseRunId: 'base-1',
+      },
+    );
 
     const stored = await repository.getRun(persistenceId('run', chained.id));
     expect(stored?.input).toMatchObject({
@@ -2480,19 +2517,28 @@ describe('run chaining', () => {
     });
   });
 
-  it('rejects a base that is missing, unfinished, or another project\'s', async () => {
+  it("rejects a base that is missing, unfinished, or another project's", async () => {
     const repository = new InMemoryDomainRepository();
     await project(repository);
     await project(repository, 'project-2');
-    await publishedRun(repository, 'failed-base', publication, { status: 'failed' });
+    await publishedRun(repository, 'failed-base', publication, {
+      status: 'failed',
+    });
     await publishedRun(repository, 'other-project-base', publication, {
       projectId: 'project-2',
     });
     const service = createService(repository);
 
-    for (const baseRunId of ['no-such-run', 'failed-base', 'other-project-base']) {
+    for (const baseRunId of [
+      'no-such-run',
+      'failed-base',
+      'other-project-base',
+    ]) {
       await expect(
-        service.createFeatureRun(`chain-${baseRunId}`, { ...feature, baseRunId }),
+        service.createFeatureRun(`chain-${baseRunId}`, {
+          ...feature,
+          baseRunId,
+        }),
       ).rejects.toMatchObject({ code: 'base_run_unavailable', status: 422 });
     }
   });
@@ -2520,7 +2566,10 @@ describe('run chaining', () => {
     await project(repository);
     await publishedRun(repository, 'base-3', publication);
     const service = createService(repository);
-    await service.createFeatureRun('chain-3a', { ...feature, baseRunId: 'base-3' });
+    await service.createFeatureRun('chain-3a', {
+      ...feature,
+      baseRunId: 'base-3',
+    });
 
     await expect(
       service.createFeatureRun('chain-3b', { ...feature, baseRunId: 'base-3' }),
@@ -2918,8 +2967,8 @@ describe('project directory projections', () => {
 
   it('rejects unknown project detail lookups', async () => {
     const service = createService(new InMemoryDomainRepository());
-    await expect(service.getProjectDetail('missing-project')).rejects.toMatchObject(
-      { code: 'project_not_found', status: 404 },
-    );
+    await expect(
+      service.getProjectDetail('missing-project'),
+    ).rejects.toMatchObject({ code: 'project_not_found', status: 404 });
   });
 });

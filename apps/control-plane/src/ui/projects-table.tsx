@@ -5,8 +5,10 @@ import { RunStatusBadge } from './components';
 
 export function ProjectsTable({
   projects,
+  timeZone,
 }: {
   readonly projects: readonly ProjectListProjection[];
+  readonly timeZone: string;
 }) {
   return (
     <div className="projects-table-wrap">
@@ -24,7 +26,10 @@ export function ProjectsTable({
           {projects.map((project) => (
             <tr key={project.id}>
               <th className="project-name-cell" scope="row">
-                <a className="project-name-link" href={`/projects/${project.id}`}>
+                <a
+                  className="project-name-link"
+                  href={`/projects/${project.id}`}
+                >
                   <strong className="project-name">{project.name}</strong>
                   <small className="project-id">{project.id}</small>
                 </a>
@@ -53,7 +58,7 @@ export function ProjectsTable({
                 )}
               </td>
               <td className="project-updated">
-                {formatDisplayDate(project.updatedAt)}
+                {formatDisplayDate(project.updatedAt, timeZone)}
               </td>
             </tr>
           ))}

@@ -63,9 +63,7 @@ export function createInboxConversation(
   return conversation;
 }
 
-function notificationHeadline(
-  notification: RunNotificationProjection,
-): string {
+function notificationHeadline(notification: RunNotificationProjection): string {
   const noun = notification.pipeline === 'goal' ? 'Goal' : 'Run';
   switch (notification.resultStatus ?? notification.runStatus) {
     case 'succeeded':
@@ -185,8 +183,7 @@ export function inboxItemForRun(
 ): InboxItem | undefined {
   return (
     items.find(
-      (item) =>
-        inboxItemRunId(item) === runId && inboxItemNeedsAttention(item),
+      (item) => inboxItemRunId(item) === runId && inboxItemNeedsAttention(item),
     ) ?? items.find((item) => inboxItemRunId(item) === runId)
   );
 }
@@ -202,7 +199,11 @@ export function inboxItemProjectName(item: InboxItem): string | undefined {
  * server render and client hydration agree. Falls back to a short absolute
  * date once an item is more than a week old.
  */
-export function formatRelativeTime(nowIso: string, thenIso: string): string {
+export function formatRelativeTime(
+  nowIso: string,
+  thenIso: string,
+  timeZone = 'UTC',
+): string {
   const elapsedMs = Date.parse(nowIso) - Date.parse(thenIso);
   if (!Number.isFinite(elapsedMs)) return thenIso;
   if (elapsedMs < 60_000) return 'just now';
@@ -215,7 +216,7 @@ export function formatRelativeTime(nowIso: string, thenIso: string): string {
   return new Intl.DateTimeFormat('en-US', {
     day: 'numeric',
     month: 'short',
-    timeZone: 'UTC',
+    timeZone,
   }).format(new Date(thenIso));
 }
 
@@ -225,30 +226,24 @@ export function createInboxItems(
   notifications: readonly RunNotificationProjection[] = [],
 ): readonly InboxItem[] {
   return [
-    ...approvals.map(
-      (approval): InboxItem => ({
-        kind: 'approval',
-        key: `approval:${approval.id}`,
-        createdAt: approval.createdAt,
-        approval,
-      }),
-    ),
-    ...messages.map(
-      (message): InboxItem => ({
-        kind: 'question',
-        key: `question:${message.id}`,
-        createdAt: message.createdAt,
-        message,
-      }),
-    ),
-    ...notifications.map(
-      (notification): InboxItem => ({
-        kind: 'notification',
-        key: `notification:${notification.runId}`,
-        createdAt: notification.completedAt,
-        notification,
-      }),
-    ),
+    ...approvals.map((approval): InboxItem => ({
+      kind: 'approval',
+      key: `approval:${approval.id}`,
+      createdAt: approval.createdAt,
+      approval,
+    })),
+    ...messages.map((message): InboxItem => ({
+      kind: 'question',
+      key: `question:${message.id}`,
+      createdAt: message.createdAt,
+      message,
+    })),
+    ...notifications.map((notification): InboxItem => ({
+      kind: 'notification',
+      key: `notification:${notification.runId}`,
+      createdAt: notification.completedAt,
+      notification,
+    })),
   ].sort(
     (left, right) =>
       right.createdAt.localeCompare(left.createdAt) ||

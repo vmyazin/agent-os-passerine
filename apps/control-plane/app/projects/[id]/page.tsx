@@ -21,6 +21,7 @@ import { backlogView } from '../../../src/ui/backlog-view-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
 import { CommitFeed } from '../../../src/ui/commit-feed';
 import { ImportProjectDialog } from '../../../src/ui/import-project-dialog';
+import { loadUserTimeZone } from '../../../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,7 +35,7 @@ export default async function ProjectDetailPage({
 }: {
   readonly params: Promise<{ id: string }>;
 }) {
-  await requirePageSession();
+  const session = await requirePageSession();
   const { id } = await params;
   let project;
   try {
@@ -44,7 +45,10 @@ export default async function ProjectDetailPage({
       notFound();
     throw error;
   }
-  const backlogs = await controlPlaneService().listBacklogs(project.id);
+  const [backlogs, timeZone] = await Promise.all([
+    controlPlaneService().listBacklogs(project.id),
+    loadUserTimeZone(session.login),
+  ]);
   // An item's run that is `waiting` is waiting on the operator's approval,
   // which is the state a backlog spends most of its life in. The run list is
   // already loaded for this page, so naming it costs nothing.
@@ -155,7 +159,7 @@ export default async function ProjectDetailPage({
           )}
           <div>
             <dt>Updated</dt>
-            <dd>{formatDisplayDate(project.updatedAt)}</dd>
+            <dd>{formatDisplayDate(project.updatedAt, timeZone)}</dd>
           </div>
           <div>
             <dt>Last run</dt>
@@ -167,7 +171,7 @@ export default async function ProjectDetailPage({
                   <RunStatusBadge status={project.lastRunStatus} />
                   {project.lastRunAt === undefined
                     ? null
-                    : ` · ${formatDisplayDate(project.lastRunAt)}`}
+                    : ` · ${formatDisplayDate(project.lastRunAt, timeZone)}`}
                 </>
               )}
             </dd>
@@ -193,6 +197,7 @@ export default async function ProjectDetailPage({
           <CommitFeed
             defaultBranch={project.source.defaultBranch}
             projectId={project.id}
+            timeZone={timeZone}
           />
         )}
       </section>
@@ -295,7 +300,8 @@ export default async function ProjectDetailPage({
                       )}
                     </strong>
                     <small>
-                      {run.id} · updated {formatDisplayDate(run.updatedAt)}
+                      {run.id} · updated{' '}
+                      {formatDisplayDate(run.updatedAt, timeZone)}
                     </small>
                   </span>
                   <RunStatusBadge status={run.status} />

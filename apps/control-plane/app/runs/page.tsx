@@ -6,6 +6,7 @@ import { isAwaitingDispatch } from '../../src/ui/dispatch-stall';
 import { formatDisplayDate } from '../../src/ui/format-timestamp';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
+import { loadUserTimeZone } from '../../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,14 +15,17 @@ export default async function RunsPage({
 }: {
   readonly searchParams: Promise<{ projectId?: string }>;
 }) {
-  await requirePageSession();
+  const session = await requirePageSession();
   const { projectId } = await searchParams;
   const service = controlPlaneService();
-  const [runs, projects] = await Promise.all([
+  const [runs, projects, timeZone] = await Promise.all([
     service.listRuns(50, projectId),
     service.listProjects(),
+    loadUserTimeZone(session.login),
   ]);
-  const projectNameById = new Map(projects.map((project) => [project.id, project.name]));
+  const projectNameById = new Map(
+    projects.map((project) => [project.id, project.name]),
+  );
   const now = new Date().toISOString();
 
   return (
@@ -54,7 +58,8 @@ export default async function RunsPage({
                   </strong>
                   <small>
                     {projectNameById.get(run.projectId) ?? run.projectId} ·{' '}
-                    {run.id} · updated {formatDisplayDate(run.updatedAt)}
+                    {run.id} · updated{' '}
+                    {formatDisplayDate(run.updatedAt, timeZone)}
                     {isAwaitingDispatch({
                       status: run.status,
                       stepCount: run.steps.length,

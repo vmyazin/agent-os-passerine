@@ -61,6 +61,38 @@ export function repositoryParityContract(
   createRepository: RepositoryFactory,
 ): void {
   describe(`${implementation} PostgreSQL parity contract`, () => {
+    it('keeps durable preferences isolated by operator login', async () => {
+      const repository = await createRepository();
+      const first = isoTimestamp('2026-08-17T07:00:00.000Z');
+      const second = isoTimestamp('2026-08-17T08:00:00.000Z');
+
+      expect(await repository.getUserPreferences('alice')).toBeUndefined();
+      await repository.upsertUserPreferences({
+        login: 'alice',
+        timeZone: 'UTC',
+        updatedAt: first,
+      });
+      await repository.upsertUserPreferences({
+        login: 'bob',
+        timeZone: 'Europe/Helsinki',
+        updatedAt: first,
+      });
+      await repository.upsertUserPreferences({
+        login: 'alice',
+        timeZone: 'America/Sao_Paulo',
+        updatedAt: second,
+      });
+
+      expect(await repository.getUserPreferences('alice')).toEqual({
+        login: 'alice',
+        timeZone: 'America/Sao_Paulo',
+        updatedAt: second,
+      });
+      expect((await repository.getUserPreferences('bob'))?.timeZone).toBe(
+        'Europe/Helsinki',
+      );
+    });
+
     it('atomically imports and deduplicates project sources', async () => {
       const repository = await createRepository();
       const projectId = persistenceId(
@@ -83,15 +115,21 @@ export function repositoryParityContract(
         updatedAt: at,
       };
 
-      await expect(repository.getProjectSource(projectId)).resolves.toBeUndefined();
+      await expect(
+        repository.getProjectSource(projectId),
+      ).resolves.toBeUndefined();
       const imported = await repository.importProjectSource(project, source);
       expect(imported).toEqual({ project, source, created: true });
-      await expect(repository.getProjectSource(projectId)).resolves.toEqual(source);
+      await expect(repository.getProjectSource(projectId)).resolves.toEqual(
+        source,
+      );
       await expect(
         repository.getProjectSourceByKey(source.sourceKey),
       ).resolves.toEqual(source);
 
-      await expect(repository.importProjectSource(project, source)).resolves.toEqual({
+      await expect(
+        repository.importProjectSource(project, source),
+      ).resolves.toEqual({
         project,
         source,
         created: false,
@@ -994,7 +1032,10 @@ export function repositoryParityContract(
       const total = 105;
       for (let index = 1; index < total; index += 1) {
         await repository.createRun({
-          id: persistenceId('run', `${implementation}-count-run-${String(index)}`),
+          id: persistenceId(
+            'run',
+            `${implementation}-count-run-${String(index)}`,
+          ),
           projectId,
           configRevisionId: revisionId,
           pipeline: 'parity',
@@ -1004,7 +1045,9 @@ export function repositoryParityContract(
         });
       }
       expect(await repository.countRuns({ projectId })).toBe(total);
-      expect((await repository.listRuns({ projectId, limit: 1_000 })).length).toBe(100);
+      expect(
+        (await repository.listRuns({ projectId, limit: 1_000 })).length,
+      ).toBe(100);
       expect(
         await repository.countRuns({
           projectId: persistenceId('project', `${implementation}-count-absent`),
@@ -1151,10 +1194,7 @@ export function repositoryParityContract(
         repository,
         `${implementation}-backlog-delete`,
       );
-      const backlogId = persistenceId(
-        'backlog',
-        `${implementation}-backlog-3`,
-      );
+      const backlogId = persistenceId('backlog', `${implementation}-backlog-3`);
       const itemId = persistenceId('backlogItem', `${implementation}-item-d1`);
       const create = async () => {
         await repository.createBacklog({
@@ -1260,7 +1300,10 @@ export function repositoryParityContract(
         updatedAt: at,
       };
       const draft = (suffix: string, projectId: typeof a.id) => ({
-        id: persistenceId('configRevision', `${implementation}-latest-${suffix}`),
+        id: persistenceId(
+          'configRevision',
+          `${implementation}-latest-${suffix}`,
+        ),
         projectId,
         config: null,
         configDigest: `digest-${suffix}`,

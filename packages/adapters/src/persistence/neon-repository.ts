@@ -59,6 +59,7 @@ import type {
   TimestampListCursor,
   UsageId,
   UsageRecordEntry,
+  UserPreferences,
   WebhookClaim,
   WebhookReceipt,
   WorkflowRun,
@@ -118,12 +119,14 @@ import {
   mapGoalProgressRow,
   mapInboxMessageRow,
   mapProjectRow,
+  mapUserPreferencesRow,
   mapProjectSourceRow,
   mapStepRunRow,
   mapUsageRecordRow,
   mapWebhookReceiptRow,
   mapWorkflowRunRow,
   projectSelection,
+  userPreferencesSelection,
   projectSourceSelection,
   stepRunSelection,
   usageRecordSelection,
@@ -145,6 +148,7 @@ import {
   goalProgress,
   inboxMessages,
   projects,
+  userPreferences,
   projectSources,
   stepRuns,
   usageRecords,
@@ -381,6 +385,41 @@ export class NeonDomainRepository implements DomainRepository {
     private readonly database: Database,
     private readonly createClaimToken: () => string = randomUUID,
   ) {}
+
+  async getUserPreferences(
+    login: string,
+  ): Promise<UserPreferences | undefined> {
+    const [row] = await this.database
+      .select(userPreferencesSelection)
+      .from(userPreferences)
+      .where(eq(userPreferences.login, login))
+      .limit(1);
+    return row === undefined ? undefined : mapUserPreferencesRow(row);
+  }
+
+  async upsertUserPreferences(
+    preferences: UserPreferences,
+  ): Promise<UserPreferences> {
+    if (preferences.login.trim() === '')
+      throw new TypeError('user preferences login must not be empty');
+    if (preferences.timeZone.trim() === '')
+      throw new TypeError('user preferences timeZone must not be empty');
+    return mappedOne(
+      await this.database
+        .insert(userPreferences)
+        .values(preferences)
+        .onConflictDoUpdate({
+          target: userPreferences.login,
+          set: {
+            timeZone: preferences.timeZone,
+            updatedAt: preferences.updatedAt,
+          },
+        })
+        .returning(userPreferencesSelection),
+      'User preferences',
+      mapUserPreferencesRow,
+    );
+  }
 
   async createProject(project: Project): Promise<Project> {
     return mappedOne(

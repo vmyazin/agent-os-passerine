@@ -33,6 +33,7 @@ import type {
   ProjectSourceImportInput,
   ProjectSourceImportResult,
   ProjectSourceInspection,
+  UserPreferences,
 } from '@agentos/core';
 import {
   canonicalConfigHash,
@@ -45,6 +46,7 @@ import {
   persistenceId,
   resolveProjectVerificationPolicy,
   advanceBacklog,
+  isValidTimeZone,
   planConfigChange,
 } from '@agentos/core';
 import { REDACTED_VALUE } from '../ui/redact-configuration';
@@ -185,6 +187,11 @@ export interface ConfigurationProjection {
   readonly revision: number;
   readonly appliedAt: IsoTimestamp;
   readonly provenance: PersistenceDigests;
+}
+
+export interface UserPreferencesProjection {
+  readonly timeZone: string;
+  readonly updatedAt: IsoTimestamp;
 }
 
 const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
@@ -1026,6 +1033,38 @@ export class ControlPlaneService {
         503,
       );
     return this.projectSources;
+  }
+
+  async getUserPreferences(
+    login: string,
+  ): Promise<UserPreferencesProjection | undefined> {
+    const preferences = await this.repository.getUserPreferences(login);
+    return preferences === undefined
+      ? undefined
+      : {
+          timeZone: preferences.timeZone,
+          updatedAt: preferences.updatedAt,
+        };
+  }
+
+  async updateUserTimeZone(
+    login: string,
+    timeZone: string,
+  ): Promise<UserPreferencesProjection> {
+    if (!isValidTimeZone(timeZone)) {
+      throw new ServiceError(
+        'invalid_time_zone',
+        'time zone must be a valid IANA identifier',
+        422,
+      );
+    }
+    const preferences: UserPreferences = {
+      login,
+      timeZone,
+      updatedAt: this.clock(),
+    };
+    const saved = await this.repository.upsertUserPreferences(preferences);
+    return { timeZone: saved.timeZone, updatedAt: saved.updatedAt };
   }
 
   private projectSourceFailure(error: unknown): never {
@@ -2530,9 +2569,7 @@ export class ControlPlaneService {
             countTimestampedPages<InboxMessage>((messageAfter) =>
               this.repository.listInboxMessages(run.id, 'pending', {
                 limit: ATTENTION_COUNT_PAGE,
-                ...(messageAfter === undefined
-                  ? {}
-                  : { after: messageAfter }),
+                ...(messageAfter === undefined ? {} : { after: messageAfter }),
               }),
             ),
             countTimestampedPages<Approval>(
@@ -2544,8 +2581,7 @@ export class ControlPlaneService {
                     ? {}
                     : { after: approvalAfter }),
                 }),
-              (approval) =>
-                projectApproval(approval, now).status === 'pending',
+              (approval) => projectApproval(approval, now).status === 'pending',
             ),
           ]);
           return messages + approvals;

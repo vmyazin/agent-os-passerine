@@ -4,6 +4,8 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
+import { formatDisplayTime } from './format-timestamp';
+
 const REFRESH_MS = 10_000;
 
 /**
@@ -18,7 +20,13 @@ const REFRESH_MS = 10_000;
  * It says that it is doing so: a page that changes under you without
  * explanation is worse than one that does not change at all.
  */
-export function RunLiveRefresh({ live }: { readonly live: boolean }) {
+export function RunLiveRefresh({
+  live,
+  timeZone,
+}: {
+  readonly live: boolean;
+  readonly timeZone: string;
+}) {
   const router = useRouter();
   const [refreshedAt, setRefreshedAt] = useState<string | undefined>(undefined);
 
@@ -26,16 +34,10 @@ export function RunLiveRefresh({ live }: { readonly live: boolean }) {
     if (!live) return;
     const timer = setInterval(() => {
       router.refresh();
-      setRefreshedAt(
-        new Date().toLocaleTimeString(undefined, {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        }),
-      );
+      setRefreshedAt(formatDisplayTime(new Date(), timeZone));
     }, REFRESH_MS);
     return () => clearInterval(timer);
-  }, [live, router]);
+  }, [live, router, timeZone]);
 
   if (!live) return null;
   return (

@@ -6,6 +6,7 @@ import { InboxView } from '../../src/ui/inbox-view';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
 import { countInboxAttention } from '../../src/ui/rail-status-model';
+import { loadUserTimeZone } from '../../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,12 +15,13 @@ export default async function InboxPage({
 }: {
   readonly searchParams: Promise<{ projectId?: string; runId?: string }>;
 }) {
-  await requirePageSession();
+  const session = await requirePageSession();
   const { projectId, runId } = await searchParams;
   const service = controlPlaneService();
-  const [digest, projects] = await Promise.all([
+  const [digest, projects, timeZone] = await Promise.all([
     service.inboxDigest(50, projectId, runId),
     service.listProjects(),
+    loadUserTimeZone(session.login),
   ]);
   const pendingCount = countInboxAttention(
     digest.approvals.filter((approval) => approval.status === 'pending'),
@@ -56,6 +58,7 @@ export default async function InboxPage({
           digest={digest}
           {...(runId === undefined ? {} : { initialRunId: runId })}
           now={new Date().toISOString()}
+          timeZone={timeZone}
         />
       )}
     </div>

@@ -62,6 +62,7 @@ import type {
   TimestampListCursor,
   UsageId,
   UsageRecordEntry,
+  UserPreferences,
   WebhookClaim,
   WebhookReceipt,
   WorkflowRun,
@@ -255,6 +256,7 @@ function immutableArtifactMatches(
 }
 
 export class InMemoryDomainRepository implements DomainRepository {
+  readonly #userPreferences = new Map<string, UserPreferences>();
   readonly #projects = new Map<string, Project>();
   readonly #projectSources = new Map<string, ProjectSource>();
   readonly #projectSourceKeys = new Map<string, string>();
@@ -308,6 +310,25 @@ export class InMemoryDomainRepository implements DomainRepository {
   constructor(
     private readonly failBeforeCommit: (operation: string) => void = () => {},
   ) {}
+
+  async getUserPreferences(
+    login: string,
+  ): Promise<UserPreferences | undefined> {
+    const value = this.#userPreferences.get(login);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async upsertUserPreferences(
+    preferences: UserPreferences,
+  ): Promise<UserPreferences> {
+    if (preferences.login.trim() === '')
+      throw new TypeError('user preferences login must not be empty');
+    if (preferences.timeZone.trim() === '')
+      throw new TypeError('user preferences timeZone must not be empty');
+    assertPersistenceTimestamps(preferences);
+    this.#userPreferences.set(preferences.login, copy(preferences));
+    return copy(preferences);
+  }
 
   async createProject(project: Project): Promise<Project> {
     return insertUnique(this.#projects, project.id, project, 'Project');

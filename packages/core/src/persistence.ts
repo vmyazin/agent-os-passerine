@@ -159,6 +159,13 @@ export interface Project {
   readonly updatedAt: IsoTimestamp;
 }
 
+/** Durable UI preferences belonging to one authenticated operator. */
+export interface UserPreferences {
+  readonly login: string;
+  readonly timeZone: string;
+  readonly updatedAt: IsoTimestamp;
+}
+
 export interface PersistenceDigests {
   readonly configDigest: string;
   readonly modelDigest: string;
@@ -470,6 +477,9 @@ export interface GoalProgress {
 }
 
 export interface DomainRepository {
+  getUserPreferences(login: string): Promise<UserPreferences | undefined>;
+  upsertUserPreferences(preferences: UserPreferences): Promise<UserPreferences>;
+
   createProject(project: Project): Promise<Project>;
   getProject(id: ProjectId): Promise<Project | undefined>;
   listProjects(

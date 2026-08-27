@@ -6,12 +6,16 @@ import { EmptyState } from '../../src/ui/components';
 import { ImportProjectDialog } from '../../src/ui/import-project-dialog';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectsTable } from '../../src/ui/projects-table';
+import { loadUserTimeZone } from '../../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
 export default async function ProjectsPage() {
-  await requirePageSession();
-  const projects = await controlPlaneService().listProjects();
+  const session = await requirePageSession();
+  const [projects, timeZone] = await Promise.all([
+    controlPlaneService().listProjects(),
+    loadUserTimeZone(session.login),
+  ]);
   const projectCount = projects.length;
   const projectCountLabel =
     projectCount === 1 ? '1 project' : `${projectCount} projects`;
@@ -37,7 +41,7 @@ export default async function ProjectsPage() {
           <a href="/setup">Setup</a> to register your first project.
         </EmptyState>
       ) : (
-        <ProjectsTable projects={projects} />
+        <ProjectsTable projects={projects} timeZone={timeZone} />
       )}
     </div>
   );

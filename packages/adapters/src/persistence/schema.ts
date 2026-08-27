@@ -98,6 +98,21 @@ export const workflowReconciliationCursors = pgTable(
   },
 );
 
+export const userPreferences = pgTable(
+  'user_preferences',
+  {
+    login: text('login').primaryKey(),
+    timeZone: text('time_zone').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    check(
+      'user_preferences_required_text',
+      sql`length(${table.login}) between 1 and 255 and length(${table.timeZone}) between 1 and 255`,
+    ),
+  ],
+);
+
 export const projects = pgTable(
   'projects',
   {

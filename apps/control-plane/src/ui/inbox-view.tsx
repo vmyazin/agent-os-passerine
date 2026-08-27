@@ -26,16 +26,10 @@ import {
 } from './inbox-view-model';
 import { ApprovalActions, ReplyForm } from './mutation-forms';
 import { subscribeToInboxAttentionChanged } from './inbox-count-client';
+import { formatDisplayDateTime } from './format-timestamp';
 
-function formatReceived(value: string): string {
-  return new Intl.DateTimeFormat('en-US', {
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    month: 'short',
-    timeZone: 'UTC',
-  }).format(new Date(value));
-}
+const formatReceived = (value: string, timeZone: string) =>
+  formatDisplayDateTime(value, timeZone);
 
 function RequestMarker({ item }: { readonly item: InboxItem }) {
   const glyph =
@@ -58,7 +52,9 @@ function RequestMarker({ item }: { readonly item: InboxItem }) {
 
 function StatusChip({ item }: { readonly item: InboxItem }) {
   const chip = inboxItemChip(item);
-  return <span className={`inbox-chip inbox-chip-${chip.tone}`}>{chip.label}</span>;
+  return (
+    <span className={`inbox-chip inbox-chip-${chip.tone}`}>{chip.label}</span>
+  );
 }
 
 function ApprovalScopeSummary({
@@ -129,7 +125,13 @@ function ApprovalScopeSummary({
   );
 }
 
-function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
+function ApprovalMessage({
+  approval,
+  timeZone,
+}: {
+  approval: InboxApprovalItem;
+  timeZone: string;
+}) {
   const summary = approval.summary;
   const decided = approval.status !== 'pending';
   return (
@@ -147,7 +149,7 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
                     {' '}
                     on{' '}
                     <time dateTime={approval.consumedAt}>
-                      {formatReceived(approval.consumedAt)} UTC
+                      {formatReceived(approval.consumedAt, timeZone)}
                     </time>
                   </>
                 )}
@@ -163,7 +165,7 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
                     {' '}
                     on{' '}
                     <time dateTime={approval.consumedAt}>
-                      {formatReceived(approval.consumedAt)} UTC
+                      {formatReceived(approval.consumedAt, timeZone)}
                     </time>
                   </>
                 )}
@@ -197,7 +199,7 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
             <dt>Expires</dt>
             <dd>
               <time dateTime={approval.expiresAt}>
-                {formatReceived(approval.expiresAt)} UTC
+                {formatReceived(approval.expiresAt, timeZone)}
               </time>
             </dd>
           </div>
@@ -213,7 +215,13 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
   );
 }
 
-function QuestionMessage({ message }: { message: InboxProjection }) {
+function QuestionMessage({
+  message,
+  timeZone,
+}: {
+  message: InboxProjection;
+  timeZone: string;
+}) {
   const conversation = createInboxConversation(message);
   return (
     <>
@@ -234,7 +242,9 @@ function QuestionMessage({ message }: { message: InboxProjection }) {
                 {entry.author === 'operator' ? (
                   <span className="inbox-sent-label">Sent</span>
                 ) : null}
-                <time dateTime={entry.at}>{formatReceived(entry.at)} UTC</time>
+                <time dateTime={entry.at}>
+                  {formatReceived(entry.at, timeZone)}
+                </time>
               </span>
             </header>
             <div className="inbox-message-copy">
@@ -314,8 +324,8 @@ function NotificationMessage({
         <p>Total spend: {formatSpend(notification.totalCostUsd)}.</p>
       )}
       <p>
-        <a href={`/runs/${notification.runId}`}>Open the full run</a> for
-        steps, timeline, and evidence.
+        <a href={`/runs/${notification.runId}`}>Open the full run</a> for steps,
+        timeline, and evidence.
       </p>
     </div>
   );
@@ -326,12 +336,14 @@ function QueueSection({
   now,
   onSelect,
   selectedKey,
+  timeZone,
   title,
 }: {
   readonly items: readonly InboxItem[];
   readonly now: string;
   readonly onSelect: (key: string) => void;
   readonly selectedKey: string;
+  readonly timeZone: string;
   readonly title: string;
 }) {
   if (items.length === 0) return null;
@@ -354,7 +366,7 @@ function QueueSection({
                   <span className="inbox-row-meta">
                     <span>{inboxItemSender(item)}</span>
                     <time dateTime={item.createdAt}>
-                      {formatRelativeTime(now, item.createdAt)}
+                      {formatRelativeTime(now, item.createdAt, timeZone)}
                     </time>
                   </span>
                   <strong>{inboxItemSubject(item)}</strong>
@@ -379,10 +391,12 @@ export function InboxView({
   digest,
   initialRunId,
   now,
+  timeZone,
 }: {
   readonly digest: InboxDigest;
   readonly initialRunId?: string;
   readonly now: string;
+  readonly timeZone: string;
 }) {
   const items = createInboxItems(
     digest.approvals,
@@ -428,6 +442,7 @@ export function InboxView({
             now={now}
             onSelect={setSelectedKey}
             selectedKey={selected.key}
+            timeZone={timeZone}
             title="Needs you"
           />
           <QueueSection
@@ -435,6 +450,7 @@ export function InboxView({
             now={now}
             onSelect={setSelectedKey}
             selectedKey={selected.key}
+            timeZone={timeZone}
             title={attention.length > 0 ? 'Everything else' : 'History'}
           />
         </aside>
@@ -452,7 +468,7 @@ export function InboxView({
               </div>
             </div>
             <time dateTime={selected.createdAt}>
-              {formatReceived(selected.createdAt)} UTC
+              {formatReceived(selected.createdAt, timeZone)}
             </time>
           </header>
           <div className="inbox-message-subject">
@@ -464,9 +480,12 @@ export function InboxView({
           </div>
           <div className="inbox-message-content">
             {selected.kind === 'approval' ? (
-              <ApprovalMessage approval={selected.approval} />
+              <ApprovalMessage
+                approval={selected.approval}
+                timeZone={timeZone}
+              />
             ) : selected.kind === 'question' ? (
-              <QuestionMessage message={selected.message} />
+              <QuestionMessage message={selected.message} timeZone={timeZone} />
             ) : (
               <NotificationMessage notification={selected.notification} />
             )}

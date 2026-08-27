@@ -1,10 +1,13 @@
 // src/ui/time-of-day-greeting.ts
-const EASTERN_TIME_ZONE = 'America/New_York';
+import { DEFAULT_TIME_ZONE } from '@agentos/core';
 
-export function timeOfDayGreeting(now = new Date()): string {
+export function timeOfDayGreeting(
+  now = new Date(),
+  timeZone = DEFAULT_TIME_ZONE,
+): string {
   const hour = Number(
     new Intl.DateTimeFormat('en-US', {
-      timeZone: EASTERN_TIME_ZONE,
+      timeZone,
       hour: 'numeric',
       hourCycle: 'h23',
     })

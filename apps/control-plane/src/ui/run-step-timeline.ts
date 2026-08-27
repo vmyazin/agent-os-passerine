@@ -1,5 +1,7 @@
 import { createElement } from 'react';
 
+import { formatDisplayTime } from './format-timestamp';
+
 export interface RunStepProgressEntry {
   readonly eventId: string;
   readonly phase: string;
@@ -31,17 +33,15 @@ function fallbackStatus(status: string): string {
   }
 }
 
-function eventTime(value: string): string {
-  const timestamp = new Date(value);
-  return Number.isFinite(timestamp.getTime())
-    ? `${timestamp.toISOString().slice(11, 19)} UTC`
-    : value;
-}
+const eventTime = (value: string, timeZone: string) =>
+  formatDisplayTime(value, timeZone);
 
 export function RunStepTimeline({
   steps,
+  timeZone = 'UTC',
 }: {
   readonly steps: readonly RunStepTimelineItem[];
+  readonly timeZone?: string;
 }) {
   return createElement(
     'ol',
@@ -69,7 +69,7 @@ export function RunStepTimeline({
                   createElement(
                     'time',
                     { dateTime: event.occurredAt },
-                    eventTime(event.occurredAt),
+                    eventTime(event.occurredAt, timeZone),
                   ),
                   createElement('span', null, event.message),
                 ),

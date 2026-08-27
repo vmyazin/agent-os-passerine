@@ -14,6 +14,7 @@ import type {
   ProjectSource,
   StepRun,
   UsageRecordEntry,
+  UserPreferences,
   WebhookReceipt,
   WorkflowRun,
 } from '@agentos/core';
@@ -37,6 +38,7 @@ import {
   usageRecords,
   webhookReceipts,
   workflowRuns,
+  userPreferences,
   backlogs,
   backlogItems,
 } from './schema.js';
@@ -78,6 +80,7 @@ function present(column: PgColumn, alias: string) {
 }
 
 export const projectSelection = getTableColumns(projects);
+export const userPreferencesSelection = getTableColumns(userPreferences);
 export const projectSourceSelection = getTableColumns(projectSources);
 export const configRevisionSelection = getTableColumns(configRevisions);
 export const configSnapshotSelection = getTableColumns(configSnapshots);
@@ -120,6 +123,8 @@ export const goalProgressSelection = {
 export const mapBacklogRow = (row: SqlRow): Backlog => mapRow(row);
 export const mapBacklogItemRow = (row: SqlRow): BacklogItem => mapRow(row);
 export const mapProjectRow = (row: SqlRow): Project => mapRow(row);
+export const mapUserPreferencesRow = (row: SqlRow): UserPreferences =>
+  mapRow(row);
 export const mapProjectSourceRow = (row: SqlRow): ProjectSource => {
   const common = {
     projectId: row.projectId as ProjectSource['projectId'],

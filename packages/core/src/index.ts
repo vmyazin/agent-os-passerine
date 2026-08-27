@@ -14,4 +14,5 @@ export * from './persistence.js';
 export * from './ports.js';
 export * from './publication.js';
 export * from './project-source.js';
+export * from './time-zone.js';
 export * from './verification-policy.js';

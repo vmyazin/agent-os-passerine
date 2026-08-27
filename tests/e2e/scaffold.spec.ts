@@ -66,6 +66,41 @@ test('control plane renders its accessible dashboard', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Projects, 1' })).toBeVisible();
 });
 
+test('operator timezone persists and formats absolute UI times', async ({
+  page,
+}) => {
+  await page.goto('/configuration');
+  const selector = page.getByRole('combobox', { name: 'Timezone' });
+  await expect(selector).toHaveValue('UTC');
+
+  await selector.fill('America/Sao_Paulo');
+  await expect(page.getByText('Preview ·')).toContainText('GMT-3');
+  await page.getByRole('button', { name: 'Save timezone' }).click();
+  await expect(
+    page.getByText('Saved. Updating displayed times…'),
+  ).toBeVisible();
+
+  await page.reload();
+  await expect(selector).toHaveValue('America/Sao_Paulo');
+  await expect(
+    page.getByRole('button', { name: 'Save timezone' }),
+  ).toBeDisabled();
+
+  await page.goto('/inbox');
+  await expect(
+    page.locator('time').filter({ hasText: 'GMT-3' }).first(),
+  ).toBeVisible();
+
+  // Leave the shared e2e identity at the backward-compatible default for
+  // tests that follow this one.
+  await page.goto('/configuration');
+  await page.getByRole('combobox', { name: 'Timezone' }).fill('UTC');
+  await page.getByRole('button', { name: 'Save timezone' }).click();
+  await expect(
+    page.getByText('Saved. Updating displayed times…'),
+  ).toBeVisible();
+});
+
 test('operator can open projects from the metric card by keyboard', async ({
   page,
 }) => {
@@ -105,7 +140,9 @@ test('operator can keyboard-import a local project and browse commits', async ({
   await page.goto('/projects');
   const trigger = page.getByRole('button', { name: 'Import project' });
   await trigger.click();
-  const dialog = page.getByRole('dialog', { name: 'Import an existing project' });
+  const dialog = page.getByRole('dialog', {
+    name: 'Import an existing project',
+  });
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
@@ -116,9 +153,7 @@ test('operator can keyboard-import a local project and browse commits', async ({
   await local.focus();
   await page.keyboard.press('Space');
   await expect(local).toBeChecked();
-  await page
-    .getByLabel('Repository path', { exact: true })
-    .fill(process.cwd());
+  await page.getByLabel('Repository path', { exact: true }).fill(process.cwd());
   await page.getByRole('button', { name: 'Inspect repository' }).click();
   await expect(page.getByText('Repository found')).toBeVisible();
   await expect(page.getByLabel('Default branch')).toHaveValue(/\S+/);
@@ -154,39 +189,36 @@ test('operator can populate a local repository path with the folder picker', asy
   page,
 }) => {
   let pickerRequest = 0;
-  await page.route(
-    '**/api/projects/import/select-directory',
-    async (route) => {
-      pickerRequest += 1;
-      if (pickerRequest === 1) {
-        await route.fulfill({
-          contentType: 'application/json',
-          body: JSON.stringify({
-            status: 'selected',
-            path: process.cwd(),
-          }),
-        });
-        return;
-      }
-      if (pickerRequest === 2) {
-        await route.fulfill({
-          contentType: 'application/json',
-          body: JSON.stringify({ status: 'cancelled' }),
-        });
-        return;
-      }
+  await page.route('**/api/projects/import/select-directory', async (route) => {
+    pickerRequest += 1;
+    if (pickerRequest === 1) {
       await route.fulfill({
-        status: 503,
         contentType: 'application/json',
         body: JSON.stringify({
-          error: {
-            code: 'directory_picker_failed',
-            message: 'Could not open the macOS folder picker.',
-          },
+          status: 'selected',
+          path: process.cwd(),
         }),
       });
-    },
-  );
+      return;
+    }
+    if (pickerRequest === 2) {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 'directory_picker_failed',
+          message: 'Could not open the macOS folder picker.',
+        },
+      }),
+    });
+  });
   await page.goto('/projects');
   await page.getByRole('button', { name: 'Import project' }).click();
   await page.getByRole('radio', { name: 'Local repository' }).click();
@@ -305,7 +337,9 @@ test('inbox remains usable on a narrow touch viewport', async ({ page }) => {
   ).toBeTruthy();
 });
 
-test('inbox project filters remain fully above the mailbox', async ({ page }) => {
+test('inbox project filters remain fully above the mailbox', async ({
+  page,
+}) => {
   await page.goto('/inbox');
 
   const filters = page.getByRole('navigation', { name: 'Project filters' });

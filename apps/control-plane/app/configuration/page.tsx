@@ -1,5 +1,6 @@
 // app/configuration/page.tsx
 import { controlPlaneService } from '../../src/application/runtime';
+import { DEFAULT_TIME_ZONE, supportedTimeZones } from '@agentos/core';
 import { ServiceError } from '../../src/application/control-plane-service';
 import { requirePageSession } from '../../src/auth/page-session';
 import { EmptyState } from '../../src/ui/components';
@@ -7,6 +8,7 @@ import { ConfigurationEditor } from '../../src/ui/configuration-editor';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
 import { redactConfigurationForDisplay } from '../../src/ui/redact-configuration';
+import { TimeZoneSelector } from '../../src/ui/time-zone-selector';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,13 +17,15 @@ export default async function ConfigurationPage({
 }: {
   readonly searchParams: Promise<{ projectId?: string }>;
 }) {
-  await requirePageSession();
+  const session = await requirePageSession();
   const { projectId: requestedProjectId } = await searchParams;
   const service = controlPlaneService();
   const projects = await service.listProjects();
+  const currentTimeZone =
+    (await service.getUserPreferences(session.login))?.timeZone ??
+    DEFAULT_TIME_ZONE;
   const selectorProjectId =
-    requestedProjectId ??
-    (projects.length === 1 ? projects[0]!.id : undefined);
+    requestedProjectId ?? (projects.length === 1 ? projects[0]!.id : undefined);
 
   let yaml: string | undefined;
   let activeProjectId: string | undefined;
@@ -38,7 +42,9 @@ export default async function ConfigurationPage({
         revisionLabel = `Revision ${active.revision} · digest ${active.digest.slice(0, 12)}…`;
       }
     } catch (error) {
-      if (!(error instanceof ServiceError && error.code === 'project_not_found'))
+      if (!(
+        error instanceof ServiceError && error.code === 'project_not_found'
+      ))
         throw error;
     }
   }
@@ -62,6 +68,10 @@ export default async function ConfigurationPage({
         title="Configuration"
         titleId="configuration-title"
       />
+      <TimeZoneSelector
+        currentTimeZone={currentTimeZone}
+        timeZones={supportedTimeZones()}
+      />
       <ProjectFilterChips
         activeProjectId={activeProjectId}
         basePath="/configuration"
@@ -81,7 +91,10 @@ export default async function ConfigurationPage({
           <a href="/setup">Setup</a> to apply one.
         </EmptyState>
       ) : (
-        <pre className="configuration" aria-label="Canonical configuration YAML">
+        <pre
+          className="configuration"
+          aria-label="Canonical configuration YAML"
+        >
           <code>{yaml}</code>
         </pre>
       )}

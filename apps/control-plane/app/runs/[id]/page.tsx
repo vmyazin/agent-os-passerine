@@ -18,6 +18,8 @@ import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
 import { explainRunStatus } from '../../../src/ui/run-status-model';
 import { StartRunForm } from '../../../src/ui/start-run-form';
 import { UndispatchedRunNotice } from '../../../src/ui/undispatched-run-notice';
+import { formatDisplayDateTime } from '../../../src/ui/format-timestamp';
+import { loadUserTimeZone } from '../../../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,9 +32,10 @@ export default async function RunPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requirePageSession();
+  const session = await requirePageSession();
   const { id } = await params;
   const run = await loadRunPageModel(id);
+  const timeZone = await loadUserTimeZone(session.login);
   const now = new Date().toISOString();
   const awaitingDispatch = isAwaitingDispatch({
     status: run.status,
@@ -63,7 +66,7 @@ export default async function RunPage({
         <h1 id="run-title">{run.input?.title ?? run.id}</h1>
         <div className="run-status-line">
           <RunStatusBadge status={run.status} />
-          <RunLiveRefresh live={explanation.live} />
+          <RunLiveRefresh live={explanation.live} timeZone={timeZone} />
         </div>
         <p className="run-status-explanation">
           {explanation.summary}
@@ -206,7 +209,7 @@ export default async function RunPage({
               : 'Step state will appear as the run progresses.'}
           </EmptyState>
         ) : (
-          <RunStepTimeline steps={run.steps} />
+          <RunStepTimeline steps={run.steps} timeZone={timeZone} />
         )}
       </section>
       {run.status !== 'succeeded' || run.pipeline !== 'feature' ? null : (
@@ -216,8 +219,8 @@ export default async function RunPage({
           run.outcome.publishedCommitSha === undefined ? (
             <p>
               This run recorded no published commit, so nothing can be started
-              on top of it. Start the next feature from the project instead,
-              and it will build on the default branch.
+              on top of it. Start the next feature from the project instead, and
+              it will build on the default branch.
             </p>
           ) : (
             <>
@@ -246,8 +249,8 @@ export default async function RunPage({
               run {run.chain.baseRunId}
             </a>
             , at <code>{run.chain.baseCommitSha.slice(0, 12)}</code> on{' '}
-            <code>{run.chain.baseBranch}</code> — not from the default
-            branch. Merging this run&apos;s branch takes that work with it.
+            <code>{run.chain.baseBranch}</code> — not from the default branch.
+            Merging this run&apos;s branch takes that work with it.
           </p>
         </section>
       )}
@@ -285,7 +288,9 @@ export default async function RunPage({
             {run.timeline.map((event) => (
               <li key={event.eventId}>
                 <strong>{event.type}</strong>
-                <time>{event.occurredAt}</time>
+                <time dateTime={event.occurredAt}>
+                  {formatDisplayDateTime(event.occurredAt, timeZone)}
+                </time>
               </li>
             ))}
           </ol>

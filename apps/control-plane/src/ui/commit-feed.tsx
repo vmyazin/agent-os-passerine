@@ -11,11 +11,13 @@ export function CommitFeed({
   defaultBranch,
   initialPage,
   initialUnavailable = false,
+  timeZone,
 }: {
   readonly projectId: string;
   readonly defaultBranch: string;
   readonly initialPage?: CommitPage;
   readonly initialUnavailable?: boolean;
+  readonly timeZone: string;
 }) {
   const [items, setItems] = useState<readonly CommitSummary[]>(
     initialPage?.items ?? [],
@@ -88,7 +90,8 @@ export function CommitFeed({
               <span>
                 <strong>{commit.subject || 'Untitled commit'}</strong>
                 <small>
-                  {commit.authorName} · {formatDisplayDate(commit.committedAt)}
+                  {commit.authorName} ·{' '}
+                  {formatDisplayDate(commit.committedAt, timeZone)}
                 </small>
               </span>
               {commit.url === undefined ? null : (

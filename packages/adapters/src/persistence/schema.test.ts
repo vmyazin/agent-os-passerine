@@ -18,9 +18,25 @@ import {
   usageRecords,
   webhookReceipts,
   workflowRuns,
+  userPreferences,
 } from './schema.js';
 
 describe('Drizzle persistence schema', () => {
+  it('keys extensible user preferences by operator login', () => {
+    const config = getTableConfig(userPreferences);
+    expect(
+      config.columns.find((column) => column.name === 'login')?.primary,
+    ).toBe(true);
+    expect(config.columns.map((column) => column.name)).toEqual([
+      'login',
+      'time_zone',
+      'updated_at',
+    ]);
+    expect(config.checks.map((item) => item.name)).toContain(
+      'user_preferences_required_text',
+    );
+  });
+
   it('maps Neon Date values to canonical ISO timestamps without shifting the instant', () => {
     expect(
       projects.createdAt.mapFromDriverValue(

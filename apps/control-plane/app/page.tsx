@@ -4,15 +4,17 @@ import { requirePageSession } from '../src/auth/page-session';
 import { EmptyState, MetricCard, RunStatusBadge } from '../src/ui/components';
 import { countWaitingRuns } from '../src/ui/rail-status-model';
 import { timeOfDayGreeting } from '../src/ui/time-of-day-greeting';
+import { loadUserTimeZone } from '../src/ui/user-time-zone';
 
 export const dynamic = 'force-dynamic';
 
 export default async function HomePage() {
   const session = await requirePageSession();
   const service = controlPlaneService();
-  const [runs, projects] = await Promise.all([
+  const [runs, projects, timeZone] = await Promise.all([
     service.listRuns(6),
     service.listProjects(),
+    loadUserTimeZone(session.login),
   ]);
   const waitingCount = countWaitingRuns(runs);
   const projectCount = projects.length;
@@ -26,7 +28,7 @@ export default async function HomePage() {
       <section aria-labelledby="page-title" className="page-heading">
         <p className="eyebrow">Overview</p>
         <h1 id="page-title">
-          {timeOfDayGreeting()}, {session.login}.
+          {timeOfDayGreeting(new Date(), timeZone)}, {session.login}.
         </h1>
         <p>
           Monitor active work and answer the questions that need your judgment.
