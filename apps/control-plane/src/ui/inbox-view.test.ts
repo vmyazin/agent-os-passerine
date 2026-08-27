@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { isoTimestamp } from '@agentos/core';
 
@@ -130,6 +131,18 @@ describe('inbox view model', () => {
       label: 'Approved',
       tone: 'positive',
     });
+  });
+
+  it('keeps approved scope details available in a collapsed disclosure', () => {
+    const source = readFileSync(
+      new URL('./inbox-view.tsx', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toContain('<summary>Scope details</summary>');
+    expect(source).toMatch(
+      /decided && summary !== undefined[\s\S]*?<details className="inbox-evidence inbox-scope-details">[\s\S]*?<ApprovalScopeSummary approval=\{approval\} \/>/,
+    );
   });
 
   it('renders a rejected approval with a negative chip', () => {

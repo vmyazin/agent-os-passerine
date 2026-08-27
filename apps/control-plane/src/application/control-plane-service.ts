@@ -2596,10 +2596,14 @@ export class ControlPlaneService {
         if (projected.status === 'consumed') {
           const rejected =
             safeString(record(run.output), 'status') === 'rejected';
-          return { ...base, decision: rejected ? 'rejected' : 'approved' };
+          return {
+            ...base,
+            ...(await this.approvalSummary(projected)),
+            decision: rejected ? 'rejected' : 'approved',
+          };
         }
-        // Summaries exist to help someone decide. Skip the artifact reads for
-        // an approval that has already run out of time.
+        // Expired approvals cannot be acted on, so they alone skip the artifact
+        // reads. Consumed approvals keep the reviewed scope as durable history.
         if (projected.status === 'pending')
           return { ...base, ...(await this.approvalSummary(projected)) };
         return base;

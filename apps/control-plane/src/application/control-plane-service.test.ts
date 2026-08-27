@@ -1595,7 +1595,7 @@ runtime: { provider: local }
     ).toMatchObject({ runStatus: 'failed', resultStatus: 'rejected' });
   });
 
-  it('includes frozen acceptance tests in the spec approval summary', async () => {
+  it('includes frozen acceptance tests in pending and resolved spec approval summaries', async () => {
     const repository = new InMemoryDomainRepository();
     const artifacts = createInMemoryArtifactStorage();
     const service = createService(repository, artifacts.store);
@@ -1616,6 +1616,16 @@ runtime: { provider: local }
       status: 'pending',
       createdAt: now,
       expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'resolved-spec-approval'),
+      runId: persistenceId('run', run.id),
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'e'.repeat(64),
+      status: 'consumed',
+      createdAt: now,
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+      consumedAt: isoTimestamp('2026-08-17T12:30:00.000Z'),
     });
 
     const scope = {
@@ -1653,6 +1663,15 @@ runtime: { provider: local }
 
     const pending = await service.listPendingApprovals();
     expect(pending[0]?.summary?.acceptanceTests).toEqual([
+      {
+        path: 'test/acceptance/status-test.test.mjs',
+        content: 'import test from "node:test";',
+      },
+    ]);
+    const resolved = (await service.inboxDigest()).approvals.find((approval) =>
+      approval.id.endsWith('resolved-spec-approval'),
+    );
+    expect(resolved?.summary?.acceptanceTests).toEqual([
       {
         path: 'test/acceptance/status-test.test.mjs',
         content: 'import test from "node:test";',

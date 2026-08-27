@@ -61,6 +61,74 @@ function StatusChip({ item }: { readonly item: InboxItem }) {
   return <span className={`inbox-chip inbox-chip-${chip.tone}`}>{chip.label}</span>;
 }
 
+function ApprovalScopeSummary({
+  approval,
+}: {
+  readonly approval: InboxApprovalItem;
+}) {
+  const summary = approval.summary;
+  if (summary === undefined)
+    return <p className="inbox-message-copy">{approval.scopePreview}</p>;
+  const decided = approval.status !== 'pending';
+  return (
+    <div className="inbox-message-copy">
+      <p>
+        The specification agent scoped
+        {summary.title === undefined ? (
+          ' this feature'
+        ) : (
+          <>
+            {' '}
+            <strong>{summary.title}</strong>
+          </>
+        )}
+        {decided
+          ? '. This was the reviewed scope.'
+          : '. Approving lets implementation start; rejecting ends the run.'}
+      </p>
+      {summary.acceptanceTests === undefined ? null : (
+        <>
+          <p>
+            <strong>It is done when these tests pass:</strong>
+          </p>
+          {summary.acceptanceTests.map((file) => (
+            <div className="inbox-acceptance-test" key={file.path}>
+              <p>
+                <code>{file.path}</code>
+              </p>
+              <pre className="inbox-acceptance-test-body">{file.content}</pre>
+            </div>
+          ))}
+        </>
+      )}
+      {summary.requirements === undefined ? null : (
+        <>
+          <p>
+            <strong>It will build:</strong>
+          </p>
+          <ul>
+            {summary.requirements.map((requirement, index) => (
+              <li key={index}>{requirement}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {summary.criteria === undefined ? null : (
+        <>
+          <p>
+            <strong>It counts as done when:</strong>
+          </p>
+          <ul>
+            {summary.criteria.map((criterion) => (
+              <li key={criterion.id}>{criterion.description}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
   const summary = approval.summary;
   const decided = approval.status !== 'pending';
@@ -107,63 +175,15 @@ function ApprovalMessage({ approval }: { approval: InboxApprovalItem }) {
           </p>
           <p>{approval.scopePreview}</p>
         </div>
-      ) : summary === undefined ? (
-        <p className="inbox-message-copy">{approval.scopePreview}</p>
       ) : (
-        <div className="inbox-message-copy">
-          <p>
-            The specification agent scoped
-            {summary.title === undefined ? (
-              ' this feature'
-            ) : (
-              <>
-                {' '}
-                <strong>{summary.title}</strong>
-              </>
-            )}
-            . Approving lets implementation start; rejecting ends the run.
-          </p>
-          {summary.acceptanceTests === undefined ? null : (
-            <>
-              <p>
-                <strong>It is done when these tests pass:</strong>
-              </p>
-              {summary.acceptanceTests.map((file) => (
-                <div className="inbox-acceptance-test" key={file.path}>
-                  <p>
-                    <code>{file.path}</code>
-                  </p>
-                  <pre className="inbox-acceptance-test-body">{file.content}</pre>
-                </div>
-              ))}
-            </>
-          )}
-          {summary.requirements === undefined ? null : (
-            <>
-              <p>
-                <strong>It will build:</strong>
-              </p>
-              <ul>
-                {summary.requirements.map((requirement, index) => (
-                  <li key={index}>{requirement}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          {summary.criteria === undefined ? null : (
-            <>
-              <p>
-                <strong>It counts as done when:</strong>
-              </p>
-              <ul>
-                {summary.criteria.map((criterion) => (
-                  <li key={criterion.id}>{criterion.description}</li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
+        <ApprovalScopeSummary approval={approval} />
       )}
+      {decided && summary !== undefined ? (
+        <details className="inbox-evidence inbox-scope-details">
+          <summary>Scope details</summary>
+          <ApprovalScopeSummary approval={approval} />
+        </details>
+      ) : null}
       <details className="inbox-evidence">
         <summary>Review request details</summary>
         <dl>
