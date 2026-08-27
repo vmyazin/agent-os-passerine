@@ -416,14 +416,17 @@ describe('createKimiRuntimeProvider', () => {
     );
   });
 
-  it('a rejecting transport fails the session without an unhandled rejection', async () => {
+  it('a rejecting transport with a session timeout fails without an unhandled rejection', async () => {
     const transport: KimiTransport = {
       async send() {
         throw new Error('transport exploded');
       },
     };
     const { provider } = await makeProvider({ transport });
-    const handle = await provider.start(baseRequest());
+    // Supplying timeoutMs installs the timer-cleanup handler. That cleanup
+    // must not create a second, unobserved rejected promise when the loop
+    // itself rejects.
+    const handle = await provider.start(baseRequest({ timeoutMs: 1_000 }));
 
     const events = await collectEvents(provider, handle);
     expect(

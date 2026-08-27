@@ -501,7 +501,15 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
         void this.cancel(handle, 'timeout');
       }, request.timeoutMs);
       timer.unref?.();
-      void session.loopPromise.finally(() => clearTimeout(timer));
+      // Promise.finally() returns a new promise that preserves rejection. If
+      // discarded, a routine transport failure becomes an unhandled rejection
+      // and can crash the surrounding Trigger task before workflow retry logic
+      // records the failure. Handle both branches explicitly so timer cleanup
+      // always resolves.
+      void session.loopPromise.then(
+        () => clearTimeout(timer),
+        () => clearTimeout(timer),
+      );
     }
 
     return handle;
