@@ -326,6 +326,38 @@ describe('durable Trigger outbox start', () => {
     expect(effect?.error).not.toContain('token');
   });
 
+  it('persists the safe workspace-containment failure for operator recovery', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: {
+        startFeature: vi.fn(),
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: {
+        ensure: vi.fn(async () => {
+          throw new Error('repository is outside the local workspaces root');
+        }),
+      },
+      clock: () => now,
+    });
+
+    await expect(
+      outbox.requestStart({
+        idempotencyKey: 'workflow-start:run-1',
+        runId: 'run-1',
+        pipeline: 'feature',
+      }),
+    ).rejects.toThrow('outside the local workspaces root');
+    await expect(checkpoints.getEffect('source:run-1')).resolves.toMatchObject({
+      status: 'failed',
+      error: 'repository is outside the local workspaces root',
+    });
+  });
+
   it('dispatches a goal start only to the goal task and binds the pipeline fingerprint', async () => {
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const startFeature = vi.fn();

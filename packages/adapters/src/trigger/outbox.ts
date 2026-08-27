@@ -59,6 +59,7 @@ const SOURCE_SNAPSHOT_FAILURES = new Set([
   'source snapshot pinned SHA does not resolve to itself',
   'source snapshot could not resolve a tree SHA',
   'source snapshot batch blob size mismatch',
+  'repository is outside the local workspaces root',
 ]);
 
 function safeSourceSnapshotFailure(error: unknown): string {
