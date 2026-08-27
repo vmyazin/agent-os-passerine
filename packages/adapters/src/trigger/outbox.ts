@@ -34,6 +34,39 @@ const fingerprint = (value: unknown) =>
     .update(canonicalJsonValue(JSON.parse(JSON.stringify(value))))
     .digest('hex');
 
+const SOURCE_SNAPSHOT_FAILURES = new Set([
+  'source snapshot binding run mismatch',
+  'source snapshot binding SHA is malformed',
+  'source snapshot repository binding mismatch',
+  'source snapshot base SHA is stale',
+  'source snapshot commit binding mismatch',
+  'source snapshot tree is truncated',
+  'source snapshot tree exceeds entry limit',
+  'source snapshot tree entry is malformed',
+  'source snapshot contains an unsafe path',
+  'source snapshot contains unsupported submodule configuration',
+  'source snapshot contains a symlink or submodule',
+  'source snapshot contains a symlink, submodule, or unsupported tree entry',
+  'source snapshot contains an unsupported tree entry',
+  'source snapshot exceeds file limit',
+  'source snapshot contains duplicate paths',
+  'source snapshot file exceeds size limit',
+  'source snapshot exceeds total size limit',
+  'source snapshot contains a binary file',
+  'source snapshot bundle exceeds managed resource size limit',
+  'source snapshot pinned SHA not found in repository',
+  'source snapshot pinned SHA is not a commit',
+  'source snapshot pinned SHA does not resolve to itself',
+  'source snapshot could not resolve a tree SHA',
+  'source snapshot batch blob size mismatch',
+]);
+
+function safeSourceSnapshotFailure(error: unknown): string {
+  return error instanceof Error && SOURCE_SNAPSHOT_FAILURES.has(error.message)
+    ? error.message
+    : 'source snapshot ingestion failed';
+}
+
 export interface DurableTriggerOutboxOptions {
   readonly checkpoints: WorkflowCheckpointStore;
   readonly trigger: TriggerWorkflowDispatcher;
@@ -271,21 +304,31 @@ export function createDurableTriggerOutbox(
           sourceClaim.lease,
           options.clock(),
         );
-        const source = await options.sourceSnapshot.ensure(request.runId);
-        await options.checkpoints.attachExternalRef(
-          sourceClaim.lease,
-          source.key,
-          options.clock(),
-        );
-        await options.checkpoints.completeEffect(
-          sourceClaim.lease,
-          {
-            artifactKey: source.key,
-            digest: source.digest,
-            sizeBytes: source.sizeBytes,
-          },
-          options.clock(),
-        );
+        try {
+          const source = await options.sourceSnapshot.ensure(request.runId);
+          await options.checkpoints.attachExternalRef(
+            sourceClaim.lease,
+            source.key,
+            options.clock(),
+          );
+          await options.checkpoints.completeEffect(
+            sourceClaim.lease,
+            {
+              artifactKey: source.key,
+              digest: source.digest,
+              sizeBytes: source.sizeBytes,
+            },
+            options.clock(),
+          );
+        } catch (error) {
+          await options.checkpoints.failEffect(
+            sourceClaim.lease,
+            safeSourceSnapshotFailure(error),
+            false,
+            options.clock(),
+          );
+          throw error;
+        }
       }
       const retryRequest = {
         ...request,

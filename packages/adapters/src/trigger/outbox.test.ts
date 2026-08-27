@@ -241,6 +241,91 @@ describe('durable Trigger outbox start', () => {
     });
   });
 
+  it('records a safe source failure and retries before one Trigger start', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    let attempts = 0;
+    const ensure = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1)
+        throw new Error('source snapshot exceeds total size limit');
+      return {
+        key: 'source/bundle-v1',
+        digest: 'b'.repeat(64),
+        sizeBytes: 123,
+      };
+    });
+    const startFeature = vi.fn(async () => ({
+      externalRunRef: 'trigger-run-1',
+    }));
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: {
+        startFeature,
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: { ensure },
+      repository: repositoryWithRun('run-1'),
+      clock: () => now,
+    });
+    const request = {
+      idempotencyKey: 'workflow-start:run-1',
+      runId: 'run-1',
+      pipeline: 'feature' as const,
+    };
+
+    await expect(outbox.requestStart(request)).rejects.toThrow('total size');
+    await expect(checkpoints.getEffect('source:run-1')).resolves.toMatchObject({
+      status: 'failed',
+      error: 'source snapshot exceeds total size limit',
+    });
+    expect(startFeature).not.toHaveBeenCalled();
+
+    await expect(outbox.requestStart(request)).resolves.toBeUndefined();
+    await expect(checkpoints.getEffect('source:run-1')).resolves.toMatchObject({
+      status: 'succeeded',
+      externalRef: 'source/bundle-v1',
+    });
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(startFeature).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not persist an unrecognized source error message', async () => {
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const outbox = createDurableTriggerOutbox({
+      checkpoints,
+      trigger: {
+        startFeature: vi.fn(),
+        startGoal: vi.fn(),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      },
+      approval: { create: vi.fn(), wait: vi.fn(), wake: vi.fn() },
+      sourceSnapshot: {
+        ensure: vi.fn(async () => {
+          throw new Error('provider failed token=must-not-persist');
+        }),
+      },
+      clock: () => now,
+    });
+
+    await expect(
+      outbox.requestStart({
+        idempotencyKey: 'workflow-start:run-1',
+        runId: 'run-1',
+        pipeline: 'feature',
+      }),
+    ).rejects.toThrow('provider failed');
+    const effect = await checkpoints.getEffect('source:run-1');
+    expect(effect).toMatchObject({
+      status: 'failed',
+      error: 'source snapshot ingestion failed',
+    });
+    expect(effect?.error).not.toContain('token');
+  });
+
   it('dispatches a goal start only to the goal task and binds the pipeline fingerprint', async () => {
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const startFeature = vi.fn();
