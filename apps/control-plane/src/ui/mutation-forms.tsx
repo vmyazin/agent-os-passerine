@@ -1,6 +1,10 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+import type { InboxAttentionChangedDetail } from './inbox-count-client';
+import { completeInboxMutation } from './inbox-mutation-success';
 
 /**
  * Prefer the server's explanation over a generic retry prompt. A 409 here
@@ -26,7 +30,8 @@ async function failureMessage(response: Response): Promise<string> {
     : 'Could not save. Please try again.';
 }
 
-function useMutation() {
+function useMutation(inboxMutation?: InboxAttentionChangedDetail) {
+  const router = useRouter();
   const [message, setMessage] = useState('');
   const [pending, setPending] = useState(false);
   const statusRef = useRef<HTMLParagraphElement>(null);
@@ -45,7 +50,11 @@ function useMutation() {
       });
       setMessage(response.ok ? 'Saved.' : await failureMessage(response));
       statusRef.current?.focus();
-      if (response.ok) location.reload();
+      if (response.ok) {
+        if (inboxMutation !== undefined)
+          completeInboxMutation(router.refresh, inboxMutation);
+        else location.reload();
+      }
     } finally {
       setPending(false);
     }
@@ -60,7 +69,10 @@ export function ApprovalActions({
   readonly approvalId: string;
   readonly scopeHash: string;
 }) {
-  const { message, mutate, pending, statusRef } = useMutation();
+  const { message, mutate, pending, statusRef } = useMutation({
+    advanceSelection: true,
+    resolvedKey: `approval:${approvalId}`,
+  });
   return (
     <div className="action-stack">
       <div className="button-row">
@@ -221,7 +233,10 @@ export function CancelRunAction({ runId }: { readonly runId: string }) {
 }
 
 export function ReplyForm({ messageId }: { readonly messageId: string }) {
-  const { message, mutate, pending, statusRef } = useMutation();
+  const { message, mutate, pending, statusRef } = useMutation({
+    advanceSelection: false,
+    resolvedKey: `question:${messageId}`,
+  });
   const [reply, setReply] = useState('');
   return (
     <form

@@ -592,6 +592,10 @@ export const inboxListingSchema = z
   })
   .strict();
 
+export const inboxCountSchema = z
+  .object({ count: z.number().int().nonnegative().safe() })
+  .strict();
+
 export function idempotencyKey(request: Request): string {
   const key = request.headers.get('idempotency-key')?.trim();
   if (!key || key.length > 200) {

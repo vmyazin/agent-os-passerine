@@ -1,11 +1,14 @@
 // src/ui/rail-counts.ts
 import { controlPlaneService } from '../application/runtime';
-import { countInboxAttention } from './rail-status-model';
 
 export interface RailCounts {
   readonly inboxCount: number;
   readonly waitingCount: number;
   readonly projectCount: number;
+}
+
+export async function fetchInboxAttentionCount(): Promise<number> {
+  return controlPlaneService().countInboxAttention();
 }
 
 /**
@@ -17,14 +20,13 @@ export interface RailCounts {
 export async function fetchRailCounts(): Promise<RailCounts | undefined> {
   try {
     const service = controlPlaneService();
-    const [messages, approvals, waiting, projectCount] = await Promise.all([
-      service.listInbox(),
-      service.listPendingApprovals(50, false),
+    const [inboxCount, waiting, projectCount] = await Promise.all([
+      fetchInboxAttentionCount(),
       service.countRunsByStatus('waiting'),
       service.countProjects(),
     ]);
     return {
-      inboxCount: countInboxAttention(approvals, messages),
+      inboxCount,
       waitingCount: waiting,
       projectCount,
     };

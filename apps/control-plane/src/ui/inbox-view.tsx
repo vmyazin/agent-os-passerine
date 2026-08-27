@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import type {
   InboxApprovalItem,
@@ -24,6 +24,7 @@ import {
   splitInboxItems,
 } from './inbox-view-model';
 import { ApprovalActions, ReplyForm } from './mutation-forms';
+import { subscribeToInboxAttentionChanged } from './inbox-count-client';
 
 function formatReceived(value: string): string {
   return new Intl.DateTimeFormat('en-US', {
@@ -368,6 +369,19 @@ export function InboxView({
   const { attention, history } = splitInboxItems(items);
   const [selectedKey, setSelectedKey] = useState(
     (attention[0] ?? items[0])?.key,
+  );
+  useEffect(
+    () =>
+      subscribeToInboxAttentionChanged((detail) => {
+        if (
+          detail?.advanceSelection !== true ||
+          detail.resolvedKey !== selectedKey
+        )
+          return;
+        const next = attention.find((item) => item.key !== detail.resolvedKey);
+        if (next !== undefined) setSelectedKey(next.key);
+      }),
+    [attention, selectedKey],
   );
   const selected =
     items.find((item) => item.key === selectedKey) ?? attention[0] ?? items[0]!;

@@ -18,6 +18,7 @@ import type {
   PersistenceIdKind,
   Project,
   RunStatus,
+  TimestampListCursor,
   WorkflowRun,
   Backlog,
   BacklogId,
@@ -458,6 +459,7 @@ const NOTIFICATION_SPEND_LOOKUPS = 20;
  * has taken the inbox down. Every digest fan-out goes through this bound.
  */
 const DIGEST_QUERY_CONCURRENCY = 8;
+const ATTENTION_COUNT_PAGE = 100;
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -479,6 +481,25 @@ async function mapWithConcurrency<T, R>(
     ),
   );
   return results;
+}
+
+async function countTimestampedPages<
+  Item extends { readonly id: string; readonly createdAt: IsoTimestamp },
+>(
+  listPage: (
+    after: TimestampListCursor<Item['id']> | undefined,
+  ) => Promise<readonly Item[]>,
+  include: (item: Item) => boolean = () => true,
+): Promise<number> {
+  let after: TimestampListCursor<Item['id']> | undefined;
+  let count = 0;
+  while (true) {
+    const page = await listPage(after);
+    count += page.filter(include).length;
+    if (page.length < ATTENTION_COUNT_PAGE) return count;
+    const last = page[page.length - 1]!;
+    after = { at: last.createdAt, id: last.id };
+  }
 }
 
 /**
@@ -2434,6 +2455,52 @@ export class ControlPlaneService {
       .flat()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map(projectInboxMessage);
+  }
+
+  /** Exact attention total; every underlying repository list is page-capped. */
+  async countInboxAttention(): Promise<number> {
+    const now = this.clock();
+    let after: TimestampListCursor<WorkflowRun['id']> | undefined;
+    let count = 0;
+    while (true) {
+      const runs = await this.repository.listRuns({
+        limit: ATTENTION_COUNT_PAGE,
+        ...(after === undefined ? {} : { after }),
+      });
+      const perRun = await mapWithConcurrency(
+        runs,
+        DIGEST_QUERY_CONCURRENCY,
+        async (run) => {
+          const [messages, approvals] = await Promise.all([
+            countTimestampedPages<InboxMessage>((messageAfter) =>
+              this.repository.listInboxMessages(run.id, 'pending', {
+                limit: ATTENTION_COUNT_PAGE,
+                ...(messageAfter === undefined
+                  ? {}
+                  : { after: messageAfter }),
+              }),
+            ),
+            countTimestampedPages<Approval>(
+              (approvalAfter) =>
+                this.repository.listApprovals(run.id, {
+                  status: 'pending',
+                  limit: ATTENTION_COUNT_PAGE,
+                  ...(approvalAfter === undefined
+                    ? {}
+                    : { after: approvalAfter }),
+                }),
+              (approval) =>
+                projectApproval(approval, now).status === 'pending',
+            ),
+          ]);
+          return messages + approvals;
+        },
+      );
+      count += perRun.reduce((total, runCount) => total + runCount, 0);
+      if (runs.length < ATTENTION_COUNT_PAGE) return count;
+      const last = runs[runs.length - 1]!;
+      after = { at: last.createdAt, id: last.id };
+    }
   }
 
   /**

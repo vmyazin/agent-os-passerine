@@ -218,6 +218,14 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   await expect(page.getByLabel('Run status: Waiting')).toBeVisible();
 
   await page.goto('/inbox');
+  const primaryNavigation = page.getByRole('navigation', {
+    name: 'Primary navigation',
+  });
+  await expect(
+    primaryNavigation.getByRole('link', {
+      name: 'Inbox, 3 items need attention',
+    }),
+  ).toBeVisible();
   await expect(page.getByLabel('Agent requests')).toBeVisible();
   await expect(page.getByLabel('Selected request')).toBeVisible();
   await page
@@ -225,7 +233,24 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
     .click();
   await page.getByText('Review request details').click();
   await expect(page.getByText('scope_hash_42')).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as Window & { __agentosInboxDocumentMarker?: string }
+    ).__agentosInboxDocumentMarker = 'preserved';
+  });
   await page.getByRole('button', { name: 'Approve request' }).click();
+  await expect(
+    primaryNavigation.getByRole('link', {
+      name: 'Inbox, 2 items need attention',
+    }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __agentosInboxDocumentMarker?: string })
+          .__agentosInboxDocumentMarker,
+    ),
+  ).toBe('preserved');
   await expect(page.getByText('scope_hash_42')).not.toBeVisible();
   await page
     .getByRole('button', { name: /Which deployment window should we use/ })
@@ -238,6 +263,18 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   await expect(page.getByLabel('Your reply')).toBeVisible();
   await page.getByLabel('Your reply').fill('Use Tuesday morning.');
   await page.getByRole('button', { name: 'Send reply' }).click();
+  await expect(
+    primaryNavigation.getByRole('link', {
+      name: 'Inbox, 1 item needs attention',
+    }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __agentosInboxDocumentMarker?: string })
+          .__agentosInboxDocumentMarker,
+    ),
+  ).toBe('preserved');
   await expect(page.getByText('Reply sent')).toBeVisible();
   await page
     .getByRole('button', { name: /Which deployment window should we use/ })

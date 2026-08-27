@@ -4,6 +4,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
 
+import {
+  inboxAttentionPresentation,
+  subscribeToInboxAttentionCount,
+} from './inbox-count-client';
 import { subscribeToProjectCount } from './project-count-signal';
 
 const NAV_ITEMS = [
@@ -33,6 +37,9 @@ export function AppRailNav({
   readonly projectCount?: number;
 }) {
   const pathname = usePathname();
+  const [liveInboxCount, setLiveInboxCount] = useState(inboxCount);
+  useEffect(() => setLiveInboxCount(inboxCount), [inboxCount]);
+  useEffect(() => subscribeToInboxAttentionCount(setLiveInboxCount), []);
   // Seeded by the server layout, then kept live by anything that creates a
   // project without a navigation (the setup wizard). A later server render
   // re-seeds it through the effect below, so the server stays authoritative.
@@ -45,11 +52,13 @@ export function AppRailNav({
       {NAV_ITEMS.map((item) => {
         const { href, label } = item;
         const isActive = isNavItemActive(pathname, href);
+        const inboxPresentation =
+          href === '/inbox'
+            ? inboxAttentionPresentation(liveInboxCount)
+            : undefined;
         const count =
           href === '/inbox'
-            ? inboxCount > 0
-              ? inboxCount
-              : undefined
+            ? inboxPresentation?.badgeText
             : 'countKey' in item && item.countKey === 'projects'
               ? liveProjectCount > 0
                 ? liveProjectCount
@@ -60,7 +69,10 @@ export function AppRailNav({
           <a
             key={href}
             aria-current={isActive ? 'page' : undefined}
-            aria-label={count === undefined ? undefined : `${label}, ${count}`}
+            aria-label={
+              inboxPresentation?.ariaLabel ??
+              (count === undefined ? undefined : `${label}, ${count}`)
+            }
             href={href}
           >
             <span className="rail-nav-label">{label}</span>
