@@ -643,6 +643,31 @@ describe('createKimiHttpTransport', () => {
     });
   });
 
+  it('classifies an empty successful response as a transient transport failure', async () => {
+    const transport = createKimiHttpTransport({
+      apiKey: 'kimi-key',
+      fetchImpl: vi.fn<typeof fetch>(async () =>
+        new Response('', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    });
+
+    await expect(
+      transport.send({
+        model: 'kimi-test',
+        messages: [],
+        tools: [],
+        maxTokens: 32,
+      }),
+    ).rejects.toMatchObject({
+      name: 'KimiTransportError',
+      status: 502,
+      body: 'invalid JSON response from Kimi',
+    });
+  });
+
   it('throws KimiTransportError with a bounded body slice on a persistent non-2xx response', async () => {
     const fetchImpl = vi.fn<typeof fetch>(
       async () => new Response('x'.repeat(1000), { status: 500 }),

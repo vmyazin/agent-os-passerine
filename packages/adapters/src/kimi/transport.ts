@@ -102,7 +102,16 @@ export function createKimiHttpTransport(
           text.slice(0, MAX_ERROR_BODY_CHARS),
         );
       }
-      const json: unknown = await response.json();
+      let json: unknown;
+      try {
+        json = await response.json();
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        // A 2xx response with no complete JSON envelope is an upstream
+        // transport failure, not a permanent model-contract violation.
+        // Report it as 502 so the workflow's bounded retry policy applies.
+        throw new KimiTransportError(502, 'invalid JSON response from Kimi');
+      }
       const parsed = responseSchema.parse(json);
       return Object.freeze({
         content: Object.freeze(parsed.content.map(toContentBlock)),
