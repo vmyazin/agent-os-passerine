@@ -2,7 +2,12 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { EmptyState, MetricCard, RunStatusBadge } from './components';
+import {
+  EmptyState,
+  MetricCard,
+  RunStatusBadge,
+  RunStepTimeline,
+} from './components';
 
 describe('control-plane UI components', () => {
   it('renders an explicit accessible empty state', () => {
@@ -55,5 +60,42 @@ describe('control-plane UI components', () => {
     expect(markup).toContain('href="/projects"');
     expect(markup).toContain('Projects');
     expect(markup).toContain('1 project');
+  });
+
+  it('renders a step current status with an expandable chronological log', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [
+          {
+            id: 'step-1',
+            stepKey: 'specification',
+            attempt: 1,
+            status: 'running',
+            model: 'kimi-k2.5',
+            progress: [
+              {
+                eventId: 'event-1',
+                phase: 'sending',
+                message: 'Sending request to the model',
+                occurredAt: '2026-08-27T19:00:00.000Z',
+              },
+              {
+                eventId: 'event-2',
+                phase: 'waiting',
+                message: 'Waiting on response',
+                occurredAt: '2026-08-27T19:00:01.000Z',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(markup).toContain('<details class="run-step">');
+    expect(markup).toContain('<summary class="run-step-summary">');
+    expect(markup).toContain('Waiting on response');
+    expect(markup).toContain('Attempt 1');
+    expect(markup).toContain('19:00:00 UTC');
+    expect(markup).toContain('aria-label="specification activity"');
   });
 });

@@ -751,6 +751,12 @@ export interface RunProjection extends PersistenceDigests {
     attempt: number;
     status: string;
     model?: string;
+    progress: readonly {
+      readonly eventId: string;
+      readonly phase: string;
+      readonly message: string;
+      readonly occurredAt: IsoTimestamp;
+    }[];
   }[];
   readonly timeline: readonly {
     eventId: string;
@@ -900,6 +906,55 @@ function projectEventPayload(
     ...strings,
     ...(details === undefined ? {} : { details }),
     ...(options === undefined ? {} : { options }),
+  };
+}
+
+const STEP_PROGRESS_PHASES = new Set([
+  'preparing',
+  'sending',
+  'waiting',
+  'working',
+  'tool',
+  'validating',
+  'retrying',
+  'completed',
+  'failed',
+]);
+
+function projectStepProgress(event: DomainEvent):
+  | (RunProjection['steps'][number]['progress'][number] & {
+      readonly stepRunId: string;
+      readonly stepKey: string;
+      readonly attempt: number;
+    })
+  | undefined {
+  if (event.type !== 'step.progress') return undefined;
+  const source = record(event.payload);
+  if (source === undefined) return undefined;
+  const stepRunId = safeString(source, 'stepRunId');
+  const stepKey = safeString(source, 'stepKey');
+  const phase = safeString(source, 'phase');
+  const message = safeString(source, 'message');
+  const attempt = source.attempt;
+  if (
+    stepRunId === undefined ||
+    stepKey === undefined ||
+    phase === undefined ||
+    !STEP_PROGRESS_PHASES.has(phase) ||
+    message === undefined ||
+    typeof attempt !== 'number' ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1
+  )
+    return undefined;
+  return {
+    eventId: event.eventId,
+    stepRunId,
+    stepKey,
+    attempt,
+    phase,
+    message,
+    occurredAt: event.occurredAt,
   };
 }
 
@@ -2913,6 +2968,17 @@ export class ControlPlaneService {
       if (entry.stepRunId !== undefined && !stepModels.has(entry.stepRunId))
         stepModels.set(entry.stepRunId, redactText(entry.model).slice(0, 120));
     }
+    const progressByStep = new Map<
+      string,
+      ReturnType<typeof projectStepProgress>[]
+    >();
+    for (const event of events) {
+      const progress = projectStepProgress(event);
+      if (progress === undefined) continue;
+      const entries = progressByStep.get(progress.stepRunId) ?? [];
+      entries.push(progress);
+      progressByStep.set(progress.stepRunId, entries);
+    }
     const safeInput = projectRunInput(run.input);
     const safeError = projectRunError(run.error);
     const outcome = projectRunOutcome(run.output);
@@ -2936,17 +3002,33 @@ export class ControlPlaneService {
         attempt: step.attempt,
         status: step.status,
         ...(stepModels.has(step.id) ? { model: stepModels.get(step.id)! } : {}),
+        progress: (progressByStep.get(step.id) ?? [])
+          .filter(
+            (entry): entry is NonNullable<typeof entry> =>
+              entry !== undefined &&
+              entry.stepKey === step.stepKey &&
+              entry.attempt === step.attempt,
+          )
+          .slice(-100)
+          .map(({ eventId, phase, message, occurredAt }) => ({
+            eventId,
+            phase,
+            message,
+            occurredAt,
+          })),
       })),
-      timeline: events.map((event) => {
-        const payload = projectEventPayload(event.payload);
-        return {
-          eventId: event.eventId,
-          sequence: event.sequence,
-          type: event.type,
-          ...(payload === undefined ? {} : { payload }),
-          occurredAt: event.occurredAt,
-        };
-      }),
+      timeline: events
+        .filter((event) => event.type !== 'step.progress')
+        .map((event) => {
+          const payload = projectEventPayload(event.payload);
+          return {
+            eventId: event.eventId,
+            sequence: event.sequence,
+            type: event.type,
+            ...(payload === undefined ? {} : { payload }),
+            occurredAt: event.occurredAt,
+          };
+        }),
     };
   }
 

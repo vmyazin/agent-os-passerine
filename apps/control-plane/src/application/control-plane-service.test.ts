@@ -957,6 +957,67 @@ runtime: { provider: local }
     expect(JSON.stringify(projection)).toContain('Visible');
   });
 
+  it('groups sanitized progress under its step and excludes it from the general timeline', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'run-progress');
+    const stepRunId = persistenceId('stepRun', 'run-progress:planning:1');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.upsertStepRun({
+      id: stepRunId,
+      runId,
+      stepKey: 'planning',
+      attempt: 1,
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (const [ordinal, phase, message] of [
+      [1, 'sending', 'Sending request to the model'],
+      [2, 'waiting', 'Waiting on response'],
+    ] as const) {
+      await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', `progress-${String(ordinal)}`),
+        fingerprint: `progress-${String(ordinal)}`,
+        type: 'step.progress',
+        payload: {
+          stepRunId,
+          stepKey: 'planning',
+          attempt: 1,
+          phase,
+          message,
+          rawProviderPayload: 'must never escape',
+        },
+        occurredAt: now,
+      });
+    }
+
+    const projection = await createService(repository).getRun('run-progress');
+
+    expect(projection.steps[0]).toMatchObject({
+      id: stepRunId,
+      progress: [
+        { phase: 'sending', message: 'Sending request to the model' },
+        { phase: 'waiting', message: 'Waiting on response' },
+      ],
+    });
+    expect(projection.timeline).toEqual([]);
+    expect(JSON.stringify(projection)).not.toContain('must never escape');
+  });
+
   it('uses allowlisted projection DTOs and redacts secret-bearing values', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({

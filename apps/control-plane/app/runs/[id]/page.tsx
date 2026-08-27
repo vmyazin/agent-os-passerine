@@ -3,7 +3,11 @@ import {
   loadRunPageModel,
 } from '../../../src/application/run-page-model';
 import { requirePageSession } from '../../../src/auth/page-session';
-import { EmptyState, RunStatusBadge } from '../../../src/ui/components';
+import {
+  EmptyState,
+  RunStatusBadge,
+  RunStepTimeline,
+} from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import {
   CancelRunAction,
@@ -202,22 +206,7 @@ export default async function RunPage({
               : 'Step state will appear as the run progresses.'}
           </EmptyState>
         ) : (
-          <ol className="timeline">
-            {run.steps.map((step) => (
-              <li key={step.id}>
-                <strong>{step.stepKey}</strong>
-                <span>
-                  {step.status}
-                  {step.model === undefined ? null : (
-                    <>
-                      {' · '}
-                      <code>{step.model}</code>
-                    </>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ol>
+          <RunStepTimeline steps={run.steps} />
         )}
       </section>
       {run.status !== 'succeeded' || run.pipeline !== 'feature' ? null : (

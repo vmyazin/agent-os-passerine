@@ -1,5 +1,7 @@
 import { createElement, type ReactNode } from 'react';
 
+export { RunStepTimeline } from './run-step-timeline';
+
 const LABELS = {
   pending: 'Pending',
   running: 'Running',

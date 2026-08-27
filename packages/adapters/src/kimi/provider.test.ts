@@ -508,9 +508,10 @@ describe('createKimiRuntimeProvider', () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe('error');
 
-    await expect(provider.usage(bogus)).rejects.toThrow(
-      KimiRuntimeProviderError,
-    );
+    await expect(provider.usage(bogus)).rejects.toMatchObject({
+      name: 'KimiRuntimeProviderError',
+      code: 'runtime_session_missing',
+    });
     await expect(provider.collectOutput(bogus)).rejects.toThrow(
       KimiRuntimeProviderError,
     );

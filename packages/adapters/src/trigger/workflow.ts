@@ -12,6 +12,7 @@ import {
   type ExternalSessionId,
   type JsonValue,
   type RunStatus,
+  type RuntimeEvent,
   type RuntimeHandle,
   type RuntimeOutput,
   type RuntimeUsage,
@@ -448,12 +449,97 @@ async function assertContinuable(
     throw new WorkflowPermanentError('workflow_deadline_exceeded');
 }
 
+type StepProgressPhase =
+  | 'preparing'
+  | 'sending'
+  | 'waiting'
+  | 'working'
+  | 'tool'
+  | 'validating'
+  | 'retrying'
+  | 'completed'
+  | 'failed';
+
+interface StepProgressContext {
+  readonly stepRunId: StepRun['id'];
+  readonly stepKey: string;
+  readonly attempt: number;
+}
+
+async function recordStepProgress(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+  step: StepProgressContext,
+  eventKey: string,
+  phase: StepProgressPhase,
+  message: string,
+  occurredAt = dependencies.clock(),
+): Promise<void> {
+  const type = 'step.progress';
+  const payload = asJson({
+    stepRunId: step.stepRunId,
+    stepKey: step.stepKey,
+    attempt: step.attempt,
+    phase,
+    message,
+  });
+  await dependencies.repository.appendEvent({
+    runId: persistenceId('run', runId),
+    eventId: persistenceId(
+      'event',
+      `step-progress:${runId}:${step.stepKey}:${String(step.attempt)}:${eventKey}`,
+    ),
+    fingerprint: hash({ type, payload }),
+    type,
+    payload,
+    occurredAt: at(occurredAt),
+  });
+}
+
+function runtimeProgress(
+  type: RuntimeEvent['type'],
+): readonly [phase: StepProgressPhase, message: string] | undefined {
+  switch (type) {
+    case 'message':
+    case 'thread_message':
+    case 'message_summary':
+    case 'progress':
+      return ['working', 'Model sent a progress update'];
+    case 'tool_call':
+      return ['tool', 'Model is using a tool'];
+    case 'tool_result':
+      return ['tool', 'Tool finished'];
+    case 'input_acknowledged':
+      return ['waiting', 'Model received the request'];
+    case 'running':
+    case 'thread_running':
+      return ['working', 'Model is working'];
+    case 'rescheduling':
+    case 'thread_rescheduling':
+      return ['waiting', 'Model session is rescheduling'];
+    case 'requires_action':
+      return ['waiting', 'Model requested an action'];
+    case 'error':
+    case 'retries_exhausted':
+      return ['failed', 'Model session reported an error'];
+    case 'idle':
+    case 'terminated':
+    case 'thread_idle':
+    case 'thread_terminated':
+      return ['working', 'Model response received'];
+    default:
+      return undefined;
+  }
+}
+
 async function consumeEvents(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
   handle: RuntimeHandle,
+  step: StepProgressContext,
 ): Promise<void> {
   let count = 0;
+  const progressCounts = new Map<RuntimeEvent['type'], number>();
   for await (const event of dependencies.runtime.events(handle)) {
     const run = await dependencies.repository.getRun(
       persistenceId('run', runId),
@@ -477,6 +563,25 @@ async function consumeEvents(
       !Number.isFinite(event.occurredAt.getTime())
     ) {
       throw new WorkflowPermanentError('runtime emitted a malformed event');
+    }
+    const progress = runtimeProgress(event.type);
+    if (progress !== undefined) {
+      const occurrence = (progressCounts.get(event.type) ?? 0) + 1;
+      progressCounts.set(event.type, occurrence);
+      // Provider streams can emit thousands of repetitive message/tool
+      // updates. Three samples per event type preserve the operational story
+      // without letting progress crowd newer run events out of the page read.
+      if (occurrence <= 3) {
+        await recordStepProgress(
+          dependencies,
+          runId,
+          step,
+          `runtime:${event.type}:${String(occurrence)}`,
+          progress[0],
+          progress[1],
+          event.occurredAt.toISOString(),
+        );
+      }
     }
     // Managed sessions do not self-terminate when the agent finishes: they
     // park in idle awaiting further input. Idle/terminated is the completion
@@ -507,6 +612,7 @@ function classifiedRuntimeError(error: unknown): Error {
     code === 'timeout_error' ||
     code === 'overloaded_error' ||
     code === 'rate_limit_error' ||
+    code === 'runtime_session_missing' ||
     code === 429 ||
     code === 502 ||
     code === 503 ||
@@ -632,6 +738,11 @@ async function runAgentStep<T>(
       }),
       createdAt: now,
       updatedAt: now,
+    };
+    const progressContext: StepProgressContext = {
+      stepRunId: stepId,
+      stepKey,
+      attempt,
     };
     const effectKey = `runtime:${workflow.runId}:${stepKey}:${String(attempt)}`;
     const claim = await claimEffect(
@@ -805,6 +916,14 @@ async function runAgentStep<T>(
       usageRecorded = true;
     };
     try {
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        'preparing',
+        'preparing',
+        'Preparing workspace',
+      );
       if (dependencies.runtimeAccess !== undefined) {
         const accessKey = `runtime-access:${workflow.runId}:${stepKey}:${String(attempt)}`;
         const accessClaim = await claimEffect(
@@ -864,6 +983,14 @@ async function runAgentStep<T>(
               credentialRefs: runtimeAccess.credentialRefs,
             }),
       };
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        'sending',
+        'sending',
+        'Sending request to the model',
+      );
       if (
         started.status === 'started' &&
         started.externalRef === undefined &&
@@ -1003,9 +1130,30 @@ async function runAgentStep<T>(
           throw new WorkflowPermanentError('persisted runtime handle mismatch');
       }
       const sessionStartedMs = Date.parse(dependencies.clock());
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        'waiting',
+        'waiting',
+        'Waiting on response',
+      );
       const runtimeOutput: RuntimeOutput = await withTimeout(
         (async () => {
-          await consumeEvents(dependencies, workflow.runId, handle!);
+          await consumeEvents(
+            dependencies,
+            workflow.runId,
+            handle!,
+            progressContext,
+          );
+          await recordStepProgress(
+            dependencies,
+            workflow.runId,
+            progressContext,
+            'collecting',
+            'working',
+            'Collecting model response',
+          );
           return dependencies.runtime.collectOutput(handle!);
         })(),
         Math.max(
@@ -1017,6 +1165,14 @@ async function runAgentStep<T>(
         ),
       );
       await recordUsage(handle);
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        'validating',
+        'validating',
+        'Validating model response',
+      );
       const candidate =
         finalizeOutput === undefined
           ? runtimeOutput.data
@@ -1064,9 +1220,25 @@ async function runAgentStep<T>(
           updatedAt: at(dependencies.clock()),
         });
       }
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        'completed',
+        'completed',
+        'Step completed',
+      );
       completedResult = parsed.data;
     } catch (rawError) {
       if (rawError instanceof RuntimeStartPendingError) {
+        await recordStepProgress(
+          dependencies,
+          workflow.runId,
+          progressContext,
+          'start-pending',
+          'waiting',
+          'Waiting for the model session',
+        );
         await dependencies.checkpoints.renewEffect(
           claim.lease,
           dependencies.clock(),
@@ -1083,6 +1255,20 @@ async function runAgentStep<T>(
       const error = classifiedRuntimeError(failure);
       lastError = error;
       const transient = error instanceof WorkflowTransientError;
+      await recordStepProgress(
+        dependencies,
+        workflow.runId,
+        progressContext,
+        transient && attempt < FEATURE_WORKFLOW_DEFAULTS.maxStepAttempts
+          ? 'retrying'
+          : 'failed',
+        transient && attempt < FEATURE_WORKFLOW_DEFAULTS.maxStepAttempts
+          ? 'retrying'
+          : 'failed',
+        transient && attempt < FEATURE_WORKFLOW_DEFAULTS.maxStepAttempts
+          ? 'Step interrupted; retrying'
+          : 'Step failed',
+      );
       if (handle !== undefined) {
         try {
           await dependencies.runtime.cancel(handle, safeError(error));

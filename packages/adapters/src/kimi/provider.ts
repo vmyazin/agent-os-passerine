@@ -36,6 +36,13 @@ import type {
  */
 export class KimiRuntimeProviderError extends Error {
   override readonly name = 'KimiRuntimeProviderError';
+
+  constructor(
+    message: string,
+    readonly code?: 'runtime_session_missing',
+  ) {
+    super(message);
+  }
 }
 
 export interface KimiRuntimeProviderOptions {
@@ -648,7 +655,10 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
   #requireSession(handle: RuntimeHandle): KimiSession {
     const session = this.#sessions.get(handle.id);
     if (session === undefined) {
-      throw new KimiRuntimeProviderError(`unknown session: ${handle.id}`);
+      throw new KimiRuntimeProviderError(
+        `unknown session: ${handle.id}`,
+        'runtime_session_missing',
+      );
     }
     return session;
   }

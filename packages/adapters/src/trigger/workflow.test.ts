@@ -34,6 +34,8 @@ const workflowHash = (value: unknown) =>
   createHash('sha256')
     .update(canonicalJsonValue(JSON.parse(JSON.stringify(value))))
     .digest('hex');
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 
 class FakeRuntime implements RuntimeProvider {
@@ -952,6 +954,180 @@ describe('durable feature workflow', () => {
     }).run(input);
     expect(result.status).toBe('succeeded');
     expect(attempts).toBe(6);
+  });
+
+  it('records bounded operational progress without persisting runtime payloads', async () => {
+    const f = await fixture();
+    f.runtime.events = async function* () {
+      yield {
+        id: 'message-with-private-payload',
+        type: 'message',
+        occurredAt: new Date(now),
+        payload: {
+          chainOfThought: 'private reasoning must never be persisted',
+        },
+      };
+      for (let index = 0; index < 5; index += 1) {
+        yield {
+          id: `tool-with-private-payload-${String(index)}`,
+          type: 'tool_call',
+          occurredAt: new Date(now),
+          payload: { token: 'sk-private-tool-argument' },
+        };
+      }
+      yield {
+        id: 'idle',
+        type: 'idle',
+        occurredAt: new Date(now),
+      };
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    const progress = (
+      await f.repository.listEvents(persistenceId('run', 'run-1'), {
+        limit: 1_000,
+      })
+    ).filter((event) => event.type === 'step.progress');
+    expect(progress.map((event) => event.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stepKey: 'specification',
+          attempt: 1,
+          phase: 'sending',
+          message: 'Sending request to the model',
+        }),
+        expect.objectContaining({
+          stepKey: 'specification',
+          phase: 'waiting',
+          message: 'Waiting on response',
+        }),
+        expect.objectContaining({
+          stepKey: 'specification',
+          phase: 'tool',
+          message: 'Model is using a tool',
+        }),
+        expect.objectContaining({
+          stepKey: 'specification',
+          phase: 'completed',
+          message: 'Step completed',
+        }),
+      ]),
+    );
+    expect(JSON.stringify(progress)).not.toMatch(
+      /private reasoning|sk-private-tool-argument|chainOfThought|token/,
+    );
+    expect(
+      progress.filter(
+        (event) =>
+          isRecord(event.payload) &&
+          event.payload.stepKey === 'specification' &&
+          event.payload.phase === 'tool',
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('retries when a local runtime session disappears after its handle was persisted', async () => {
+    const f = await fixture();
+    const originalCollectOutput = f.runtime.collectOutput.bind(f.runtime);
+    let collections = 0;
+    f.runtime.collectOutput = async () => {
+      collections += 1;
+      if (collections === 3) {
+        throw Object.assign(new Error('unknown session: kimi_restart'), {
+          code: 'runtime_session_missing',
+        });
+      }
+      return originalCollectOutput();
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    expect(f.runtime.starts).toHaveLength(6);
+    expect(
+      (await f.repository.listStepRuns(persistenceId('run', 'run-1'))).filter(
+        (step) => step.stepKey === 'implementation',
+      ),
+    ).toMatchObject([
+      { attempt: 1, status: 'failed' },
+      { attempt: 2, status: 'succeeded' },
+    ]);
+    const implementationProgress = (
+      await f.repository.listEvents(persistenceId('run', 'run-1'), {
+        limit: 1_000,
+      })
+    ).filter(
+      (event) =>
+        event.type === 'step.progress' &&
+        isRecord(event.payload) &&
+        event.payload.stepKey === 'implementation',
+    );
+    expect(implementationProgress.map((event) => event.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          attempt: 1,
+          phase: 'retrying',
+          message: 'Step interrupted; retrying',
+        }),
+        expect.objectContaining({
+          attempt: 2,
+          phase: 'completed',
+          message: 'Step completed',
+        }),
+      ]),
+    );
   });
 
   it('fails closed on malformed agent output and never reaches publication', async () => {
