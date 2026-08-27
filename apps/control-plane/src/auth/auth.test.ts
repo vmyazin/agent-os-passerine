@@ -183,6 +183,7 @@ describe('GitHub OAuth authentication', () => {
     });
     expect(customLocal.publicUrl).toBe('http://127.0.0.1:3107');
     expect(customLocal.allowedLogin).toBe('custom-operator');
+    expect(customLocal.localDevelopment).toBe(true);
   });
 
   it('fails closed when production auth configuration is absent or insecure', () => {

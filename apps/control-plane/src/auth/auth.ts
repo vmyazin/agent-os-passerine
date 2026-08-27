@@ -18,6 +18,7 @@ export interface AuthConfig {
   readonly publicUrl: string;
   readonly sessionSecret: string;
   readonly cliToken?: string;
+  readonly localDevelopment?: boolean;
 }
 
 export type AuthEnvironment = Partial<Record<string, string | undefined>>;
@@ -153,6 +154,7 @@ export function authConfigFromEnv(environment: AuthEnvironment): AuthConfig {
     publicUrl: parsed.origin,
     sessionSecret,
     ...(cliToken ? { cliToken } : {}),
+    ...(localBypass ? { localDevelopment: true } : {}),
   };
 }
 

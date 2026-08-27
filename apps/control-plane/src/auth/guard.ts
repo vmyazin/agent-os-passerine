@@ -1,6 +1,7 @@
 import {
   AuthError,
   type AuthConfig,
+  isLocalhost,
   readSession,
   safeEqual,
   SESSION_COOKIE,
@@ -17,13 +18,25 @@ function cookieValue(request: Request, name: string): string | undefined {
 export function enforceBrowserMutationOrigin(
   request: Request,
   publicUrl: string,
+  allowLocalPreviewOrigins = false,
 ): void {
   const expectedOrigin = new URL(publicUrl).origin;
   const origin = request.headers.get('origin');
   const fetchSite = request.headers.get('sec-fetch-site');
+  let localPreviewOrigin = false;
+  if (allowLocalPreviewOrigins && origin !== null) {
+    try {
+      localPreviewOrigin =
+        isLocalhost(expectedOrigin) &&
+        isLocalhost(origin) &&
+        new URL(request.url).origin === new URL(origin).origin;
+    } catch {
+      localPreviewOrigin = false;
+    }
+  }
   if (
     !origin ||
-    origin !== expectedOrigin ||
+    (origin !== expectedOrigin && !localPreviewOrigin) ||
     (fetchSite !== null && fetchSite !== 'same-origin')
   ) {
     throw new AuthError('csrf_rejected', 'cross-origin mutation rejected', 403);
@@ -55,7 +68,11 @@ export function authenticateApiRequest(
   if (!session)
     throw new AuthError('authentication_required', 'authentication required');
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-    enforceBrowserMutationOrigin(request, config.publicUrl);
+    enforceBrowserMutationOrigin(
+      request,
+      config.publicUrl,
+      config.localDevelopment === true,
+    );
   }
   return { kind: 'session', login: session.login };
 }
