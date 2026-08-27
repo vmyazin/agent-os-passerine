@@ -1431,6 +1431,53 @@ runtime: { provider: local }
     ).resolves.toMatchObject({ status: 'consumed' });
   });
 
+  it('includes a deep-linked run outside the normal inbox page', async () => {
+    const repository = new InMemoryDomainRepository();
+    const projectId = persistenceId('project', 'project-1');
+    const linkedRunId = persistenceId('run', 'linked-run');
+    await repository.createProject({
+      id: projectId,
+      name: 'Project',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: linkedRunId,
+      projectId,
+      pipeline: 'feature',
+      status: 'waiting',
+      createdAt: isoTimestamp('2026-08-17T10:00:00.000Z'),
+      updatedAt: isoTimestamp('2026-08-17T10:00:00.000Z'),
+    });
+    await repository.createApproval({
+      id: persistenceId('approval', 'linked-approval'),
+      runId: linkedRunId,
+      scope: 'feature-spec-and-dod',
+      fingerprint: 'linked-scope-hash',
+      status: 'pending',
+      createdAt: isoTimestamp('2026-08-17T10:00:00.000Z'),
+      expiresAt: isoTimestamp('2026-08-18T12:00:00.000Z'),
+    });
+    await repository.createRun({
+      id: persistenceId('run', 'newer-run'),
+      projectId,
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const service = createService(repository);
+
+    await expect(service.inboxDigest(1)).resolves.toMatchObject({
+      approvals: [],
+    });
+    await expect(
+      service.inboxDigest(1, undefined, linkedRunId),
+    ).resolves.toMatchObject({
+      approvals: [{ id: persistenceId('approval', 'linked-approval') }],
+    });
+  });
+
   it('assembles an inbox digest that keeps decided approvals and reports terminal runs', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({

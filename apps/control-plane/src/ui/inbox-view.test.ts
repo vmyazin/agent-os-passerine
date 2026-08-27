@@ -11,6 +11,7 @@ import {
   createInboxItems,
   formatRelativeTime,
   inboxItemChip,
+  inboxItemForRun,
   inboxItemNeedsAttention,
   inboxItemPreview,
   inboxItemSubject,
@@ -158,6 +159,15 @@ describe('inbox view model', () => {
       'approval:approval_done',
     ]);
     expect(attention.length + history.length).toBe(items.length);
+  });
+
+  it('selects the newest pending message for a deep-linked run', () => {
+    const items = createInboxItems([approval], [question]);
+
+    expect(inboxItemForRun(items, 'run_release')?.key).toBe(
+      'question:inbox_window',
+    );
+    expect(inboxItemForRun(items, 'run_missing')).toBeUndefined();
   });
 
   it('summarizes a completed run notification with outcome and spend', () => {

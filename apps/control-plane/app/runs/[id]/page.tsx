@@ -75,7 +75,14 @@ export default async function RunPage({
             <RestartRunAction runId={run.id} />
           ) : null
         ) : (
-          <CancelRunAction runId={run.id} />
+          <CancelRunAction
+            {...(run.status === 'waiting'
+              ? {
+                  inboxHref: `/inbox?runId=${encodeURIComponent(run.id)}`,
+                }
+              : {})}
+            runId={run.id}
+          />
         )}
       </section>
       {run.error === undefined ? null : (

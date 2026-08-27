@@ -217,7 +217,9 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   ).toBeVisible();
   await expect(page.getByLabel('Run status: Waiting')).toBeVisible();
 
-  await page.goto('/inbox');
+  await page.getByRole('link', { name: 'View Inbox' }).click();
+  await expect(page).toHaveURL(/\/inbox\?runId=e2e-run$/);
+  await expect(page.getByText('scope_hash_42')).toBeVisible();
   const primaryNavigation = page.getByRole('navigation', {
     name: 'Primary navigation',
   });
@@ -228,9 +230,6 @@ test('operator can monitor a waiting run and consume a scoped approval', async (
   ).toBeVisible();
   await expect(page.getByLabel('Agent requests')).toBeVisible();
   await expect(page.getByLabel('Selected request')).toBeVisible();
-  await page
-    .getByRole('button', { name: /Approval requested.*Merge pull request #42/ })
-    .click();
   await page.getByText('Review request details').click();
   await expect(page.getByText('scope_hash_42')).toBeVisible();
   await page.evaluate(() => {

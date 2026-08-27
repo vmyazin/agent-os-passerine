@@ -182,7 +182,13 @@ export function RestartRunAction({ runId }: { readonly runId: string }) {
  * Two-step on purpose: cancelling is not reversible, and the runs list puts
  * this one click away from runs that are working fine.
  */
-export function CancelRunAction({ runId }: { readonly runId: string }) {
+export function CancelRunAction({
+  inboxHref,
+  runId,
+}: {
+  readonly inboxHref?: string;
+  readonly runId: string;
+}) {
   const { message, mutate, pending, statusRef } = useMutation();
   const [confirming, setConfirming] = useState(false);
   return (
@@ -207,13 +213,20 @@ export function CancelRunAction({ runId }: { readonly runId: string }) {
             </button>
           </>
         ) : (
-          <button
-            className="secondary"
-            onClick={() => setConfirming(true)}
-            type="button"
-          >
-            Cancel run
-          </button>
+          <>
+            <button
+              className="secondary"
+              onClick={() => setConfirming(true)}
+              type="button"
+            >
+              Cancel run
+            </button>
+            {inboxHref === undefined ? null : (
+              <a className="button" href={inboxHref}>
+                View Inbox
+              </a>
+            )}
+          </>
         )}
       </div>
       {confirming && message === '' ? (

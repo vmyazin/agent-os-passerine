@@ -174,6 +174,23 @@ export function inboxItemRunId(item: InboxItem): string {
   return item.notification.runId;
 }
 
+/**
+ * Resolve a run deep-link to the request the operator can act on now.
+ * A run may retain older questions and approvals in its history, so pending
+ * work wins; the existing newest-first order breaks ties deterministically.
+ */
+export function inboxItemForRun(
+  items: readonly InboxItem[],
+  runId: string,
+): InboxItem | undefined {
+  return (
+    items.find(
+      (item) =>
+        inboxItemRunId(item) === runId && inboxItemNeedsAttention(item),
+    ) ?? items.find((item) => inboxItemRunId(item) === runId)
+  );
+}
+
 export function inboxItemProjectName(item: InboxItem): string | undefined {
   if (item.kind === 'approval') return item.approval.projectName;
   if (item.kind === 'question') return item.message.projectName;

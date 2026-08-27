@@ -15,6 +15,7 @@ import {
   formatSpend,
   type InboxItem,
   inboxItemChip,
+  inboxItemForRun,
   inboxItemPreview,
   inboxItemProjectName,
   inboxItemRunId,
@@ -356,9 +357,11 @@ function QueueSection({
 
 export function InboxView({
   digest,
+  initialRunId,
   now,
 }: {
   readonly digest: InboxDigest;
+  readonly initialRunId?: string;
   readonly now: string;
 }) {
   const items = createInboxItems(
@@ -367,8 +370,12 @@ export function InboxView({
     digest.notifications,
   );
   const { attention, history } = splitInboxItems(items);
+  const linkedItem =
+    initialRunId === undefined
+      ? undefined
+      : inboxItemForRun(items, initialRunId);
   const [selectedKey, setSelectedKey] = useState(
-    (attention[0] ?? items[0])?.key,
+    (linkedItem ?? attention[0] ?? items[0])?.key,
   );
   useEffect(
     () =>

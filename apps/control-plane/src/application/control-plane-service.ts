@@ -2511,15 +2511,32 @@ export class ControlPlaneService {
    * beats durable emission here: it needs no migration or worker change and
    * covers every run that ever finished, not just future ones.
    */
-  async inboxDigest(limit = 50, projectId?: string): Promise<InboxDigest> {
+  async inboxDigest(
+    limit = 50,
+    projectId?: string,
+    includeRunId?: string,
+  ): Promise<InboxDigest> {
     const now = this.clock();
-    const runs = await this.repository.listRuns({
+    const listedRuns = await this.repository.listRuns({
       limit,
       order: 'desc',
       ...(projectId === undefined
         ? {}
         : { projectId: persistenceId('project', projectId) }),
     });
+    const includedRun =
+      includeRunId === undefined
+        ? undefined
+        : await this.repository
+            .getRun(persistenceId('run', includeRunId))
+            .catch(() => undefined);
+    const runs =
+      includedRun === undefined ||
+      listedRuns.some((run) => run.id === includedRun.id) ||
+      (projectId !== undefined &&
+        includedRun.projectId !== persistenceId('project', projectId))
+        ? listedRuns
+        : [...listedRuns, includedRun];
     const pages = await mapWithConcurrency(
       runs,
       DIGEST_QUERY_CONCURRENCY,
