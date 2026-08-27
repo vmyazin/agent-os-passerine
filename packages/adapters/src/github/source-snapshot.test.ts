@@ -130,7 +130,7 @@ describe('trusted GitHub source snapshot ingestion', () => {
     expect(client.getTree).not.toHaveBeenCalled();
   });
 
-  it('rejects a source bundle one byte beyond the managed resource boundary', async () => {
+  it('rejects an individual file one byte beyond one MiB', async () => {
     const { client, ingestor } = fixture();
     const bytes = new TextEncoder().encode('x'.repeat(1024 * 1024 + 1));
     vi.mocked(client.getBlob).mockResolvedValue({
@@ -141,12 +141,12 @@ describe('trusted GitHub source snapshot ingestion', () => {
     await expect(ingestor.ensure('run-1')).rejects.toThrow(/size limit/);
   });
 
-  it('rejects aggregate source content beyond one MiB', async () => {
-    const entries = ['one.ts', 'two.ts'].map((path, index) => ({
+  it('accepts aggregate source content above one MiB and within sixteen MiB', async () => {
+    const entries = ['one.ts', 'two.ts'].map((path) => ({
       path,
       mode: '100644' as const,
       type: 'blob' as const,
-      sha: sha(index === 0 ? 'c' : 'd'),
+      sha: sha('c'),
     }));
     const { client, ingestor } = fixture(entries);
     const bytes = new TextEncoder().encode('x'.repeat(600_000));
@@ -155,7 +155,48 @@ describe('trusted GitHub source snapshot ingestion', () => {
       size: bytes.byteLength,
       bytes,
     }));
+
+    await expect(ingestor.ensure('run-1')).resolves.toMatchObject({
+      sizeBytes: expect.any(Number),
+    });
+  });
+
+  it('rejects aggregate source content beyond sixteen MiB', async () => {
+    const entries = Array.from({ length: 17 }, (_, index) => ({
+      path: `src/${String(index)}.ts`,
+      mode: '100644' as const,
+      type: 'blob' as const,
+      sha: sha('c'),
+    }));
+    const { client, ingestor } = fixture(entries);
+    const bytes = new TextEncoder().encode('x'.repeat(1_000_000));
+    vi.mocked(client.getBlob).mockImplementation(async (blobSha) => ({
+      sha: blobSha,
+      size: bytes.byteLength,
+      bytes,
+    }));
+
     await expect(ingestor.ensure('run-1')).rejects.toThrow('total size limit');
+  });
+
+  it('rejects a canonical bundle beyond twenty-four MiB', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => ({
+      path: `src/${String(index)}.txt`,
+      mode: '100644' as const,
+      type: 'blob' as const,
+      sha: sha('c'),
+    }));
+    const { client, ingestor } = fixture(entries);
+    const bytes = new TextEncoder().encode('\u0001'.repeat(900_000));
+    vi.mocked(client.getBlob).mockImplementation(async (blobSha) => ({
+      sha: blobSha,
+      size: bytes.byteLength,
+      bytes,
+    }));
+
+    await expect(ingestor.ensure('run-1')).rejects.toThrow(
+      'managed resource size limit',
+    );
   });
 
   it('rejects more than the bounded source file count before reading blobs', async () => {

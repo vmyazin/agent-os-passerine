@@ -10,10 +10,10 @@ import type {
   ReadOnlyInstallationClientScope,
 } from './types.js';
 
-const MAX_FILES = 5_000;
-const MAX_FILE_BYTES = 1024 * 1024;
-const MAX_TOTAL_BYTES = 1024 * 1024;
-export const MAX_SOURCE_BUNDLE_BYTES = 1024 * 1024;
+export const MAX_SOURCE_FILES = 5_000;
+export const MAX_SOURCE_FILE_BYTES = 1024 * 1024;
+export const MAX_SOURCE_TOTAL_BYTES = 16 * 1024 * 1024;
+export const MAX_SOURCE_BUNDLE_BYTES = 24 * 1024 * 1024;
 
 export interface TrustedSourceSnapshotBinding {
   readonly projectId: string;
@@ -100,7 +100,7 @@ export function createTrustedSourceSnapshotIngestorWithClientFactory(
         const tree = await client.getTree(commit.treeSha);
         if (tree.truncated)
           throw new Error('source snapshot tree is truncated');
-        if (tree.entries.length > MAX_FILES * 2)
+        if (tree.entries.length > MAX_SOURCE_FILES * 2)
           throw new Error('source snapshot tree exceeds entry limit');
 
         const blobEntries = tree.entries.filter((entry) => {
@@ -121,7 +121,7 @@ export function createTrustedSourceSnapshotIngestorWithClientFactory(
             );
           return true;
         });
-        if (blobEntries.length > MAX_FILES)
+        if (blobEntries.length > MAX_SOURCE_FILES)
           throw new Error('source snapshot exceeds file limit');
         const seen = new Set<string>();
         let totalBytes = 0;
@@ -137,10 +137,10 @@ export function createTrustedSourceSnapshotIngestorWithClientFactory(
             throw new Error('source snapshot contains duplicate paths');
           seen.add(entry.path);
           const blob = await client.getBlob(entry.sha);
-          if (blob.size > MAX_FILE_BYTES)
+          if (blob.size > MAX_SOURCE_FILE_BYTES)
             throw new Error('source snapshot file exceeds size limit');
           totalBytes += blob.size;
-          if (totalBytes > MAX_TOTAL_BYTES)
+          if (totalBytes > MAX_SOURCE_TOTAL_BYTES)
             throw new Error('source snapshot exceeds total size limit');
           let content: string;
           try {
