@@ -2,6 +2,12 @@
 
 Status: Approved design
 
+> **Follow-up decision — 2026-08-26:** The byte-protocol parser's focused unit
+> coverage lives in `packages/adapters/src/local-git/git.test.ts`, beside the
+> helper it verifies. This adds that file to the test boundary below and
+> overrides only the earlier three-file test-placement list; product scope and
+> acceptance behavior are unchanged.
+
 ## Context
 
 Agent OS's first self-hosted feature run exposed a source-ingestion blocker before
@@ -71,6 +77,7 @@ Durable failure recording is limited to the source-ingestion portion of
 those three surfaces:
 
 - `packages/adapters/src/local-git/source-snapshot.test.ts`
+- `packages/adapters/src/local-git/git.test.ts`
 - `packages/adapters/src/github/source-snapshot.test.ts`
 - `packages/adapters/src/trigger/outbox.test.ts`
 
