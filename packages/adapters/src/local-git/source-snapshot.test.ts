@@ -89,8 +89,8 @@ describe('local source snapshot ingestion', () => {
     expect(body.treeSha).toBe(expectedTreeSha);
     // Content must be byte-identical to what was seeded, including the
     // trailing newline on file.txt and the absence of one on script.sh --
-    // this ingestor's `cat-file blob` read uses `raw: true` specifically
-    // so trailing bytes are never dropped.
+    // the batch parser reads each body by Git's declared byte count, so
+    // trailing bytes are never dropped.
     expect(body.files).toEqual([
       { path: 'file.txt', mode: '100644', content: 'hello\n' },
       {
@@ -99,6 +99,30 @@ describe('local source snapshot ingestion', () => {
         content: '#!/bin/sh\necho hi',
       },
     ]);
+  });
+
+  it('ingests aggregate local text above one MiB within the bounded total', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await writeFile(join(repo, 'one.txt'), 'x'.repeat(600_000));
+    await writeFile(join(repo, 'two.txt'), 'y'.repeat(600_000));
+    await exec('git', ['-C', repo, 'add', 'one.txt', 'two.txt']);
+    await exec('git', ['-C', repo, 'commit', '-m', 'add ordinary source']);
+    const headSha = (
+      await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])
+    ).stdout.trim();
+    const { ingestor } = ingestorFor(root, {
+      'run-1': {
+        projectId: 'project-1',
+        localPath: repo,
+        baseBranch: 'main',
+        repositorySha: headSha,
+      },
+    });
+
+    const metadata = await ingestor.ensure('run-1');
+
+    expect(metadata.sizeBytes).toBeGreaterThan(1024 * 1024);
   });
 
   it('rejects a binding pinned to a nonexistent SHA with a clear message', async () => {
@@ -161,6 +185,27 @@ describe('local source snapshot ingestion', () => {
         repositorySha: headSha,
       },
     });
+    await expect(ingestor.ensure('run-1')).rejects.toThrow(/binary/);
+  });
+
+  it('rejects invalid UTF-8 without relying on a NUL byte', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    await writeFile(join(repo, 'invalid.txt'), Buffer.from([0xc3, 0x28]));
+    await exec('git', ['-C', repo, 'add', 'invalid.txt']);
+    await exec('git', ['-C', repo, 'commit', '-m', 'add invalid utf8']);
+    const headSha = (
+      await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])
+    ).stdout.trim();
+    const { ingestor } = ingestorFor(root, {
+      'run-1': {
+        projectId: 'project-1',
+        localPath: repo,
+        baseBranch: 'main',
+        repositorySha: headSha,
+      },
+    });
+
     await expect(ingestor.ensure('run-1')).rejects.toThrow(/binary/);
   });
 

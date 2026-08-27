@@ -24,9 +24,9 @@ interface SubcommandRule {
 
 const SUBCOMMAND_RULES: Record<string, SubcommandRule> = {
   'rev-parse': { flags: [], allowPositional: true },
-  'ls-tree': { flags: ['-r', '-z'], allowPositional: true },
+  'ls-tree': { flags: ['-r', '-l', '-z'], allowPositional: true },
   'cat-file': {
-    flags: ['-p', '-t', 'blob', 'commit', 'tree'],
+    flags: ['-p', '-t', '--batch', 'blob', 'commit', 'tree'],
     allowPositional: true,
   },
   'hash-object': {
@@ -43,6 +43,14 @@ const SUBCOMMAND_RULES: Record<string, SubcommandRule> = {
 const ALLOWED_SUBCOMMANDS = new Set(Object.keys(SUBCOMMAND_RULES));
 
 const MAX_ARGUMENT_LENGTH = 4096;
+const MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024;
+const MAX_BATCH_OBJECTS = 5_000;
+const SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+interface RunGitOptions {
+  readonly input?: Uint8Array | string;
+  readonly env?: Readonly<Record<string, string>>;
+}
 
 /**
  * Only the git identity/date variables needed to stamp a deterministic,
@@ -155,27 +163,11 @@ export async function assertContainedRepository(
   return repoReal;
 }
 
-/**
- * Plumbing-only runner: never checks out, never runs hooks. Uses spawn (not
- * execFile) because hash-object --stdin and mktree read from stdin.
- */
-export async function runGit(
+async function runGitBuffer(
   repository: string,
   args: readonly string[],
-  options: {
-    readonly input?: Uint8Array | string;
-    /** When true, resolves with stdout decoded as UTF-8 exactly as
-     * received, with no `trimEnd()` applied. Needed by callers (e.g. blob
-     * content reads) that must preserve trailing whitespace/newlines
-     * byte-for-byte. Defaults to false, preserving the historical
-     * trimmed behavior every other caller relies on. */
-    readonly raw?: boolean;
-    /** Extra environment variables merged over `process.env`, restricted to
-     * `ALLOWED_ENV_KEYS`. Omitting this preserves the historical behavior
-     * (child inherits `process.env` unchanged) byte-for-byte. */
-    readonly env?: Readonly<Record<string, string>>;
-  } = {},
-): Promise<string> {
+  options: RunGitOptions = {},
+): Promise<Buffer> {
   const subcommand = args[0];
   if (subcommand === undefined || !ALLOWED_SUBCOMMANDS.has(subcommand))
     throw new LocalGitError(
@@ -184,7 +176,7 @@ export async function runGit(
     );
   assertSafeArguments(subcommand, args.slice(1));
   assertSafeEnv(options.env);
-  return new Promise<string>((resolvePromise, rejectPromise) => {
+  return new Promise<Buffer>((resolvePromise, rejectPromise) => {
     const child = spawn('git', ['-C', repository, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env:
@@ -194,28 +186,43 @@ export async function runGit(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    let bytes = 0;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const resolveOnce = (value: Buffer) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    const rejectOnce = (error: LocalGitError) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    };
     const overflow = () => {
       child.kill('SIGKILL');
-      rejectPromise(new LocalGitError('git_failed', 'git output too large'));
+      rejectOnce(new LocalGitError('git_failed', 'git output too large'));
     };
     child.stdout.on('data', (chunk: Buffer) => {
-      bytes += chunk.byteLength;
-      if (bytes > 32 * 1024 * 1024) return overflow();
+      stdoutBytes += chunk.byteLength;
+      if (stdoutBytes > MAX_GIT_OUTPUT_BYTES) return overflow();
+      if (settled) return;
       stdout.push(chunk);
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      if (Buffer.concat(stderr).byteLength < 16 * 1024) stderr.push(chunk);
+      if (stderrBytes >= 16 * 1024) return;
+      const remaining = 16 * 1024 - stderrBytes;
+      const bounded = chunk.subarray(0, remaining);
+      stderr.push(bounded);
+      stderrBytes += bounded.byteLength;
     });
     child.on('error', (error) =>
-      rejectPromise(new LocalGitError('git_failed', error.message)),
+      rejectOnce(new LocalGitError('git_failed', error.message)),
     );
     child.on('close', (code) => {
-      if (code === 0) {
-        const text = Buffer.concat(stdout).toString('utf8');
-        return resolvePromise(options.raw === true ? text : text.trimEnd());
-      }
-      rejectPromise(
+      if (settled) return;
+      if (code === 0) return resolveOnce(Buffer.concat(stdout));
+      rejectOnce(
         new LocalGitError(
           'git_failed',
           `git ${subcommand} failed: ${Buffer.concat(stderr)
@@ -231,4 +238,90 @@ export async function runGit(
     if (options.input !== undefined) child.stdin.write(options.input);
     child.stdin.end();
   });
+}
+
+/**
+ * Plumbing-only runner: never checks out, never runs hooks. Uses spawn (not
+ * execFile) because hash-object --stdin and mktree read from stdin.
+ */
+export async function runGit(
+  repository: string,
+  args: readonly string[],
+  options: RunGitOptions & {
+    /** When true, resolves with stdout decoded as UTF-8 exactly as
+     * received, with no `trimEnd()` applied. Defaults to false, preserving
+     * the historical trimmed behavior every other caller relies on. */
+    readonly raw?: boolean;
+  } = {},
+): Promise<string> {
+  const output = await runGitBuffer(repository, args, options);
+  const text = output.toString('utf8');
+  return options.raw === true ? text : text.trimEnd();
+}
+
+function malformedBatch(): never {
+  throw new LocalGitError(
+    'git_failed',
+    'git cat-file batch output is malformed',
+  );
+}
+
+export function parseGitBlobBatch(
+  raw: Uint8Array,
+  expectedObjectIds: readonly string[],
+): readonly Uint8Array[] {
+  const output = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  const blobs: Uint8Array[] = [];
+  let offset = 0;
+  for (const expected of expectedObjectIds) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline === -1 || newline - offset > 128) malformedBatch();
+    const header = output.subarray(offset, newline).toString('ascii');
+    const match = /^([0-9a-f]{40}) ([a-z-]+) ([0-9]+)$/.exec(header);
+    const objectId = match?.[1];
+    const type = match?.[2];
+    const size = Number(match?.[3]);
+    if (
+      objectId !== expected ||
+      type !== 'blob' ||
+      !Number.isSafeInteger(size) ||
+      size < 0
+    )
+      malformedBatch();
+    const bodyStart = newline + 1;
+    const bodyEnd = bodyStart + size;
+    if (
+      !Number.isSafeInteger(bodyEnd) ||
+      bodyEnd >= output.byteLength ||
+      output[bodyEnd] !== 0x0a
+    )
+      malformedBatch();
+    blobs.push(output.subarray(bodyStart, bodyEnd));
+    offset = bodyEnd + 1;
+  }
+  if (offset !== output.byteLength) malformedBatch();
+  return blobs;
+}
+
+/**
+ * Reads a validated set of full blob object IDs through one fixed Git batch
+ * process. No repository-controlled value can select a command or flag.
+ */
+export async function readGitBlobs(
+  repository: string,
+  objectIds: readonly string[],
+): Promise<readonly Uint8Array[]> {
+  if (
+    objectIds.length > MAX_BATCH_OBJECTS ||
+    objectIds.some((objectId) => !SHA_PATTERN.test(objectId))
+  )
+    throw new LocalGitError(
+      'forbidden_argument',
+      'git batch object list is invalid',
+    );
+  if (objectIds.length === 0) return [];
+  const output = await runGitBuffer(repository, ['cat-file', '--batch'], {
+    input: `${objectIds.join('\n')}\n`,
+  });
+  return parseGitBlobBatch(output, objectIds);
 }

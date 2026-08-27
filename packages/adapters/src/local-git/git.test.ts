@@ -2,7 +2,13 @@ import { mkdir, realpath, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { assertContainedRepository, LocalGitError, runGit } from './git.js';
+import {
+  assertContainedRepository,
+  LocalGitError,
+  parseGitBlobBatch,
+  readGitBlobs,
+  runGit,
+} from './git.js';
 import { cleanupFixtures, fixtureRoot, seedRepo } from './test-support.js';
 
 afterEach(async () => {
@@ -147,6 +153,52 @@ describe('runGit argument validation', () => {
     await expect(
       runGit(repo, ['rev-parse', 'refs/heads/x']),
     ).resolves.toBe(commit);
+  });
+});
+
+describe('readGitBlobs', () => {
+  it('reads multiple blobs byte-exactly in one batch', async () => {
+    const root = await fixtureRoot();
+    const repo = await seedRepo(root, 'exp');
+    const first = await runGit(repo, ['rev-parse', 'HEAD:file.txt']);
+    const second = await runGit(repo, ['hash-object', '-w', '--stdin'], {
+      input: 'second blob\n\n',
+    });
+
+    const blobs = await readGitBlobs(repo, [first, second]);
+
+    expect(blobs.map((blob) => new TextDecoder().decode(blob))).toEqual([
+      'hello\n',
+      'second blob\n\n',
+    ]);
+  });
+
+  it.each([
+    ['malformed header', Buffer.from('not-a-header\n')],
+    [
+      'mismatched object',
+      Buffer.from(`${'b'.repeat(40)} blob 1\nx\n`),
+    ],
+    [
+      'wrong object type',
+      Buffer.from(`${'a'.repeat(40)} tree 1\nx\n`),
+    ],
+    [
+      'truncated body',
+      Buffer.from(`${'a'.repeat(40)} blob 2\nx\n`),
+    ],
+    [
+      'invalid delimiter',
+      Buffer.from(`${'a'.repeat(40)} blob 1\nxx`),
+    ],
+    [
+      'trailing output',
+      Buffer.from(`${'a'.repeat(40)} blob 1\nx\nextra`),
+    ],
+  ])('rejects %s', (_label, output) => {
+    expect(() => parseGitBlobBatch(output, ['a'.repeat(40)])).toThrow(
+      /batch output/,
+    );
   });
 });
 

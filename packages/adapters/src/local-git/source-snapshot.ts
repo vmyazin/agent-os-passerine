@@ -7,10 +7,18 @@ import {
 } from '@agentos/core';
 
 import {
+  MAX_SOURCE_FILE_BYTES,
   MAX_SOURCE_BUNDLE_BYTES,
+  MAX_SOURCE_FILES,
+  MAX_SOURCE_TOTAL_BYTES,
   type TrustedSourceSnapshotIngestor,
 } from '../github/source-snapshot.js';
-import { assertContainedRepository, runGit, LocalGitError } from './git.js';
+import {
+  assertContainedRepository,
+  readGitBlobs,
+  runGit,
+  LocalGitError,
+} from './git.js';
 
 export interface LocalSourceSnapshotBinding {
   readonly projectId: string;
@@ -29,9 +37,6 @@ export interface LocalSourceSnapshotIngestorOptions {
 }
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const MAX_FILES = 5_000;
-const MAX_FILE_BYTES = 1024 * 1024;
-const MAX_TOTAL_BYTES = 1024 * 1024;
 
 /**
  * Path safety rules replicated verbatim from the `safePath` helper in
@@ -62,19 +67,32 @@ interface RawTreeEntry {
   readonly mode: string;
   readonly type: string;
   readonly sha: string;
+  readonly size: number;
   readonly path: string;
 }
 
-/** Parses one `git ls-tree -z` line: `<mode> <type> <sha>\t<path>`. */
+/** Parses `git ls-tree -l -z`: `<mode> <type> <sha> <size>\t<path>`. */
 function parseTreeEntry(line: string): RawTreeEntry {
   const tabIndex = line.indexOf('\t');
   if (tabIndex === -1)
     throw new Error('source snapshot tree entry is malformed');
-  const header = line.slice(0, tabIndex).split(' ');
-  const [mode, type, sha] = header;
-  if (mode === undefined || type === undefined || sha === undefined)
+  const match = /^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}) +([0-9]+|-)$/.exec(
+    line.slice(0, tabIndex),
+  );
+  if (match === null)
     throw new Error('source snapshot tree entry is malformed');
-  return { mode, type, sha, path: line.slice(tabIndex + 1) };
+  const [, mode, type, sha, sizeText] = match;
+  if (
+    mode === undefined ||
+    type === undefined ||
+    sha === undefined ||
+    sizeText === undefined
+  )
+    throw new Error('source snapshot tree entry is malformed');
+  const size = sizeText === '-' ? -1 : Number(sizeText);
+  if (!Number.isSafeInteger(size))
+    throw new Error('source snapshot tree entry is malformed');
+  return { mode, type, sha, size, path: line.slice(tabIndex + 1) };
 }
 
 /**
@@ -142,9 +160,9 @@ export function createLocalSourceSnapshotIngestor(
       if (!SHA_PATTERN.test(treeSha))
         throw new Error('source snapshot could not resolve a tree SHA');
 
-      const raw = await runGit(repo, ['ls-tree', '-r', '-z', treeSha]);
+      const raw = await runGit(repo, ['ls-tree', '-r', '-l', '-z', treeSha]);
       const lines = raw.split('\0').filter((line) => line !== '');
-      if (lines.length > MAX_FILES * 2)
+      if (lines.length > MAX_SOURCE_FILES * 2)
         throw new Error('source snapshot tree exceeds entry limit');
 
       const entries = lines.map(parseTreeEntry);
@@ -158,44 +176,47 @@ export function createLocalSourceSnapshotIngestor(
             'source snapshot contains a symlink, submodule, or unsupported tree entry',
           );
       }
-      if (entries.length > MAX_FILES)
+      if (entries.length > MAX_SOURCE_FILES)
         throw new Error('source snapshot exceeds file limit');
 
+      const sortedEntries = [...entries].sort((left, right) =>
+        left.path.localeCompare(right.path),
+      );
       const seen = new Set<string>();
       let totalBytes = 0;
-      const files: Array<{
-        path: string;
-        mode: '100644' | '100755';
-        content: string;
-      }> = [];
-      for (const entry of [...entries].sort((left, right) =>
-        left.path.localeCompare(right.path),
-      )) {
+      for (const entry of sortedEntries) {
         if (seen.has(entry.path))
           throw new Error('source snapshot contains duplicate paths');
         seen.add(entry.path);
-        // `raw: true` disables runGit's default trimEnd(), so this
-        // content is byte-exact (matching the GitHub ingestor's
-        // exact-byte blob reads) -- required because the materialize
-        // script later writes this content verbatim into the
-        // verification sandbox.
-        const content = await runGit(repo, ['cat-file', 'blob', entry.sha], {
-          raw: true,
-        });
+        if (entry.size > MAX_SOURCE_FILE_BYTES)
+          throw new Error('source snapshot file exceeds size limit');
+        totalBytes += entry.size;
+        if (totalBytes > MAX_SOURCE_TOTAL_BYTES)
+          throw new Error('source snapshot exceeds total size limit');
+      }
+
+      const blobs = await readGitBlobs(
+        repo,
+        sortedEntries.map((entry) => entry.sha),
+      );
+      const files = sortedEntries.map((entry, index) => {
+        const blob = blobs[index];
+        if (blob === undefined || blob.byteLength !== entry.size)
+          throw new Error('source snapshot batch blob size mismatch');
+        let content: string;
+        try {
+          content = new TextDecoder('utf-8', { fatal: true }).decode(blob);
+        } catch {
+          throw new Error('source snapshot contains a binary file');
+        }
         if (content.includes('\0'))
           throw new Error('source snapshot contains a binary file');
-        const size = new TextEncoder().encode(content).byteLength;
-        if (size > MAX_FILE_BYTES)
-          throw new Error('source snapshot file exceeds size limit');
-        totalBytes += size;
-        if (totalBytes > MAX_TOTAL_BYTES)
-          throw new Error('source snapshot exceeds total size limit');
-        files.push({
+        return {
           path: entry.path,
           mode: entry.mode as '100644' | '100755',
           content,
-        });
-      }
+        };
+      });
 
       const body = {
         version: 'source-bundle-v1' as const,
