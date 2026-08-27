@@ -761,9 +761,13 @@ textarea {
   display: grid;
   flex: 1 1 auto;
   gap: 1rem;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
   padding-block: 1.25rem 1.5rem;
+}
+
+.inbox-page > .project-filter-chips {
+  margin-bottom: 0;
 }
 
 .mailbox {
@@ -1692,6 +1696,26 @@ div.inbox-message-copy {
   border-color: var(--ink-command);
   background: var(--surface-inset);
   color: var(--ink-command);
+}
+
+.project-filter-chips .project-filter-toggle {
+  min-height: auto;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--ink-muted);
+  padding: 0.35rem 0.45rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.project-filter-chips .project-filter-toggle:hover {
+  background: var(--surface-inset);
+  color: var(--ink-command);
+}
+
+.project-filter-chips .project-filter-toggle:active {
+  transform: none;
 }
 
 .project-name-link {

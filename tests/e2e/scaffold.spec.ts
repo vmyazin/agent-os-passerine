@@ -306,6 +306,23 @@ test('inbox remains usable on a narrow touch viewport', async ({ page }) => {
   ).toBeTruthy();
 });
 
+test('inbox project filters remain fully above the mailbox', async ({ page }) => {
+  await page.goto('/inbox');
+
+  const filters = page.getByRole('navigation', { name: 'Project filters' });
+  const mailbox = page.getByRole('region', { name: 'Inbox mailbox' });
+  await expect(filters).toBeVisible();
+  await expect(mailbox).toBeVisible();
+
+  const [filtersBox, mailboxBox] = await Promise.all([
+    filters.boundingBox(),
+    mailbox.boundingBox(),
+  ]);
+  expect(filtersBox).not.toBeNull();
+  expect(mailboxBox).not.toBeNull();
+  expect(filtersBox!.y + filtersBox!.height).toBeLessThanOrEqual(mailboxBox!.y);
+});
+
 test('operator can sign in via the localhost "Get In" bypass CTA', async ({
   context,
   page,
