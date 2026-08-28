@@ -29,6 +29,9 @@ export interface RunKimiAgentLoopOptions {
   readonly onEvent: (event: {
     type: 'message' | 'tool_call' | 'tool_result';
     detail: string;
+    /** Tool being called/answered, reported apart from the opaque detail. */
+    name?: string;
+    isError?: boolean;
   }) => void;
   /**
    * Invoked after every completed turn with the run's cumulative token
@@ -136,11 +139,14 @@ export async function runKimiAgentLoop(
 
       options.onEvent({
         type: 'tool_call',
+        name: block.name,
         detail: JSON.stringify({ name: block.name, input: block.input }),
       });
       const result = await options.executor.execute(block.name, block.input);
       options.onEvent({
         type: 'tool_result',
+        name: block.name,
+        isError: result.isError,
         detail: JSON.stringify({
           name: block.name,
           isError: result.isError,

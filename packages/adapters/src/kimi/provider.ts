@@ -21,6 +21,7 @@ import { ARTIFACT_MCP_PROTOCOL_VERSION } from '../artifacts/mcp.js';
 import { runKimiAgentLoop } from './loop.js';
 import { createKimiSandbox, type KimiSandbox } from './sandbox.js';
 import { createKimiHttpTransport } from './transport.js';
+import { KimiTransportError } from './types.js';
 import type {
   KimiLoopResult,
   KimiToolDefinition,
@@ -436,7 +437,11 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       executor,
       signal: controller.signal,
       onEvent: (event) =>
-        this.#emit(session, event.type, { detail: event.detail }),
+        this.#emit(session, event.type, {
+          detail: event.detail,
+          ...(event.name === undefined ? {} : { name: event.name }),
+          ...(event.isError === undefined ? {} : { isError: event.isError }),
+        }),
       // Per-turn, not just at settlement: a cancelled session's usage() has
       // to report the tokens it actually spent. Assigned unconditionally --
       // the totals are cumulative and monotonic for the life of the loop, so
@@ -483,7 +488,13 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
       },
       (error: unknown) => {
         const message = errorMessage(error);
-        if (this.#terminate(session, 'failed', 'error', { message })) {
+        const code = runtimeErrorCode(error);
+        if (
+          this.#terminate(session, 'failed', 'error', {
+            message,
+            ...(code === undefined ? {} : { code }),
+          })
+        ) {
           // Keep the original typed error for collectOutput(). Workflow
           // retry classification depends on transport status/code fields;
           // reducing the failure to display text makes transient upstream
@@ -979,6 +990,32 @@ function toRuntimeOutput(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error';
+}
+
+/**
+ * Maps a transport failure onto the closed set of runtime error codes the
+ * operator-facing progress notes understand, so a refusal reads as the thing
+ * it is -- out of balance, rate limited, upstream overloaded -- instead of an
+ * anonymous session error. Only the upstream error *type* is inspected; its
+ * free-text message is never turned into a code.
+ */
+function runtimeErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof KimiTransportError)) return undefined;
+  let upstreamType: unknown;
+  try {
+    upstreamType = (JSON.parse(error.body) as { error?: { type?: unknown } })
+      ?.error?.type;
+  } catch {
+    upstreamType = undefined;
+  }
+  if (
+    upstreamType === 'exceeded_current_quota_error' ||
+    error.status === 402
+  )
+    return 'billing_error';
+  if (error.status === 429) return 'model_rate_limited_error';
+  if (error.status >= 500) return 'model_overloaded_error';
+  return 'model_request_failed_error';
 }
 
 function validateHttpUrl(value: string, label: string): string {

@@ -461,6 +461,31 @@ describe('createKimiRuntimeProvider', () => {
     await expect(provider.collectOutput(handle)).rejects.toBe(transportError);
   });
 
+  it('names an out-of-balance refusal with a runtime error code', async () => {
+    const { provider } = await makeProvider({
+      transport: {
+        async send() {
+          throw new KimiTransportError(
+            429,
+            JSON.stringify({
+              error: {
+                type: 'exceeded_current_quota_error',
+                message: 'account is suspended due to insufficient balance',
+              },
+            }),
+          );
+        },
+      },
+    });
+    const handle = await provider.start(baseRequest());
+    const events = await collectEvents(provider, handle);
+
+    const failure = events.find((event) => event.type === 'error');
+    // A quota refusal is a billing problem, not an anonymous session error:
+    // the code is what lets the operator's activity feed say so.
+    expect(failure?.payload).toMatchObject({ code: 'billing_error' });
+  });
+
   it('turn_limit resolution emits an error event and collectOutput rejects', async () => {
     const transport: KimiTransport = {
       async send() {

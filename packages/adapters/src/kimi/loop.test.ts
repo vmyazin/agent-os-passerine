@@ -110,10 +110,13 @@ describe('runKimiAgentLoop', () => {
     ]);
     expect(events[0]).toEqual({
       type: 'tool_call',
+      name: 'bash',
       detail: JSON.stringify({ name: 'bash', input: { cmd: 'ls' } }),
     });
     expect(events[1]).toEqual({
       type: 'tool_result',
+      name: 'bash',
+      isError: false,
       detail: JSON.stringify({
         name: 'bash',
         isError: false,
