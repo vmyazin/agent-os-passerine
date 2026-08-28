@@ -855,6 +855,16 @@ function isTransientOperationError(error: unknown): boolean {
  */
 const DEFINITE_START_REJECTIONS = new Set([400, 401, 403, 404, 422]);
 
+function hasErrorCode(error: unknown, code: string): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    if (Reflect.get(candidate, 'code') === code) return true;
+    candidate = Reflect.get(candidate, 'cause');
+  }
+  return false;
+}
+
 function isDefiniteStartRejection(error: unknown): boolean {
   let candidate = error;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -1345,6 +1355,15 @@ async function runAgentStep<T>(
               // attempt keeps a rejection from being billed as a full session.
               if (isDefiniteStartRejection(startError))
                 runtimeStartAttempted = false;
+              throw classified;
+            }
+            if (hasErrorCode(startError, 'runtime_session_missing')) {
+              // The provider answered that the session -- or the local access
+              // it would be built from -- does not exist in this process, so
+              // nothing was created and there is nothing to reconcile. A
+              // fresh attempt prepares fresh access; retaining the attempt
+              // would bill the full reservation for a session that never was.
+              runtimeStartAttempted = false;
               throw classified;
             }
             if (dependencies.runtime.reconcileStart === undefined)

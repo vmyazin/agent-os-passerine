@@ -1745,6 +1745,62 @@ describe('durable feature workflow', () => {
     }
   });
 
+  it('retries fresh and bills nothing when a start finds its local access gone', async () => {
+    const f = await fixture();
+    // A legacy access checkpoint replayed into a new process: the provider
+    // reports the staged reference gone. No session was created, so the
+    // attempt must retry -- with fresh access -- and cost nothing.
+    const originalStart = f.runtime.start.bind(f.runtime);
+    let starts = 0;
+    f.runtime.start = async (request: unknown) => {
+      starts += 1;
+      if (starts === 1)
+        throw Object.assign(new Error('unknown kimi local file reference'), {
+          code: 'runtime_session_missing',
+        });
+      return originalStart(request);
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    const usage = await f.repository.listUsage(persistenceId('run', 'run-1'));
+    const specification = usage.filter((entry) =>
+      String(entry.idempotencyId).includes(':specification:'),
+    );
+    // The failed start is settled at zero, never at the full reservation: the
+    // provider said definitively that nothing was created.
+    expect(specification.map((entry) => entry.microdollars).sort()).toEqual([
+      0,
+      100,
+    ]);
+  });
+
   it('starts the execution clock at the latest resume, not the original creation', async () => {
     // Created three hours before the clock this test drives: measured from
     // creation, the one-hour workflow deadline passed long ago.
