@@ -678,26 +678,23 @@ describe('createKimiHttpTransport', () => {
     const transport = createKimiHttpTransport({
       apiKey: 'kimi-key',
       fetchImpl,
+      // This test is about the error it raises once retries are exhausted, not
+      // about the retry schedule -- see transport.test.ts for that -- so the
+      // backoff is skipped rather than waited out.
+      sleepImpl: async () => {},
     });
 
-    vi.useFakeTimers();
-    try {
-      const promise = transport.send({
-        model: 'kimi-test',
-        messages: [],
-        tools: [],
-        maxTokens: 1,
-      });
-      const assertion = expect(promise).rejects.toMatchObject({
-        name: 'KimiTransportError',
-        status: 500,
-      });
-      await vi.advanceTimersByTimeAsync(1000);
-      await assertion;
-      const rejection = await promise.catch((error: unknown) => error);
-      expect((rejection as { body: string }).body).toHaveLength(500);
-    } finally {
-      vi.useRealTimers();
-    }
+    const promise = transport.send({
+      model: 'kimi-test',
+      messages: [],
+      tools: [],
+      maxTokens: 1,
+    });
+    await expect(promise).rejects.toMatchObject({
+      name: 'KimiTransportError',
+      status: 500,
+    });
+    const rejection = await promise.catch((error: unknown) => error);
+    expect((rejection as { body: string }).body).toHaveLength(500);
   });
 });

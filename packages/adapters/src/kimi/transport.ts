@@ -10,6 +10,8 @@ const DEFAULT_BASE_URL = 'https://api.moonshot.ai/anthropic';
 const ANTHROPIC_VERSION = '2023-06-01';
 const MAX_ERROR_BODY_CHARS = 500;
 const RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 30_000;
+const DEFAULT_MAX_ATTEMPTS = 5;
 const RETRYABLE_STATUS = (status: number): boolean =>
   status === 429 || (status >= 500 && status < 600);
 
@@ -68,6 +70,10 @@ export interface CreateKimiHttpTransportOptions {
   readonly apiKey: string;
   readonly baseUrl?: string; // default https://api.moonshot.ai/anthropic
   readonly fetchImpl?: typeof fetch;
+  /** Total attempts per request, including the first. Default 5. */
+  readonly maxAttempts?: number;
+  /** Injectable so tests do not wait out real backoff. */
+  readonly sleepImpl?: (ms: number) => Promise<void>;
 }
 
 export function createKimiHttpTransport(
@@ -78,6 +84,10 @@ export function createKimiHttpTransport(
   }
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const sleepImpl = options.sleepImpl ?? sleep;
+  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1)
+    throw new Error('maxAttempts must be a positive integer');
 
   const transport: KimiTransport = {
     async send(request, sendOptions) {
@@ -94,6 +104,8 @@ export function createKimiHttpTransport(
         options.apiKey,
         body,
         sendOptions?.signal,
+        maxAttempts,
+        sleepImpl,
       );
       if (!response.ok) {
         const text = await response.text();
@@ -151,12 +163,43 @@ function toContentBlock(
   });
 }
 
+/**
+ * How long to wait before attempt `attempt` (1-based), honouring the
+ * provider's own Retry-After when it sends one.
+ *
+ * A provider shedding load needs room to recover: a single retry a second
+ * later mostly just asks again while it is still overloaded, and when that
+ * second ask fails the caller loses the whole step -- for an agent loop, an
+ * entire multi-turn conversation that has already been paid for. The backoff
+ * grows, is jittered so concurrent sessions do not retry in lockstep, and is
+ * capped so a request cannot sit here indefinitely.
+ */
+function retryDelayMs(attempt: number, response: Response): number {
+  const header = response.headers.get('retry-after');
+  if (header !== null) {
+    const seconds = Number(header);
+    const explicit = Number.isFinite(seconds)
+      ? seconds * 1_000
+      : Date.parse(header) - Date.now();
+    if (Number.isFinite(explicit) && explicit > 0)
+      return Math.min(explicit, MAX_RETRY_DELAY_MS);
+  }
+  const backoff = Math.min(
+    RETRY_DELAY_MS * 2 ** (attempt - 1),
+    MAX_RETRY_DELAY_MS,
+  );
+  // Full jitter over the window, so retries from parallel sessions spread out.
+  return Math.round(backoff / 2 + Math.random() * (backoff / 2));
+}
+
 async function sendWithRetry(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string,
   body: string,
   signal: AbortSignal | undefined,
+  maxAttempts: number,
+  sleepImpl: (ms: number) => Promise<void>,
 ): Promise<Response> {
   const headers = {
     'content-type': 'application/json',
@@ -169,14 +212,16 @@ async function sendWithRetry(
     body,
     ...(signal === undefined ? {} : { signal }),
   };
-  const first = await fetchImpl(url, init);
-  if (first.ok || !RETRYABLE_STATUS(first.status)) return first;
-  await sleep(RETRY_DELAY_MS);
-  // A session cancelled during the retry delay must not spend another
-  // request; the caller sees the same abort rejection it would have seen
-  // mid-flight.
-  signal?.throwIfAborted();
-  return fetchImpl(url, init);
+  let response = await fetchImpl(url, init);
+  for (let attempt = 1; attempt < maxAttempts; attempt += 1) {
+    if (response.ok || !RETRYABLE_STATUS(response.status)) return response;
+    await sleepImpl(retryDelayMs(attempt, response));
+    // A session cancelled during the delay must not spend another request;
+    // the caller sees the same abort rejection it would have seen mid-flight.
+    signal?.throwIfAborted();
+    response = await fetchImpl(url, init);
+  }
+  return response;
 }
 
 function sleep(ms: number): Promise<void> {
