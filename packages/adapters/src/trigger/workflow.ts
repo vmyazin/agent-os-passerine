@@ -16,6 +16,7 @@ import {
   type RuntimeHandle,
   type RuntimeOutput,
   type RuntimeUsage,
+  type DomainEvent,
   type StepRun,
   type UsageRecordEntry,
   type WorkflowRun,
@@ -413,16 +414,12 @@ async function latestResumeMs(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
 ): Promise<number> {
-  const events = await dependencies.repository.listEvents(
-    persistenceId('run', runId),
-    { limit: 1_000 },
-  );
   let latest = 0;
-  for (const event of events) {
-    if (event.type !== RUN_RESUMED_EVENT) continue;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== RUN_RESUMED_EVENT) return;
     const at = Date.parse(event.occurredAt);
     if (Number.isFinite(at) && at > latest) latest = at;
-  }
+  });
   return latest;
 }
 
@@ -437,38 +434,59 @@ async function resumeGenerationOf(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
 ): Promise<number> {
-  const events = await dependencies.repository.listEvents(
-    persistenceId('run', runId),
-    { limit: 1_000 },
-  );
   let generation = 0;
-  for (const event of events) {
-    if (event.type !== RUN_RESUMED_EVENT) continue;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== RUN_RESUMED_EVENT) return;
     const value = payloadField(event.payload, 'generation');
     generation =
       typeof value === 'number' && Number.isSafeInteger(value)
         ? Math.max(generation, value)
         : generation + 1;
-  }
+  });
   return generation;
+}
+
+/**
+ * Visits every event of a run, however many there are. The repositories clamp
+ * a single listing to a bounded page, so a one-shot list silently reads only
+ * a run's earliest events -- and control signals (budget overrides, resumes)
+ * are appended late, after the operational chatter. A signal that falls off
+ * the first page must still be seen: a resume read at the wrong generation
+ * collided with the usage ledger, live.
+ */
+async function scanRunEvents(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+  visit: (event: DomainEvent) => void,
+): Promise<void> {
+  let after: number | undefined;
+  for (let pages = 0; pages < 1_000; pages += 1) {
+    const events = await dependencies.repository.listEvents(
+      persistenceId('run', runId),
+      { limit: 1_000, ...(after === undefined ? {} : { after }) },
+    );
+    if (events.length === 0) return;
+    for (const event of events) visit(event);
+    const last = events[events.length - 1]!.sequence;
+    if (after !== undefined && last <= after)
+      throw new WorkflowPermanentError('run events did not paginate forward');
+    after = last;
+  }
+  throw new WorkflowPermanentError('run has too many events to scan');
 }
 
 async function grantedBudgetOverride(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
 ): Promise<number> {
-  const events = await dependencies.repository.listEvents(
-    persistenceId('run', runId),
-    { limit: 1_000 },
-  );
   let granted = 0;
-  for (const event of events) {
-    if (event.type !== BUDGET_OVERRIDE_EVENT) continue;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== BUDGET_OVERRIDE_EVENT) return;
     const amount = payloadField(event.payload, 'microdollars');
-    if (typeof amount !== 'number' || !Number.isSafeInteger(amount)) continue;
-    if (amount <= 0) continue;
+    if (typeof amount !== 'number' || !Number.isSafeInteger(amount)) return;
+    if (amount <= 0) return;
     granted += amount;
-  }
+  });
   return granted;
 }
 
@@ -565,6 +583,13 @@ interface StepProgressContext {
   readonly stepRunId: StepRun['id'];
   readonly stepKey: string;
   readonly attempt: number;
+  /**
+   * Attempt numbering restarts on resume, and progress events are deduped by
+   * id. Without the generation, a resumed attempt's activity collides with
+   * the failed execution's ids and the operator's feed silently freezes at
+   * the run's first execution.
+   */
+  readonly resumeGeneration?: number;
 }
 
 async function recordStepProgress(
@@ -588,7 +613,11 @@ async function recordStepProgress(
     runId: persistenceId('run', runId),
     eventId: persistenceId(
       'event',
-      `step-progress:${runId}:${step.stepKey}:${String(step.attempt)}:${eventKey}`,
+      `step-progress:${runId}:${step.stepKey}:${String(step.attempt)}:${
+        (step.resumeGeneration ?? 0) === 0
+          ? ''
+          : `resume:${String(step.resumeGeneration)}:`
+      }${eventKey}`,
     ),
     fingerprint: hash({ type, payload }),
     type,
@@ -1016,6 +1045,7 @@ async function runAgentStep<T>(
       stepRunId: stepId,
       stepKey,
       attempt,
+      resumeGeneration,
     };
     const effectKey = `runtime:${workflow.runId}:${stepKey}:${String(attempt)}`;
     const claim = await claimEffect(
@@ -1710,18 +1740,20 @@ async function getAuthoritativeApproval(
     throw new WorkflowPermanentError(
       'waitpoint woke without an authoritative approval',
     );
-  const events = await dependencies.repository.listEvents(
-    persistenceId('run', workflow.runId),
-    { limit: 1_000 },
-  );
-  const event = events.find(
-    (candidate) =>
+  // Scanned in full: the decision lands after however much operational
+  // chatter the run has already produced, and a bounded first-page read
+  // reported it missing on a busy run.
+  let event: DomainEvent | undefined;
+  await scanRunEvents(dependencies, workflow.runId, (candidate) => {
+    if (
       (candidate.type === 'approval.approved' ||
         candidate.type === 'approval.rejected') &&
       isJsonObject(candidate.payload) &&
       candidate.payload.approvalId === approvalId &&
-      candidate.payload.scopeHash === scopeHash,
-  );
+      candidate.payload.scopeHash === scopeHash
+    )
+      event ??= candidate;
+  });
   if (event === undefined)
     throw new WorkflowPermanentError('approval decision event is missing');
   return event.type === 'approval.approved' ? 'approve' : 'reject';

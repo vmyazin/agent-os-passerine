@@ -1745,6 +1745,68 @@ describe('durable feature workflow', () => {
     }
   });
 
+  it('sees control events past the first repository page', async () => {
+    // Created long before the clock this test drives, so only the resume
+    // event -- appended after 150 rows of operational chatter -- can save it
+    // from the deadline. The repositories clamp one listing to 100 rows, so a
+    // one-shot read misses it; live, that meant a resumed run computed the
+    // previous generation and collided with the usage ledger.
+    const createdAt = isoTimestamp('2026-08-17T09:00:00.000Z');
+    const f = await fixture('approve', createdAt);
+    for (let index = 0; index < 150; index += 1)
+      await f.repository.appendEvent({
+        runId: persistenceId('run', 'run-1'),
+        eventId: persistenceId('event', `chatter-${String(index)}`),
+        fingerprint: `chatter-${String(index)}`,
+        type: 'step.progress',
+        payload: { message: 'noise' },
+        occurredAt: now,
+      });
+    await f.repository.appendEvent({
+      runId: persistenceId('run', 'run-1'),
+      eventId: persistenceId('event', 'late-resume'),
+      fingerprint: 'late-resume',
+      type: RUN_RESUMED_EVENT,
+      payload: { generation: 2 },
+      occurredAt: now,
+    });
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    // The generation was read from past the page boundary too: every usage
+    // record of this execution carries it.
+    const usage = await f.repository.listUsage(persistenceId('run', 'run-1'));
+    expect(usage.length).toBeGreaterThan(0);
+    for (const entry of usage)
+      expect(String(entry.idempotencyId)).toMatch(/:resume:2$/);
+  });
+
   it('retries fresh and bills nothing when a start finds its local access gone', async () => {
     const f = await fixture();
     // A legacy access checkpoint replayed into a new process: the provider
