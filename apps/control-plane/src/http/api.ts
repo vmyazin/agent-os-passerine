@@ -107,7 +107,27 @@ export async function handleApi<TBody = unknown>(
     const output = await handler(body);
     const checked = contract.output?.safeParse(output);
     if (checked && !checked.success) {
-      throw new Error('API output contract violation');
+      // The field paths, never their values: a response that fails its own
+      // contract is a bug in this service, and naming the fields is the
+      // difference between a fixable report and an anonymous 500. Values are
+      // withheld because they are exactly the data the contract guards.
+      throw new Error(
+        `API output contract violation: ${[
+          ...new Set(
+            checked.error.issues.map((issue) => {
+              const path = issue.path
+                .map((part) => (typeof part === 'number' ? '#' : String(part)))
+                .join('.');
+              const keys = (issue as { keys?: readonly string[] }).keys;
+              return `${path || '<root>'}[${issue.code}${
+                keys === undefined ? '' : `:${keys.join('|')}`
+              }]`;
+            }),
+          ),
+        ]
+          .slice(0, 20)
+          .join(', ')}`,
+      );
     }
     return NextResponse.json(checked?.data ?? output, {
       status: contract.successStatus ?? 200,
@@ -124,6 +144,11 @@ export async function handleApi<TBody = unknown>(
       const known = error as Error & { code: string; status: number };
       return errorResponse(known.code, known.message, known.status);
     }
+    if (
+      error instanceof Error &&
+      error.message.startsWith('API output contract violation')
+    )
+      return errorResponse('internal_error', error.message, 500);
     return errorResponse('internal_error', 'an unexpected error occurred', 500);
   }
 }

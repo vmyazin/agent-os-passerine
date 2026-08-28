@@ -79,6 +79,21 @@ export default async function RunPage({
             </>
           )}
         </p>
+        {/* A budget is the one blocker an operator can lift from here, and it
+            blocks a queued run exactly as it blocked the one that stopped, so
+            this is offered on any run a budget is holding back -- not only on
+            a finished one. */}
+        {run.error?.code === 'budget_exhausted' ? (
+          <>
+            <p className="run-status-explanation">
+              A budget stopped this run, so continuing it as it stands would
+              stop at the same place. Allowing more raises this run&apos;s caps by
+              that amount; it does not change the project&apos;s budget or start
+              anything.
+            </p>
+            <OverrideRunBudgetAction runId={run.id} />
+          </>
+        ) : null}
         {TERMINAL_STATUSES.has(run.status) ? (
           run.pipeline === 'feature' || run.pipeline === 'goal' ? (
             <>
@@ -90,17 +105,6 @@ export default async function RunPage({
                     and commit it started from. Start again re-runs the whole
                     request against the configuration applied now.
                   </p>
-                  {run.error?.code === 'budget_exhausted' ? (
-                    <>
-                      <p className="run-status-explanation">
-                        A budget stopped this run, so resuming it alone would
-                        stop at the same place. Allowing more raises this run&apos;s
-                        caps by that amount; it does not change the project&apos;s
-                        budget or start anything.
-                      </p>
-                      <OverrideRunBudgetAction runId={run.id} />
-                    </>
-                  ) : null}
                   <ResumeRunAction runId={run.id} />
                 </>
               ) : null}
