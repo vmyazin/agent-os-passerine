@@ -321,6 +321,57 @@ describe('Artifact MCP handler', () => {
     }
   });
 
+  it('rejects a JSON artifact whose body is not JSON, in-session', async () => {
+    const { handler } = fixture();
+    const call = await initialized(handler);
+    // The exact shape that killed a real run: an agent embedding a regex in
+    // test source wrote the invalid JSON escape \# inside a string. The body
+    // is well-formed base64 of valid UTF-8, so every other check passes it.
+    const body =
+      '{"version":"definition-of-done-v2","acceptanceTests":' +
+      '[{"content":"const re = /<a[\\#\']\\\\/setup/g;"}]}';
+    expect(() => JSON.parse(body)).toThrow();
+    const response = await call({
+      jsonrpc: '2.0',
+      id: 'bad-json',
+      method: 'tools/call',
+      params: {
+        name: 'artifact.put',
+        arguments: {
+          artifactId: 'spec-main',
+          version: 1,
+          mediaType: 'application/json',
+          contentBase64: Buffer.from(body, 'utf8').toString('base64'),
+        },
+      },
+    });
+    const payload = (await response.json()) as {
+      error?: { code: number; message: string };
+    };
+    expect(payload.error?.code).toBe(-32602);
+    // The agent is the only party that can fix it, so it is told what broke.
+    expect(payload.error?.message).toMatch(/valid JSON/);
+
+    // A well-formed JSON body of the same media type still stores normally.
+    const good = await call({
+      jsonrpc: '2.0',
+      id: 'good-json',
+      method: 'tools/call',
+      params: {
+        name: 'artifact.put',
+        arguments: {
+          artifactId: 'spec-main',
+          version: 1,
+          mediaType: 'application/json',
+          contentBase64: Buffer.from('{"ok":true}', 'utf8').toString('base64'),
+        },
+      },
+    });
+    expect((await good.json()) as object).toMatchObject({
+      result: { structuredContent: { metadata: { sizeBytes: 11 } } },
+    });
+  });
+
   it('puts, gets, and lists without allowing request scope overrides', async () => {
     const { handler } = fixture();
     const call = await initialized(handler);
