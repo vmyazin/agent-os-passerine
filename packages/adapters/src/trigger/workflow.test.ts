@@ -956,16 +956,15 @@ describe('durable feature workflow', () => {
     expect(attempts).toBe(6);
   });
 
-  it('continues after an idempotent usage write commits but loses its response', async () => {
+  it('persists a step before setup so an early transient failure can retry', async () => {
     const f = await fixture();
-    const appendUsage = f.repository.appendUsage.bind(f.repository);
-    let appendCalls = 0;
-    f.repository.appendUsage = async (usage) => {
-      appendCalls += 1;
-      const persisted = await appendUsage(usage);
-      if (appendCalls === 1)
-        throw new Error('Failed query: usage response was lost after commit');
-      return persisted;
+    const syncAgent = f.runtime.syncAgent.bind(f.runtime);
+    let syncAttempts = 0;
+    f.runtime.syncAgent = async (agent) => {
+      syncAttempts += 1;
+      if (syncAttempts === 1)
+        throw new WorkflowTransientError('temporary agent sync failure');
+      return syncAgent(agent);
     };
 
     const result = await createDurableFeatureWorkflow({
@@ -996,10 +995,23 @@ describe('durable feature workflow', () => {
     }).run(input);
 
     expect(result.status).toBe('succeeded');
-    expect(appendCalls).toBe(6);
+    expect(syncAttempts).toBe(6);
     await expect(
-      f.repository.listUsage(persistenceId('run', 'run-1')),
-    ).resolves.toHaveLength(5);
+      f.repository.listStepRuns(persistenceId('run', 'run-1')),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stepKey: 'specification',
+          attempt: 1,
+          status: 'failed',
+        }),
+        expect.objectContaining({
+          stepKey: 'specification',
+          attempt: 2,
+          status: 'succeeded',
+        }),
+      ]),
+    );
   });
 
   it('records bounded operational progress without persisting runtime payloads', async () => {

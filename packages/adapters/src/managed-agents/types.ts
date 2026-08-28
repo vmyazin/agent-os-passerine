@@ -11,6 +11,7 @@ export interface ManagedAgentsLimits {
   readonly maxListedEvents?: number;
   readonly maxEventBytes?: number;
   readonly maxOutputBytes?: number;
+  readonly maxAccessFileBytes?: number;
   readonly maxStreamDurationMs?: number;
   readonly maxStreamReconnects?: number;
   readonly streamReconnectDelayMs?: number;

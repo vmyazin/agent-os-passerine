@@ -807,7 +807,7 @@ describe('declarative resource sync', () => {
 });
 
 describe('sessions and controls', () => {
-  it('accepts an exact one-MiB mounted resource and rejects one byte more', async () => {
+  it('accepts an exact 32-MiB mounted resource and rejects one byte more', async () => {
     const { provider } = await syncedProvider();
     await expect(
       provider.provisionSessionAccess({
@@ -816,7 +816,7 @@ describe('sessions and controls', () => {
           {
             filename: 'exact.bin',
             mediaType: 'application/octet-stream',
-            bytes: new Uint8Array(1024 * 1024),
+            bytes: new Uint8Array(32 * 1024 * 1024),
             mountPath: '/workspace/inputs/exact.bin',
           },
         ],
@@ -829,12 +829,31 @@ describe('sessions and controls', () => {
           {
             filename: 'over.bin',
             mediaType: 'application/octet-stream',
-            bytes: new Uint8Array(1024 * 1024 + 1),
+            bytes: new Uint8Array(32 * 1024 * 1024 + 1),
             mountPath: '/workspace/inputs/over.bin',
           },
         ],
       }),
-    ).rejects.toThrow('Access file exceeds maxOutputBytes');
+    ).rejects.toThrow('Access file exceeds maxAccessFileBytes');
+  });
+
+  it('admits a source bundle larger than maxOutputBytes as an access file', async () => {
+    const { provider } = await syncedProvider();
+    // Regression: the source bundle of an ordinary repository is several
+    // MiB; the output limit (1 MiB) must not gate mounted step inputs.
+    await expect(
+      provider.provisionSessionAccess({
+        idempotencyKey: 'resource-bundle-size',
+        files: [
+          {
+            filename: 'source-bundle.json',
+            mediaType: 'application/json',
+            bytes: new Uint8Array(8 * 1024 * 1024),
+            mountPath: '/workspace/inputs/source-bundle.json',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ resources: [expect.any(Object)] });
   });
 
   it('provisions restart-idempotent scoped MCP vault auth and mounted files without putting the bearer in session input', async () => {

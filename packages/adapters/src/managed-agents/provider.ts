@@ -96,6 +96,7 @@ interface RequiredLimits {
   maxListedEvents: number;
   maxEventBytes: number;
   maxOutputBytes: number;
+  maxAccessFileBytes: number;
   maxStreamDurationMs: number;
   maxStreamReconnects: number;
   streamReconnectDelayMs: number;
@@ -106,6 +107,10 @@ const DEFAULT_LIMITS: RequiredLimits = {
   maxListedEvents: 1_000,
   maxEventBytes: 256 * 1024,
   maxOutputBytes: 1024 * 1024,
+  // Access files carry step inputs, including the serialized source bundle,
+  // so this must admit anything the snapshot layer can produce
+  // (MAX_SOURCE_BUNDLE_BYTES = 24 MiB) with headroom.
+  maxAccessFileBytes: 32 * 1024 * 1024,
   maxStreamDurationMs: 21 * 60_000,
   maxStreamReconnects: 3,
   streamReconnectDelayMs: 100,
@@ -254,8 +259,10 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
       ),
     );
     for (const file of input.files) {
-      if (file.bytes.byteLength > this.#limits.maxOutputBytes)
-        throw new ManagedAgentsLimitError('Access file exceeds maxOutputBytes');
+      if (file.bytes.byteLength > this.#limits.maxAccessFileBytes)
+        throw new ManagedAgentsLimitError(
+          'Access file exceeds maxAccessFileBytes',
+        );
       const contentHash = createHash('sha256').update(file.bytes).digest('hex');
       const filename = `agentos-${keyHash.slice(0, 16)}-${contentHash.slice(0, 16)}-${safeFilename(file.filename)}`;
       const matches = listedFiles.filter(

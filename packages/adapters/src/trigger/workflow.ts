@@ -739,6 +739,12 @@ async function runAgentStep<T>(
       createdAt: now,
       updatedAt: now,
     };
+    if (prior === undefined) {
+      // Usage and external-session records reference the step. Persist the
+      // pending row before setup so an early failure cannot mask its cause
+      // with a missing-step foreign-key error during settlement.
+      await dependencies.repository.upsertStepRun(step);
+    }
     const progressContext: StepProgressContext = {
       stepRunId: stepId,
       stepKey,
@@ -912,13 +918,7 @@ async function runAgentStep<T>(
         microdollars,
         recordedAt: at(dependencies.clock()),
       } as const;
-      try {
-        await dependencies.repository.appendUsage(usageEntry);
-      } catch {
-        // The insert is idempotent, so replaying the identical record recovers
-        // when the database commits but its response is lost in transit.
-        await dependencies.repository.appendUsage(usageEntry);
-      }
+      await dependencies.repository.appendUsage(usageEntry);
       recordedMicrodollars = microdollars;
       usageRecorded = true;
     };
