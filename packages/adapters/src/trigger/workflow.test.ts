@@ -956,6 +956,52 @@ describe('durable feature workflow', () => {
     expect(attempts).toBe(6);
   });
 
+  it('continues after an idempotent usage write commits but loses its response', async () => {
+    const f = await fixture();
+    const appendUsage = f.repository.appendUsage.bind(f.repository);
+    let appendCalls = 0;
+    f.repository.appendUsage = async (usage) => {
+      appendCalls += 1;
+      const persisted = await appendUsage(usage);
+      if (appendCalls === 1)
+        throw new Error('Failed query: usage response was lost after commit');
+      return persisted;
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    expect(appendCalls).toBe(6);
+    await expect(
+      f.repository.listUsage(persistenceId('run', 'run-1')),
+    ).resolves.toHaveLength(5);
+  });
+
   it('records bounded operational progress without persisting runtime payloads', async () => {
     const f = await fixture();
     f.runtime.events = async function* () {

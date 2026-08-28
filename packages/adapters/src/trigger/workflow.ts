@@ -894,7 +894,7 @@ async function runAgentStep<T>(
           // Charge the full reservation if the provider cannot report usage.
         }
       }
-      await dependencies.repository.appendUsage({
+      const usageEntry = {
         idempotencyId: persistenceId(
           'usage',
           `usage:${workflow.runId}:${stepKey}:${String(attempt)}`,
@@ -911,7 +911,14 @@ async function runAgentStep<T>(
         runtimeMs: usage.runtimeMs,
         microdollars,
         recordedAt: at(dependencies.clock()),
-      });
+      } as const;
+      try {
+        await dependencies.repository.appendUsage(usageEntry);
+      } catch {
+        // The insert is idempotent, so replaying the identical record recovers
+        // when the database commits but its response is lost in transit.
+        await dependencies.repository.appendUsage(usageEntry);
+      }
       recordedMicrodollars = microdollars;
       usageRecorded = true;
     };
