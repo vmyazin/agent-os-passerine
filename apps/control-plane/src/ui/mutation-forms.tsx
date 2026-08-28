@@ -195,6 +195,15 @@ export function ResumeRunAction({ runId }: { readonly runId: string }) {
     const body = (await response.json().catch(() => ({}))) as {
       error?: { message?: string };
     };
+    // A conflict means this page is describing a run that has already moved
+    // on -- someone resumed it in another tab, or a reconciler did. Showing
+    // the stale page with an error beside a button that cannot work is worse
+    // than showing what is actually true, so reload.
+    if (response.status === 409) {
+      setMessage('This run changed while you were looking at it; reloading…');
+      location.reload();
+      return;
+    }
     setMessage(
       typeof body.error?.message === 'string'
         ? `Could not resume it: ${body.error.message}.`

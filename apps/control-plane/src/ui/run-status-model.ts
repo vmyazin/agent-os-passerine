@@ -95,16 +95,22 @@ export function explainRunStatus({
         next: 'Answer it in the Inbox; the run continues from there, and the execution clock starts when you decide.',
         live: true,
       };
+    // Succeeded is the one genuinely final state: this run has nothing left
+    // to do, and starting the request again produces a different run.
     case 'succeeded':
       return { summary: `Finished ${since} ago.`, live: false };
+    // Failed and cancelled are resumable, so they are not final. The page
+    // keeps watching: another tab, another operator, or a reconciler can put
+    // this run back to work, and a page that stopped looking would go on
+    // offering actions against a state that no longer exists.
     case 'failed':
       return {
         summary: `Failed ${since} ago.`,
         next: 'The reason is below, where one was recorded.',
-        live: false,
+        live: true,
       };
     case 'cancelled':
-      return { summary: `Cancelled ${since} ago.`, live: false };
+      return { summary: `Cancelled ${since} ago.`, live: true };
     default:
       return { summary: `${status} since ${since} ago.`, live: false };
   }
