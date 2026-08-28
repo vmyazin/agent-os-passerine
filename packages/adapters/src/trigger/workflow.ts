@@ -497,37 +497,141 @@ async function recordStepProgress(
   });
 }
 
+/**
+ * A tool name reaches us on the provider event stream, so it is rendered only
+ * when it still looks like a tool identifier. Anything else keeps the unnamed
+ * wording instead of putting provider-controlled text in front of the
+ * operator, and no other part of a runtime payload is ever persisted.
+ */
+const RUNTIME_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/;
+
+/**
+ * Runtime error codes are a closed set the providers normalize into, so the
+ * operator can be told which failure this was. A provider's own free-text
+ * error message is never rendered.
+ */
+const RUNTIME_ERROR_NOTES = new Map<string, string>([
+  ['model_rate_limited_error', 'Model provider rate limited the session'],
+  ['model_overloaded_error', 'Model provider was overloaded'],
+  ['model_request_failed_error', 'Model request failed'],
+  ['mcp_connection_failed_error', 'Tool server connection failed'],
+  ['mcp_authentication_failed_error', 'Tool server rejected authentication'],
+  ['billing_error', 'Model provider rejected the request for billing'],
+  ['credential_host_unreachable_error', 'Credential host was unreachable'],
+  ['turn_limit', 'Model used up its turns without finishing'],
+]);
+
+const MAX_PROGRESS_SAMPLES_PER_NOTE = 3;
+/** Distinct notes are bounded, but keep one attempt's feed readable anyway. */
+const MAX_PROGRESS_NOTES_PER_ATTEMPT = 60;
+const MAX_TRACKED_TOOL_CALLS = 64;
+
+function payloadField(payload: unknown, key: string): unknown {
+  return typeof payload === 'object' && payload !== null
+    ? Reflect.get(payload, key)
+    : undefined;
+}
+
+function runtimeToolName(payload: unknown, key: string): string | undefined {
+  const value = payloadField(payload, key);
+  return typeof value === 'string' && RUNTIME_TOOL_NAME.test(value)
+    ? value
+    : undefined;
+}
+
+function runtimeToolUseId(payload: unknown): string | undefined {
+  const value = payloadField(payload, 'toolUseId');
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+    ? value
+    : undefined;
+}
+
+interface RuntimeProgressNote {
+  readonly phase: StepProgressPhase;
+  readonly message: string;
+  /**
+   * Distinguishes notes that share an event type -- one per tool, and a
+   * failing tool apart from a succeeding one -- so each is sampled on its
+   * own instead of the first three events of a type hiding the rest.
+   */
+  readonly variant: string;
+}
+
 function runtimeProgress(
-  type: RuntimeEvent['type'],
-): readonly [phase: StepProgressPhase, message: string] | undefined {
-  switch (type) {
+  event: RuntimeEvent,
+  toolCalls: ReadonlyMap<string, string>,
+): RuntimeProgressNote | undefined {
+  const note = (
+    phase: StepProgressPhase,
+    message: string,
+    variant = '',
+  ): RuntimeProgressNote => ({ phase, message, variant });
+  switch (event.type) {
     case 'message':
+      return note('working', 'Model sent a message');
     case 'thread_message':
+      return note('working', 'Subagent exchanged a message');
     case 'message_summary':
+      return note('working', 'Model compacted its context');
     case 'progress':
-      return ['working', 'Model sent a progress update'];
-    case 'tool_call':
-      return ['tool', 'Model is using a tool'];
-    case 'tool_result':
-      return ['tool', 'Tool finished'];
+      return note('working', 'Model is thinking');
+    case 'tool_call': {
+      const tool = runtimeToolName(event.payload, 'name');
+      if (tool === undefined) return note('tool', 'Model is using a tool');
+      const server = runtimeToolName(event.payload, 'mcpServerName');
+      return note(
+        'tool',
+        server === undefined
+          ? `Model is using ${tool}`
+          : `Model is using ${tool} via ${server}`,
+        tool,
+      );
+    }
+    case 'tool_result': {
+      const failed = payloadField(event.payload, 'isError') === true;
+      const linked = runtimeToolUseId(event.payload);
+      const tool =
+        runtimeToolName(event.payload, 'name') ??
+        (linked === undefined ? undefined : toolCalls.get(linked));
+      if (tool === undefined)
+        return note(
+          'tool',
+          failed ? 'A tool reported an error' : 'Tool finished',
+          failed ? 'failed' : '',
+        );
+      return note(
+        'tool',
+        failed ? `${tool} reported an error` : `${tool} finished`,
+        failed ? `${tool}:failed` : tool,
+      );
+    }
     case 'input_acknowledged':
-      return ['waiting', 'Model received the request'];
+      return note('waiting', 'Model received the request');
     case 'running':
     case 'thread_running':
-      return ['working', 'Model is working'];
+      return note('working', 'Model is working');
     case 'rescheduling':
     case 'thread_rescheduling':
-      return ['waiting', 'Model session is rescheduling'];
+      return note('waiting', 'Model session is rescheduling');
     case 'requires_action':
-      return ['waiting', 'Model requested an action'];
-    case 'error':
+      return note('waiting', 'Model requested an action');
     case 'retries_exhausted':
-      return ['failed', 'Model session reported an error'];
+      return note('failed', 'Model session ran out of provider retries');
+    case 'error': {
+      const code =
+        payloadField(event.payload, 'code') ??
+        payloadField(event.payload, 'reason');
+      const named =
+        typeof code === 'string' ? RUNTIME_ERROR_NOTES.get(code) : undefined;
+      return named === undefined
+        ? note('failed', 'Model session reported an error')
+        : note('failed', named, named);
+    }
     case 'idle':
     case 'terminated':
     case 'thread_idle':
     case 'thread_terminated':
-      return ['working', 'Model response received'];
+      return note('working', 'Model response received');
     default:
       return undefined;
   }
@@ -540,7 +644,9 @@ async function consumeEvents(
   step: StepProgressContext,
 ): Promise<void> {
   let count = 0;
-  const progressCounts = new Map<RuntimeEvent['type'], number>();
+  let notes = 0;
+  const progressCounts = new Map<string, number>();
+  const toolCalls = new Map<string, string>();
   for await (const event of dependencies.runtime.events(handle)) {
     const run = await dependencies.repository.getRun(
       persistenceId('run', runId),
@@ -565,21 +671,32 @@ async function consumeEvents(
     ) {
       throw new WorkflowPermanentError('runtime emitted a malformed event');
     }
-    const progress = runtimeProgress(event.type);
-    if (progress !== undefined) {
-      const occurrence = (progressCounts.get(event.type) ?? 0) + 1;
-      progressCounts.set(event.type, occurrence);
+    if (event.type === 'tool_call' && toolCalls.size < MAX_TRACKED_TOOL_CALLS) {
+      // Result events carry the id of the call they answer but not its name,
+      // so remember the mapping to name the tool that just finished.
+      const toolUseId = runtimeToolUseId(event.payload);
+      const toolName = runtimeToolName(event.payload, 'name');
+      if (toolUseId !== undefined && toolName !== undefined)
+        toolCalls.set(toolUseId, toolName);
+    }
+    const progress = runtimeProgress(event, toolCalls);
+    if (progress !== undefined && notes < MAX_PROGRESS_NOTES_PER_ATTEMPT) {
+      const variantKey = `${event.type}:${progress.variant}`;
+      const occurrence = (progressCounts.get(variantKey) ?? 0) + 1;
+      progressCounts.set(variantKey, occurrence);
       // Provider streams can emit thousands of repetitive message/tool
-      // updates. Three samples per event type preserve the operational story
+      // updates. Sampling each distinct note -- so every tool the model
+      // reaches for is named at least once -- preserves the operational story
       // without letting progress crowd newer run events out of the page read.
-      if (occurrence <= 3) {
+      if (occurrence <= MAX_PROGRESS_SAMPLES_PER_NOTE) {
+        notes += 1;
         await recordStepProgress(
           dependencies,
           runId,
           step,
-          `runtime:${event.type}:${String(occurrence)}`,
-          progress[0],
-          progress[1],
+          `runtime:${variantKey}:${String(occurrence)}`,
+          progress.phase,
+          progress.message,
           event.occurredAt.toISOString(),
         );
       }
@@ -624,6 +741,27 @@ function isTransientOperationError(error: unknown): boolean {
       (typeof code === 'string' && code.startsWith('08'))
     )
       return true;
+    candidate = Reflect.get(candidate, 'cause');
+  }
+  return false;
+}
+
+/**
+ * Statuses that mean the provider refused the create request outright, so no
+ * session exists and no model time was bought. Ambiguous outcomes -- a
+ * timeout, throttling, a conflict, any server fault -- are deliberately
+ * absent: those keep the conservative "charge the reservation" behaviour
+ * because a session may well be running and spending.
+ */
+const DEFINITE_START_REJECTIONS = new Set([400, 401, 403, 404, 422]);
+
+function isDefiniteStartRejection(error: unknown): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const status = Reflect.get(candidate, 'status');
+    if (typeof status === 'number')
+      return DEFINITE_START_REJECTIONS.has(status);
     candidate = Reflect.get(candidate, 'cause');
   }
   return false;
@@ -1063,8 +1201,13 @@ async function runAgentStep<T>(
               throw startError;
             }
             const classified = classifiedRuntimeError(startError);
-            if (!(classified instanceof WorkflowTransientError))
+            if (!(classified instanceof WorkflowTransientError)) {
+              // A refused create request bought nothing, so releasing the
+              // attempt keeps a rejection from being billed as a full session.
+              if (isDefiniteStartRejection(startError))
+                runtimeStartAttempted = false;
               throw classified;
+            }
             if (dependencies.runtime.reconcileStart === undefined)
               throw new WorkflowPermanentError(
                 'runtime provider does not support start reconciliation',
