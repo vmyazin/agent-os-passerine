@@ -419,6 +419,33 @@ async function latestResumeMs(
   return latest;
 }
 
+/**
+ * How many times an operator has resumed this run. Attempt numbering restarts
+ * on resume, so anything keyed by (step, attempt) that must survive across
+ * executions -- the usage ledger -- needs the generation in its identity: the
+ * previous execution's attempt 1 is money already spent, this execution's
+ * attempt 1 is new money, and one may never overwrite the other.
+ */
+async function resumeGenerationOf(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  const events = await dependencies.repository.listEvents(
+    persistenceId('run', runId),
+    { limit: 1_000 },
+  );
+  let generation = 0;
+  for (const event of events) {
+    if (event.type !== RUN_RESUMED_EVENT) continue;
+    const value = payloadField(event.payload, 'generation');
+    generation =
+      typeof value === 'number' && Number.isSafeInteger(value)
+        ? Math.max(generation, value)
+        : generation + 1;
+  }
+  return generation;
+}
+
 async function grantedBudgetOverride(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
@@ -882,6 +909,10 @@ async function runAgentStep<T>(
   ) => Promise<unknown>,
 ): Promise<T> {
   const inputFingerprint = hash(input);
+  const resumeGeneration = await resumeGenerationOf(
+    dependencies,
+    workflow.runId,
+  );
   const existing = await dependencies.repository.listStepRuns(
     persistenceId('run', workflow.runId),
     { limit: 100 },
@@ -1127,9 +1158,18 @@ async function runAgentStep<T>(
           }
         }
         usageDraft = {
+          // Attempt numbering restarts on resume, but the previous
+          // execution's records are money already spent: this attempt's
+          // record needs its own identity or the append conflicts with
+          // history and kills the run. Generation zero renders the exact id
+          // every record before resume existed was written under.
           idempotencyId: persistenceId(
             'usage',
-            `usage:${workflow.runId}:${stepKey}:${String(attempt)}`,
+            `usage:${workflow.runId}:${stepKey}:${String(attempt)}${
+              resumeGeneration === 0
+                ? ''
+                : `:resume:${String(resumeGeneration)}`
+            }`,
           ),
           runId: persistenceId('run', workflow.runId),
           stepRunId: stepId,

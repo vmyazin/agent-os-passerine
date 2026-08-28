@@ -1609,6 +1609,14 @@ describe('durable feature workflow', () => {
     // run. The specification's succeeded step run is deliberately untouched.
     const released = await checkpoints.releaseRunForResume('run-1');
     expect(released.released).toBeGreaterThan(0);
+    await f.repository.appendEvent({
+      runId: persistenceId('run', 'run-1'),
+      eventId: persistenceId('event', 'run-resumed-1'),
+      fingerprint: 'run-resumed-1',
+      type: RUN_RESUMED_EVENT,
+      payload: { generation: 1 },
+      occurredAt: now,
+    });
     await f.repository.transitionRun(
       persistenceId('run', 'run-1'),
       ['failed'],
@@ -1618,6 +1626,11 @@ describe('durable feature workflow', () => {
     // The resumed pass is handed ONLY the four remaining steps. If it tried to
     // re-run specification it would consume the planning output here and fail.
     const resumed = new FakeRuntime(f.stepOutputs.slice(1));
+    // Attempt numbering restarts on resume while the failed pass's usage rows
+    // stay behind, so the resumed attempts must not report the exact same
+    // token counts -- identical content would mask an id collision with the
+    // immutable ledger, which is precisely what killed a real resumed run.
+    resumed.reportedUsage = { inputTokens: 77, outputTokens: 33, runtimeMs: 5 };
     const second = await createDurableFeatureWorkflow(
       dependencies(resumed),
     ).run(input);
@@ -1626,6 +1639,15 @@ describe('durable feature workflow', () => {
     // The whole point: four sessions, not five. The specification was replayed
     // from storage, so its model was never paid for a second time.
     expect(resumed.starts).toHaveLength(4);
+    // Both executions' planning attempts are in the ledger: the failed one is
+    // money already spent, the resumed one is new money, and neither replaced
+    // the other.
+    const usage = await f.repository.listUsage(persistenceId('run', 'run-1'));
+    expect(
+      usage.filter((entry) =>
+        String(entry.idempotencyId).includes(':planning:'),
+      ),
+    ).toHaveLength(2);
   });
 
   it('starts the execution clock at the latest resume, not the original creation', async () => {
