@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 
-import { deterministicGoalCriterionId } from '@agentos/adapters';
+import {
+  BUDGET_OVERRIDE_EVENT,
+  deterministicGoalCriterionId,
+} from '@agentos/adapters';
 
 import type {
   Approval,
@@ -94,6 +97,12 @@ export interface CreateGoalRunInput extends CreateRunInput {
  * the checkpoints that refuse a replay, and to see which resume generations a
  * run has already used.
  */
+/**
+ * The ceiling on a single override. An operator pressing a button to get past
+ * a cap should not be able to authorise an unbounded amount by mistyping.
+ */
+export const MAX_BUDGET_OVERRIDE_MICRODOLLARS = 100_000_000;
+
 export interface RunResumptionStore {
   releaseRunForResume(runId: string): Promise<{ readonly released: number }>;
   listEffects(runId: string): Promise<readonly { readonly key: string }[]>;
@@ -1888,6 +1897,50 @@ export class ControlPlaneService {
       // The reopened run is the durable intent; reconciliation retries it.
     }
     return this.project(reopened);
+  }
+
+  /**
+   * Grants a run a one-time allowance past the budget that stopped it.
+   *
+   * The grant is an append-only event on the run, so it is auditable and
+   * cannot be spent by any other run. It raises that run's daily and workflow
+   * caps by the granted amount rather than disabling the budget: an override
+   * is a decision to spend more on this piece of work, not to stop counting.
+   *
+   * Granting does not restart anything. The run still has to be resumed, so
+   * the operator sees what they are about to continue before it spends.
+   */
+  async overrideRunBudget(
+    runId: string,
+    microdollars: number,
+  ): Promise<RunProjection> {
+    if (
+      !Number.isSafeInteger(microdollars) ||
+      microdollars <= 0 ||
+      microdollars > MAX_BUDGET_OVERRIDE_MICRODOLLARS
+    )
+      throw new ServiceError(
+        'invalid_budget_override',
+        'a budget override must be a positive amount no larger than $100',
+        422,
+      );
+    const run = await this.repository.getRun(persistenceId('run', runId));
+    if (run === undefined)
+      throw new ServiceError('not_found', 'run not found', 404);
+    const at = this.clock();
+    await this.repository.appendEvent({
+      runId: run.id,
+      eventId: persistenceId(
+        'event',
+        `budget-override:${runId}:${String(at)}`,
+      ),
+      fingerprint: fingerprint(`budget-override:${runId}:${String(at)}`),
+      type: BUDGET_OVERRIDE_EVENT,
+      payload: { microdollars },
+      occurredAt: at,
+    });
+    const refreshed = await this.repository.getRun(run.id);
+    return this.project(refreshed ?? run);
   }
 
   async listTrustedGoalCommands(

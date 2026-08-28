@@ -386,6 +386,52 @@ async function claimEffect(
   };
 }
 
+/**
+ * An operator can grant a run a one-time allowance to carry it past a budget
+ * that stopped it. The grant is an append-only event on the run, so it is
+ * auditable, it cannot be applied to a different run, and re-reading it is
+ * what makes it survive a worker restart.
+ *
+ * The allowance raises the limits used for both admission and settlement, so
+ * a run admitted under an override is also allowed to settle under it -- a
+ * grant that only moved the admission gate would let a step run and then fail
+ * for spending what it was just permitted to spend.
+ */
+export const BUDGET_OVERRIDE_EVENT = 'run.budget_override_granted';
+
+async function grantedBudgetOverride(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  const events = await dependencies.repository.listEvents(
+    persistenceId('run', runId),
+    { limit: 1_000 },
+  );
+  let granted = 0;
+  for (const event of events) {
+    if (event.type !== BUDGET_OVERRIDE_EVENT) continue;
+    const amount = payloadField(event.payload, 'microdollars');
+    if (typeof amount !== 'number' || !Number.isSafeInteger(amount)) continue;
+    if (amount <= 0) continue;
+    granted += amount;
+  }
+  return granted;
+}
+
+async function budgetLimitsWithOverrides(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<ReturnType<typeof resolveWorkflowBudgetLimits>> {
+  const base = resolveWorkflowBudgetLimits(dependencies);
+  const granted = await grantedBudgetOverride(dependencies, runId);
+  if (granted === 0) return base;
+  return {
+    ...base,
+    workflowLimitMicrodollars: base.workflowLimitMicrodollars + granted,
+    dailyLimitMicrodollars: base.dailyLimitMicrodollars + granted,
+  };
+}
+
 async function sumWorkflowUsage(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
@@ -956,7 +1002,10 @@ async function runAgentStep<T>(
       continue;
     }
 
-    const budgetLimits = resolveWorkflowBudgetLimits(dependencies);
+    const budgetLimits = await budgetLimitsWithOverrides(
+      dependencies,
+      workflow.runId,
+    );
     const projectDailyUsage = resolveProjectDailyUsageMicrodollars(dependencies);
     const workflowSpent = await sumWorkflowUsage(dependencies, workflow.runId);
     const dailySpent = await projectDailyUsage(

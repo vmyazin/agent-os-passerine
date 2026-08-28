@@ -219,6 +219,16 @@ export const backlogProjectionSchema = z
   })
   .strict();
 
+/**
+ * A one-time allowance past a budget that stopped a run. Bounded here as well
+ * as in the service so an oversized amount is refused before it reaches it.
+ */
+export const budgetOverrideSchema = z
+  .object({
+    microdollars: z.number().int().positive().max(100_000_000),
+  })
+  .strict();
+
 export const runProjectionSchema = z
   .object({
     id: id,

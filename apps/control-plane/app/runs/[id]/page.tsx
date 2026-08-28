@@ -11,6 +11,7 @@ import {
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import {
   CancelRunAction,
+  OverrideRunBudgetAction,
   RestartRunAction,
   ResumeRunAction,
 } from '../../../src/ui/mutation-forms';
@@ -89,6 +90,17 @@ export default async function RunPage({
                     and commit it started from. Start again re-runs the whole
                     request against the configuration applied now.
                   </p>
+                  {run.error?.code === 'budget_exhausted' ? (
+                    <>
+                      <p className="run-status-explanation">
+                        A budget stopped this run, so resuming it alone would
+                        stop at the same place. Allowing more raises this run&apos;s
+                        caps by that amount; it does not change the project&apos;s
+                        budget or start anything.
+                      </p>
+                      <OverrideRunBudgetAction runId={run.id} />
+                    </>
+                  ) : null}
                   <ResumeRunAction runId={run.id} />
                 </>
               ) : null}

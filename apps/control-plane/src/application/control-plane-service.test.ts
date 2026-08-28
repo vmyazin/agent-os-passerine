@@ -2154,6 +2154,79 @@ runtime: { provider: local }
     );
   });
 
+  it('records a budget override on the run without starting anything', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart, requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+    );
+    const applied = await service.applyConfiguration('override-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('override-1', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, run.id);
+    requestStart.mockClear();
+
+    await service.overrideRunBudget(run.id, 2_000_000);
+
+    const events = await repository.listEvents(persistenceId('run', run.id), {
+      limit: 100,
+    });
+    const granted = events.filter(
+      (event) => event.type === 'run.budget_override_granted',
+    );
+    expect(granted).toHaveLength(1);
+    expect(granted[0]?.payload).toMatchObject({ microdollars: 2_000_000 });
+    // Authorising the spend and continuing the run are separate decisions.
+    expect(requestStart).not.toHaveBeenCalled();
+    await expect(
+      repository.getRun(persistenceId('run', run.id)),
+    ).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  it('refuses a budget override that is not a sane positive amount', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+    );
+    const applied = await service.applyConfiguration('override-cfg-2', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('override-2', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, run.id);
+
+    for (const amount of [0, -1, 1.5, 100_000_001])
+      await expect(
+        service.overrideRunBudget(run.id, amount),
+      ).rejects.toMatchObject({ code: 'invalid_budget_override' });
+  });
+
   it('refuses to resume a run that finished successfully or is still live', async () => {
     const repository = new InMemoryDomainRepository();
     const service = new ControlPlaneService(

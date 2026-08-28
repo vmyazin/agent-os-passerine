@@ -23,6 +23,7 @@ import {
   InMemoryWorkflowCheckpointStore,
   FeatureWorkflowTaskTransientError,
   WorkflowTransientError,
+  BUDGET_OVERRIDE_EVENT,
   createDurableFeatureWorkflow,
   type FeatureWorkflowRoles,
   type WorkflowApprovalWaiter,
@@ -1747,6 +1748,122 @@ describe('durable feature workflow', () => {
       reason: 'daily_budget',
     });
     expect(f.runtime.starts).toHaveLength(1);
+  });
+
+  it('carries a run past the daily cap it was granted an override for', async () => {
+    const f = await fixture();
+    // The same conditions as the daily-cap test above, which stops after one
+    // session with budget_exhausted.
+    const dependencies = () => ({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles: Object.fromEntries(
+        Object.entries(roles).map(([key, value]) => [
+          key,
+          { ...value, maxReservationMicrodollars: 100_000 },
+        ]),
+      ) as FeatureWorkflowRoles,
+      clock: () => now,
+      priceUsage: () => 1_600_001,
+      resolveTestCommand: () => 'pnpm test',
+      dailyUsageMicrodollars: async () => 3_500_000,
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    });
+
+    await f.repository.appendEvent({
+      runId: persistenceId('run', 'run-1'),
+      eventId: persistenceId('event', 'budget-override-1'),
+      fingerprint: 'budget-override-1',
+      type: BUDGET_OVERRIDE_EVENT,
+      payload: { microdollars: 5_000_000 },
+      occurredAt: now,
+    });
+
+    const result = await createDurableFeatureWorkflow(dependencies()).run(
+      input,
+    );
+
+    // Without the grant this run stops after one session; the override raises
+    // the cap it settles against as well as the one it is admitted under, so
+    // the step is not failed for spending what it was just allowed to spend.
+    // Without the grant this run settles its first session straight into
+    // daily_budget and stops after one. The grant carries it well past that.
+    expect(result).not.toMatchObject({ reason: 'daily_budget' });
+    expect(f.runtime.starts.length).toBeGreaterThan(1);
+    // The grant raises the daily and workflow caps by what was granted; it is
+    // not a licence to spend without limit, so the run still stops at a cap.
+    expect(result).toMatchObject({
+      status: 'budget_exhausted',
+      reason: 'workflow_budget',
+    });
+  });
+
+  it('ignores a budget override that is not a positive whole amount', async () => {
+    const f = await fixture();
+    for (const [index, microdollars] of [-1, 0, 1.5, 'lots'].entries())
+      await f.repository.appendEvent({
+        runId: persistenceId('run', 'run-1'),
+        eventId: persistenceId('event', `bad-override-${String(index)}`),
+        fingerprint: `bad-override-${String(index)}`,
+        type: BUDGET_OVERRIDE_EVENT,
+        payload: { microdollars } as never,
+        occurredAt: now,
+      });
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles: Object.fromEntries(
+        Object.entries(roles).map(([key, value]) => [
+          key,
+          { ...value, maxReservationMicrodollars: 100_000 },
+        ]),
+      ) as FeatureWorkflowRoles,
+      clock: () => now,
+      priceUsage: () => 1_600_001,
+      resolveTestCommand: () => 'pnpm test',
+      dailyUsageMicrodollars: async () => 3_500_000,
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result).toEqual({
+      status: 'budget_exhausted',
+      reason: 'daily_budget',
+    });
   });
 
   it('rechecks cancellation after verification and before publishing', async () => {

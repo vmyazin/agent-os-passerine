@@ -111,6 +111,67 @@ export function ApprovalActions({
  * configuration applied now -- usually the reason the operator is here.
  * Two-step, because it spends money.
  */
+/** $2.00, enough for several steps at observed per-step cost. */
+const DEFAULT_BUDGET_OVERRIDE_MICRODOLLARS = 2_000_000;
+
+/**
+ * Granting a run a one-time allowance past the budget that stopped it.
+ *
+ * Deliberately separate from resuming. Granting raises this run's caps and
+ * changes nothing else, so the operator authorises the spend and then decides
+ * to continue -- two decisions, because the first one is about money.
+ */
+export function OverrideRunBudgetAction({
+  runId,
+  microdollars = DEFAULT_BUDGET_OVERRIDE_MICRODOLLARS,
+}: {
+  readonly runId: string;
+  readonly microdollars?: number;
+}) {
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const amount = `$${(microdollars / 1_000_000).toFixed(2)}`;
+  const grant = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Granting…');
+    const response = await fetch(`/api/runs/${runId}/budget-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ microdollars }),
+    });
+    if (response.ok) {
+      setMessage(`Granted ${amount}. Resume the run to spend it.`);
+      setPending(false);
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    setMessage(
+      typeof body.error?.message === 'string'
+        ? `Could not grant it: ${body.error.message}.`
+        : 'Could not grant it.',
+    );
+    setPending(false);
+  };
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        <button
+          className="secondary"
+          disabled={pending}
+          onClick={() => void grant()}
+          type="button"
+        >
+          {pending ? 'Granting…' : `Allow ${amount} more`}
+        </button>
+      </div>
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
 /**
  * Continuing a finished run from where it stopped, keeping the steps it
  * already paid for. Single-step, unlike starting again: it spends only what
