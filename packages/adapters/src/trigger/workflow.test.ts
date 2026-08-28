@@ -24,6 +24,7 @@ import {
   FeatureWorkflowTaskTransientError,
   WorkflowTransientError,
   BUDGET_OVERRIDE_EVENT,
+  RUN_RESUMED_EVENT,
   createDurableFeatureWorkflow,
   type FeatureWorkflowRoles,
   type WorkflowApprovalWaiter,
@@ -1625,6 +1626,63 @@ describe('durable feature workflow', () => {
     // The whole point: four sessions, not five. The specification was replayed
     // from storage, so its model was never paid for a second time.
     expect(resumed.starts).toHaveLength(4);
+  });
+
+  it('starts the execution clock at the latest resume, not the original creation', async () => {
+    // Created three hours before the clock this test drives: measured from
+    // creation, the one-hour workflow deadline passed long ago.
+    const createdAt = isoTimestamp('2026-08-17T09:00:00.000Z');
+    const dependencies = async (f: Awaited<ReturnType<typeof fixture>>) => ({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    });
+
+    const stale = await fixture('approve', createdAt);
+    const withoutResume = await createDurableFeatureWorkflow(
+      await dependencies(stale),
+    ).run(input);
+    expect(withoutResume).toEqual({
+      status: 'failed',
+      reason: 'workflow_deadline_exceeded',
+    });
+
+    const resumed = await fixture('approve', createdAt);
+    await resumed.repository.appendEvent({
+      runId: persistenceId('run', 'run-1'),
+      eventId: persistenceId('event', 'resumed-1'),
+      fingerprint: 'resumed-1',
+      type: RUN_RESUMED_EVENT,
+      payload: { generation: 1 },
+      occurredAt: now,
+    });
+    const withResume = await createDurableFeatureWorkflow(
+      await dependencies(resumed),
+    ).run(input);
+    // The clock starts when the operator decides. The approval consumed at
+    // the original run must not pull the deadline back before the resume.
+    expect(withResume.status).toBe('succeeded');
   });
 
   it('bills nothing when the provider refuses to create the session', async () => {

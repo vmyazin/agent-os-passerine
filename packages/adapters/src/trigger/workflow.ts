@@ -399,6 +399,26 @@ async function claimEffect(
  */
 export const BUDGET_OVERRIDE_EVENT = 'run.budget_override_granted';
 
+/** Appended by the control plane when an operator resumes a finished run. */
+export const RUN_RESUMED_EVENT = 'run.resumed';
+
+async function latestResumeMs(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  const events = await dependencies.repository.listEvents(
+    persistenceId('run', runId),
+    { limit: 1_000 },
+  );
+  let latest = 0;
+  for (const event of events) {
+    if (event.type !== RUN_RESUMED_EVENT) continue;
+    const at = Date.parse(event.occurredAt);
+    if (Number.isFinite(at) && at > latest) latest = at;
+  }
+  return latest;
+}
+
 async function grantedBudgetOverride(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
@@ -1636,8 +1656,17 @@ export function createDurableFeatureWorkflow(
       if (run === undefined)
         throw new WorkflowPermanentError('workflow run does not exist');
       if (isTerminalRun(run.status)) return terminalResult(run);
+      // The execution clock starts when an operator decides, not when the run
+      // was first created: an approval already re-anchors it below, and a
+      // resume is the same kind of decision. Anchoring a resumed run at its
+      // original creation would hand it a deadline that had already passed --
+      // it would fail on the clock while replaying work it had already paid
+      // for.
       let deadlineMs =
-        Date.parse(run.createdAt) + FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
+        Math.max(
+          Date.parse(run.createdAt),
+          await latestResumeMs(dependencies, workflow.runId),
+        ) + FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
       const started = await dependencies.repository.transitionRun(
         runId,
         ['pending', 'running', 'waiting'],
@@ -1832,9 +1861,14 @@ export function createDurableFeatureWorkflow(
         if (consumed?.consumedAt === undefined) {
           throw new WorkflowPermanentError('approval_consumed_at_missing');
         }
-        deadlineMs =
+        // Never backwards: on a resumed run the approval was consumed before
+        // the resume, and re-anchoring to it would hand the run a deadline
+        // that already passed while it was replaying paid-for work.
+        deadlineMs = Math.max(
+          deadlineMs,
           Date.parse(consumed.consumedAt) +
-          FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
+            FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs,
+        );
 
         if (
           (await transitionCurrentRun(dependencies, runId, ['waiting'], {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   BUDGET_OVERRIDE_EVENT,
+  RUN_RESUMED_EVENT,
   deterministicGoalCriterionId,
 } from '@agentos/adapters';
 
@@ -1886,6 +1887,22 @@ export class ControlPlaneService {
         'this run changed while it was being resumed; try again',
         409,
       );
+    // The worker anchors the run's execution deadline at the latest resume,
+    // because the clock starts when the operator decides -- a resumed run
+    // measured from its original creation would already be out of time.
+    await this.repository.appendEvent({
+      runId: run.id,
+      // Keyed by generation, which is unique per resume by construction --
+      // two resumes in the same clock tick must still be two events.
+      eventId: persistenceId(
+        'event',
+        `run-resumed:${runId}:${String(generation)}`,
+      ),
+      fingerprint: fingerprint(`run-resumed:${runId}:${String(generation)}`),
+      type: RUN_RESUMED_EVENT,
+      payload: { generation },
+      occurredAt: at,
+    });
     try {
       await this.workflowDispatch?.requestStart({
         idempotencyKey: `workflow-start:${runId}:resume:${String(generation)}`,
