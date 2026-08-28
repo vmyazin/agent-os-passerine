@@ -10,6 +10,16 @@ export class ManagedAgentsLimitError extends Error {
   override readonly name = 'ManagedAgentsLimitError';
 }
 
+export class ManagedAgentsSessionMissingError extends Error {
+  override readonly name = 'ManagedAgentsSessionMissingError';
+  /** Matches the workflow's transient-error classification. */
+  readonly code = 'runtime_session_missing';
+
+  constructor() {
+    super('Session no longer exists at the provider');
+  }
+}
+
 export class ManagedAgentsProviderError extends Error {
   override readonly name = 'ManagedAgentsProviderError';
 

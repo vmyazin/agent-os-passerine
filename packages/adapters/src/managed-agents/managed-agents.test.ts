@@ -1331,6 +1331,35 @@ describe('bounded normalization, replay, output, and usage', () => {
     });
   });
 
+  it('fails fast when a silent stream hides a session the provider lost', async () => {
+    const { client, provider } = await syncedProvider();
+    const handle = await provider.start({
+      runId: 'run-1',
+      stepId: 'step-1',
+      agentId: 'writer',
+      environmentId: 'node',
+      input: 'work',
+    });
+    // A session that dies server-side leaves its long-poll stream open and
+    // silent: hang the stream forever and delete the session behind it.
+    client.beta.sessions.events.stream = async () => ({
+      [Symbol.asyncIterator]: () => ({
+        next: (): Promise<IteratorResult<ManagedAgentsEvent>> =>
+          new Promise<never>(() => {}),
+      }),
+    });
+    client.sessions.delete(handle.id);
+
+    const events: unknown[] = [];
+    await expect(
+      (async () => {
+        for await (const event of provider.events(handle)) events.push(event);
+      })(),
+    ).rejects.toThrow('Session no longer exists at the provider');
+    expect(events).toEqual([]);
+    expect(client.operationLog).toContain(`retrieve:${handle.id}`);
+  });
+
   it('normalizes streamed usage events that omit active_seconds', async () => {
     const { client, provider } = await syncedProvider();
     const handle = await provider.start({
