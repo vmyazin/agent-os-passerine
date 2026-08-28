@@ -4,6 +4,11 @@
 
 **Goal:** Make Passerine's bounded source tree ingest quickly and fail visibly so the existing Agent OS feature run can reach specification approval.
 
+> **Follow-up decision — 2026-08-26:** Add a separate 24 MiB Managed Agents
+> access-file limit so the approved bounded source bundle can be mounted without
+> raising the 1 MiB model-output limit. This overrides the Managed Agents entry
+> in the do-not-modify list only for Task 4 below.
+
 **Architecture:** Keep the single canonical `source-bundle-v1` artifact, but raise its shared bounded whole-repository policy to 16 MiB of decoded content and 24 MiB serialized. Preflight local blob sizes from `git ls-tree -l`, read validated blobs through one byte-parsed `git cat-file --batch` process, and record any stable source-ingestion failure on the durable source effect before rethrowing.
 
 **Tech Stack:** TypeScript, Node.js child processes and Buffers, Git plumbing, Vitest, pnpm/Turbo, Next.js control plane, Trigger.dev local worker.
@@ -27,7 +32,7 @@
 
 - `agentos/start-work-test.yaml` except to remove this temporary untracked live-test file after the run no longer needs it.
 - Any user-facing "Setup" or "Start Work" copy; Agent OS itself owns that feature payload.
-- `packages/adapters/src/artifacts/**`, `packages/adapters/src/managed-agents/**`, Trigger task payloads, source-bundle consumers, workflow state machines, application reconciliation, HTTP routes, database schemas, UI components, project import, or publication.
+- `packages/adapters/src/artifacts/**`, Trigger task payloads, workflow state machines, application reconciliation, HTTP routes, database schemas, UI components, project import, or publication. Managed Agents files remain excluded except for the exact Task 4 limit split.
 - The main checkout's unrelated `agentos/agent-os.yaml`.
 - Provider credentials, `.env.local`, or the current run's budget/config snapshot.
 
@@ -597,6 +602,39 @@ Trigger start.
 git add packages/adapters/src/trigger/outbox.ts packages/adapters/src/trigger/outbox.test.ts
 git commit -m "fix(adapters): surface source ingestion failures"
 ```
+
+### Task 3a: Split Managed Agents access and output limits
+
+**Files:**
+- Modify `packages/adapters/src/managed-agents/types.ts`
+- Modify `packages/adapters/src/managed-agents/provider.ts`
+- Modify `packages/adapters/src/managed-agents/managed-agents.test.ts`
+
+- [x] **Step 1: Prove mounted access files use an independent ceiling**
+
+Add a focused test that configures `maxAccessFileBytes` above
+`maxOutputBytes`, accepts a file at the access limit, and rejects one byte over
+with an access-specific error. Also prove the default accepts a source payload
+above the former 1 MiB ceiling.
+
+```bash
+pnpm --filter @agentos/adapters test -- managed-agents.test.ts
+```
+
+Expected: the new assertions fail because access files still use
+`maxOutputBytes`.
+
+- [x] **Step 2: Add the bounded access-file limit**
+
+Add `maxAccessFileBytes` to `ManagedAgentsLimits` and `RequiredLimits`, default
+it to the shared 24 MiB source-bundle ceiling, and use it only when validating
+mounted files. Keep `maxOutputBytes` unchanged for collected model output.
+
+```bash
+pnpm --filter @agentos/adapters test -- managed-agents.test.ts
+```
+
+Expected: focused tests pass.
 
 ### Task 4: Verify the adapter and repository
 

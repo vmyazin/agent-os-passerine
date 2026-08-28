@@ -95,8 +95,8 @@ interface RequiredLimits {
   maxRemoteResources: number;
   maxListedEvents: number;
   maxEventBytes: number;
-  maxOutputBytes: number;
   maxAccessFileBytes: number;
+  maxOutputBytes: number;
   maxStreamDurationMs: number;
   maxStreamReconnects: number;
   streamReconnectDelayMs: number;

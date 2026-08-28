@@ -1014,6 +1014,95 @@ describe('durable feature workflow', () => {
     );
   });
 
+  it('retries an ambiguously committed usage write without another paid session', async () => {
+    const f = await fixture();
+    const appendUsage = f.repository.appendUsage.bind(f.repository);
+    const payloads: string[] = [];
+    let appendAttempts = 0;
+    f.repository.appendUsage = async (usage) => {
+      appendAttempts += 1;
+      payloads.push(JSON.stringify(usage));
+      const recorded = await appendUsage(usage);
+      if (appendAttempts === 1) {
+        const reset = Object.assign(new Error('connection reset'), {
+          code: 'ECONNRESET',
+        });
+        throw new Error('Failed query', { cause: reset });
+      }
+      return recorded;
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('succeeded');
+    expect(appendAttempts).toBe(6);
+    expect(payloads[1]).toBe(payloads[0]);
+    expect(f.runtime.starts).toHaveLength(5);
+  });
+
+  it('does not retry a permanent usage persistence error', async () => {
+    const f = await fixture();
+    let appendAttempts = 0;
+    f.repository.appendUsage = async () => {
+      appendAttempts += 1;
+      throw new Error('permanent usage constraint failure');
+    };
+
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => {
+          throw new Error('unexpected');
+        },
+      },
+    }).run(input);
+
+    expect(result.status).toBe('failed');
+    expect(appendAttempts).toBe(1);
+    expect(f.runtime.starts).toHaveLength(1);
+  });
+
   it('records bounded operational progress without persisting runtime payloads', async () => {
     const f = await fixture();
     f.runtime.events = async function* () {

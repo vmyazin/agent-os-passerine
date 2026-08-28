@@ -2,6 +2,13 @@
 
 Status: Approved design
 
+> **Follow-up decision — 2026-08-26:** The live self-test proved that the
+> Managed Agents provider incorrectly reuses its 1 MiB model-output ceiling for
+> mounted access files. Add a distinct access-file ceiling equal to the approved
+> 24 MiB serialized source-bundle limit, while preserving the 1 MiB model-output
+> ceiling. This overrides the earlier Managed Agents non-goal only for the two
+> limit fields, one upload guard, and their focused tests.
+
 > **Follow-up decision — 2026-08-26:** The byte-protocol parser's focused unit
 > coverage lives in `packages/adapters/src/local-git/git.test.ts`, beside the
 > helper it verifies. This adds that file to the test boundary below and
@@ -42,6 +49,8 @@ feature run can proceed through Agent OS itself.
   effect so the existing run diagnostics can explain why dispatch stopped.
 - Retry a failed or expired source-ingestion effect safely without starting the
   workflow until a source artifact has completed successfully.
+- Allow the resulting bounded source bundle to cross the Managed Agents access
+  boundary without increasing the model-output ceiling.
 - Unblock and resume the existing Agent OS self-test without spending model
   tokens before source ingestion succeeds.
 
@@ -52,7 +61,8 @@ feature run can proceed through Agent OS itself.
   1 MiB, more than 5,000 files, binary files, symlinks, submodules, Git LFS
   hydration, sparse checkouts, or nested repositories.
 - Changing `source-bundle-v1`, artifact storage, R2 transport, Managed Agents
-  mounts, prompts, sandbox materialization, or provider upload behavior.
+  mount semantics, prompts, or sandbox materialization. The Managed Agents
+  access-file byte guard is the only provider-upload behavior in scope.
 - Adding ignore patterns, language-aware filtering, compression, incremental
   snapshots, or deduplication across runs.
 - Changing reconciliation policy, run state transitions, approval behavior, or

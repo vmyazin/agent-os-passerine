@@ -856,6 +856,38 @@ describe('sessions and controls', () => {
     ).resolves.toMatchObject({ resources: [expect.any(Object)] });
   });
 
+  it('honors a configured access-file ceiling independently from output', async () => {
+    const { provider } = await syncedProvider(new FakeManagedAgentsClient(), {
+      limits: { maxAccessFileBytes: 8, maxOutputBytes: 4 },
+    });
+    await expect(
+      provider.provisionSessionAccess({
+        idempotencyKey: 'resource-exact-access-limit',
+        files: [
+          {
+            filename: 'exact.bin',
+            mediaType: 'application/octet-stream',
+            bytes: new Uint8Array(8),
+            mountPath: '/workspace/inputs/exact.bin',
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({ resources: [expect.any(Object)] });
+    await expect(
+      provider.provisionSessionAccess({
+        idempotencyKey: 'resource-over-access-limit',
+        files: [
+          {
+            filename: 'over.bin',
+            mediaType: 'application/octet-stream',
+            bytes: new Uint8Array(9),
+            mountPath: '/workspace/inputs/over.bin',
+          },
+        ],
+      }),
+    ).rejects.toThrow('Access file exceeds maxAccessFileBytes');
+  });
+
   it('provisions restart-idempotent scoped MCP vault auth and mounted files without putting the bearer in session input', async () => {
     const { client, provider } = await syncedProvider();
     const accessRequest = {

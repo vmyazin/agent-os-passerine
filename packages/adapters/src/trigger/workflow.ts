@@ -17,6 +17,7 @@ import {
   type RuntimeOutput,
   type RuntimeUsage,
   type StepRun,
+  type UsageRecordEntry,
   type WorkflowRun,
   type WorkflowRunUpdate,
 } from '@agentos/core';
@@ -591,6 +592,43 @@ async function consumeEvents(
   }
 }
 
+const TRANSIENT_ERROR_CODES = new Set<unknown>([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EPIPE',
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'timeout_error',
+  'overloaded_error',
+  'rate_limit_error',
+  'runtime_session_missing',
+  '40001',
+  '40P01',
+  429,
+  502,
+  503,
+  504,
+]);
+
+function isTransientOperationError(error: unknown): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const code = Reflect.get(candidate, 'code');
+    const status = Reflect.get(candidate, 'status');
+    if (
+      TRANSIENT_ERROR_CODES.has(code) ||
+      TRANSIENT_ERROR_CODES.has(status) ||
+      (typeof code === 'string' && code.startsWith('08'))
+    )
+      return true;
+    candidate = Reflect.get(candidate, 'cause');
+  }
+  return false;
+}
+
 function classifiedRuntimeError(error: unknown): Error {
   if (
     error instanceof WorkflowPermanentError ||
@@ -598,30 +636,7 @@ function classifiedRuntimeError(error: unknown): Error {
     error instanceof WorkflowBudgetExhaustedError
   )
     return error;
-  const code =
-    typeof error === 'object' && error !== null
-      ? Reflect.get(error, 'code')
-      : undefined;
-  const status =
-    typeof error === 'object' && error !== null
-      ? Reflect.get(error, 'status')
-      : undefined;
-  if (
-    code === 'ETIMEDOUT' ||
-    code === 'ECONNRESET' ||
-    code === 'timeout_error' ||
-    code === 'overloaded_error' ||
-    code === 'rate_limit_error' ||
-    code === 'runtime_session_missing' ||
-    code === 429 ||
-    code === 502 ||
-    code === 503 ||
-    code === 504 ||
-    status === 429 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504
-  )
+  if (isTransientOperationError(error))
     return new WorkflowTransientError('runtime transient failure');
   return error instanceof Error
     ? error
@@ -862,6 +877,8 @@ async function runAgentStep<T>(
     let externalSessionId: ExternalSessionId | undefined;
     let usageRecorded = false;
     let recordedMicrodollars = 0;
+    let usageDraft: UsageRecordEntry | undefined;
+    let usageFailure: unknown;
     let runtimeStartAttempted = false;
     let completedResult: T | undefined;
     let settlementFailure: WorkflowBudgetExhaustedError | undefined;
@@ -877,50 +894,62 @@ async function runAgentStep<T>(
       | undefined;
     const recordUsage = async (candidate?: RuntimeHandle): Promise<void> => {
       if (usageRecorded) return;
-      let usage: RuntimeUsage = {
-        inputTokens: 0,
-        outputTokens: 0,
-        runtimeMs: runtimeStartAttempted
-          ? FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs
-          : 0,
-      };
-      let microdollars = runtimeStartAttempted ? estimatedMicrodollars : 0;
-      if (candidate !== undefined) {
+      if (usageFailure !== undefined) throw usageFailure;
+      if (usageDraft === undefined) {
+        let usage: RuntimeUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          runtimeMs: runtimeStartAttempted
+            ? FEATURE_WORKFLOW_DEFAULTS.sessionTimeoutMs
+            : 0,
+        };
+        let microdollars = runtimeStartAttempted ? estimatedMicrodollars : 0;
+        if (candidate !== undefined) {
+          try {
+            const reported = await dependencies.runtime.usage(candidate);
+            const priced = dependencies.priceUsage(
+              reported,
+              roleDefinition.agent.model,
+            );
+            if (!Number.isSafeInteger(priced) || priced < 0)
+              throw new Error('invalid reported price');
+            usage = reported;
+            microdollars = priced;
+          } catch {
+            // Charge the full reservation if the provider cannot report usage.
+          }
+        }
+        usageDraft = {
+          idempotencyId: persistenceId(
+            'usage',
+            `usage:${workflow.runId}:${stepKey}:${String(attempt)}`,
+          ),
+          runId: persistenceId('run', workflow.runId),
+          stepRunId: stepId,
+          model: roleDefinition.agent.model,
+          pricingVersion: `${USAGE_PRICING_VERSION}:${workflow.digests.config}`,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
+          cacheCreation5mInputTokens: usage.cacheCreation5mInputTokens ?? 0,
+          cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens ?? 0,
+          runtimeMs: usage.runtimeMs,
+          microdollars,
+          recordedAt: at(dependencies.clock()),
+        };
+      }
+      for (let appendAttempt = 1; appendAttempt <= 2; appendAttempt += 1) {
         try {
-          const reported = await dependencies.runtime.usage(candidate);
-          const priced = dependencies.priceUsage(
-            reported,
-            roleDefinition.agent.model,
-          );
-          if (!Number.isSafeInteger(priced) || priced < 0)
-            throw new Error('invalid reported price');
-          usage = reported;
-          microdollars = priced;
-        } catch {
-          // Charge the full reservation if the provider cannot report usage.
+          await dependencies.repository.appendUsage(usageDraft);
+          recordedMicrodollars = usageDraft.microdollars;
+          usageRecorded = true;
+          return;
+        } catch (error) {
+          if (appendAttempt < 2 && isTransientOperationError(error)) continue;
+          usageFailure = error;
+          throw error;
         }
       }
-      const usageEntry = {
-        idempotencyId: persistenceId(
-          'usage',
-          `usage:${workflow.runId}:${stepKey}:${String(attempt)}`,
-        ),
-        runId: persistenceId('run', workflow.runId),
-        stepRunId: stepId,
-        model: roleDefinition.agent.model,
-        pricingVersion: `${USAGE_PRICING_VERSION}:${workflow.digests.config}`,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
-        cacheCreation5mInputTokens: usage.cacheCreation5mInputTokens ?? 0,
-        cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens ?? 0,
-        runtimeMs: usage.runtimeMs,
-        microdollars,
-        recordedAt: at(dependencies.clock()),
-      } as const;
-      await dependencies.repository.appendUsage(usageEntry);
-      recordedMicrodollars = microdollars;
-      usageRecorded = true;
     };
     try {
       await recordStepProgress(
