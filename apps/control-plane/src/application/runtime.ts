@@ -739,6 +739,9 @@ export function controlPlaneService(): ControlPlaneService {
       deploymentRegistryHostsFromEnv(),
       approvalArtifacts,
       projectSourceGatewayFromEnv(),
+      // Resuming needs to clear the checkpoints that refuse a replay, so a
+      // deployment without a database simply cannot offer it.
+      workflowCheckpointsFromEnv(),
     );
   }
   return service;

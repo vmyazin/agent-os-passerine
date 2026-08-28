@@ -89,12 +89,25 @@ export interface CreateGoalRunInput extends CreateRunInput {
   readonly criteria: readonly CommandCriterion[];
 }
 
+/**
+ * The slice of the workflow checkpoint store a resume needs: enough to clear
+ * the checkpoints that refuse a replay, and to see which resume generations a
+ * run has already used.
+ */
+export interface RunResumptionStore {
+  releaseRunForResume(runId: string): Promise<{ readonly released: number }>;
+  listEffects(runId: string): Promise<readonly { readonly key: string }[]>;
+}
+
 /** Durable intents live in the run/approval event rows; this port delivers them. */
 export interface WorkflowDispatchOutbox {
   requestStart(request: {
     readonly idempotencyKey: string;
     readonly runId: string;
     readonly pipeline: 'feature' | 'goal';
+    /** Non-zero when an operator resumed this run, so the dispatch asks for a
+     * Trigger key that the finished execution did not already claim. */
+    readonly resumeGeneration?: number;
   }): Promise<void>;
   requestApprovalResume(request: {
     readonly idempotencyKey: string;
@@ -933,6 +946,7 @@ function projectStepProgress(event: DomainEvent):
       readonly stepRunId: string;
       readonly stepKey: string;
       readonly attempt: number;
+      readonly sequence: number;
     })
   | undefined {
   if (event.type !== 'step.progress') return undefined;
@@ -959,6 +973,7 @@ function projectStepProgress(event: DomainEvent):
     stepRunId,
     stepKey,
     attempt,
+    sequence: event.sequence,
     phase,
     message,
     occurredAt: event.occurredAt,
@@ -1023,6 +1038,7 @@ export class ControlPlaneService {
       }>;
     },
     private readonly projectSources?: ProjectSourceGateway,
+    private readonly runResumption?: RunResumptionStore,
   ) {}
 
   private requireProjectSources(): ProjectSourceGateway {
@@ -1789,6 +1805,87 @@ export class ControlPlaneService {
       ...(typeof baseRunId === 'string' ? { baseRunId } : {}),
       ...(criteria === undefined ? {} : { criteria }),
     });
+  }
+
+  /**
+   * Continues a finished run where it stopped, keeping the steps it already
+   * validated.
+   *
+   * This is the counterpart to `restartRun`, not a replacement for it. A
+   * resume re-enters the *same* run, so it reuses that run's pinned
+   * configuration and repository snapshot and replays every succeeded step
+   * from storage instead of paying a model to redo it. That is what you want
+   * when the run died for a reason outside its own inputs -- budget, a
+   * provider fault, a crashed worker. When something was *changed* to make the
+   * work succeed, the pinned snapshot is precisely wrong and `restartRun` is
+   * the right action.
+   *
+   * Trigger holds a task idempotency key for thirty days, so each resume asks
+   * for a fresh generation of both the dispatch effect key and the Trigger
+   * key; reusing either would hand back the execution that already finished.
+   */
+  async resumeRun(runId: string): Promise<RunProjection> {
+    if (this.runResumption === undefined)
+      throw new ServiceError(
+        'run_not_resumable',
+        'resuming runs is not configured',
+        503,
+      );
+    const run = await this.repository.getRun(persistenceId('run', runId));
+    if (run === undefined)
+      throw new ServiceError('not_found', 'run not found', 404);
+    if (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+      throw new ServiceError(
+        'run_not_resumable',
+        'only feature and goal runs can be resumed',
+        409,
+      );
+    // Succeeded runs have nothing left to do, and a run that has not finished
+    // may still have a worker on it -- resuming that would put two paid
+    // sessions on one run.
+    if (run.status !== 'failed' && run.status !== 'cancelled')
+      throw new ServiceError(
+        'run_not_resumable',
+        run.status === 'succeeded'
+          ? 'this run already finished'
+          : 'this run has not finished; cancel it first, then resume it',
+        409,
+      );
+    const effects = await this.runResumption.listEffects(runId);
+    const generation =
+      effects.reduce((highest, effect) => {
+        const match = /:resume:(\d+)$/.exec(effect.key);
+        return match === null
+          ? highest
+          : Math.max(highest, Number.parseInt(match[1]!, 10));
+      }, 0) + 1;
+    // Clearing before reopening: a resumed worker that reached a dead-lettered
+    // checkpoint would refuse to replay and fail the run all over again.
+    await this.runResumption.releaseRunForResume(runId);
+    const at = this.clock();
+    const reopened = await this.repository.transitionRun(
+      run.id,
+      ['failed', 'cancelled'],
+      { status: 'pending', updatedAt: at },
+      run.stateVersion ?? 0,
+    );
+    if (reopened === undefined)
+      throw new ServiceError(
+        'run_not_resumable',
+        'this run changed while it was being resumed; try again',
+        409,
+      );
+    try {
+      await this.workflowDispatch?.requestStart({
+        idempotencyKey: `workflow-start:${runId}:resume:${String(generation)}`,
+        runId,
+        pipeline: run.pipeline,
+        resumeGeneration: generation,
+      });
+    } catch {
+      // The reopened run is the durable intent; reconciliation retries it.
+    }
+    return this.project(reopened);
   }
 
   async listTrustedGoalCommands(
@@ -3044,6 +3141,14 @@ export class ControlPlaneService {
               entry !== undefined &&
               entry.stepKey === step.stepKey &&
               entry.attempt === step.attempt,
+          )
+          // Each note is stamped with the provider event's own time, which
+          // need not match the order the worker appended them in, so order by
+          // the time the operator sees before keeping the newest notes.
+          .sort(
+            (left, right) =>
+              Date.parse(left.occurredAt) - Date.parse(right.occurredAt) ||
+              left.sequence - right.sequence,
           )
           .slice(-100)
           .map(({ eventId, phase, message, occurredAt }) => ({

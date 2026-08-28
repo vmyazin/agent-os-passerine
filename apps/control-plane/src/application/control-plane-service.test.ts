@@ -1042,6 +1042,64 @@ runtime: { provider: local }
     expect(JSON.stringify(projection)).not.toContain('must never escape');
   });
 
+  it('orders step progress by the time it shows, not by append order', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'run-progress-order');
+    const stepRunId = persistenceId('stepRun', 'run-progress-order:planning:1');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.upsertStepRun({
+      id: stepRunId,
+      runId,
+      stepKey: 'planning',
+      attempt: 1,
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    // Provider events are stamped with their own times, so the worker can
+    // append a later-stamped note before an earlier-stamped one.
+    for (const [ordinal, occurredAt, message] of [
+      [1, '2026-08-17T12:00:02.000Z', 'Waiting on response'],
+      [2, '2026-08-17T12:00:01.000Z', 'Model is working'],
+    ] as const) {
+      await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', `ordered-${String(ordinal)}`),
+        fingerprint: `ordered-${String(ordinal)}`,
+        type: 'step.progress',
+        payload: {
+          stepRunId,
+          stepKey: 'planning',
+          attempt: 1,
+          phase: 'waiting',
+          message,
+        },
+        occurredAt: isoTimestamp(occurredAt),
+      });
+    }
+
+    const projection = await createService(repository).getRun(
+      'run-progress-order',
+    );
+
+    expect(projection.steps[0]?.progress.map((entry) => entry.message)).toEqual(
+      ['Model is working', 'Waiting on response'],
+    );
+  });
+
   it('uses allowlisted projection DTOs and redacts secret-bearing values', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({
@@ -1994,6 +2052,107 @@ runtime: { provider: local }
       0,
     );
   };
+
+  it('resumes the same run and asks for a dispatch generation it has not used', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const effectKeys: { key: string }[] = [];
+    const releaseRunForResume = vi.fn(async () => ({ released: 3 }));
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart, requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+      [],
+      undefined,
+      undefined,
+      { releaseRunForResume, listEffects: async () => effectKeys },
+    );
+    const applied = await service.applyConfiguration('resume-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('resume-1', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, run.id);
+
+    const resumed = await service.resumeRun(run.id);
+
+    // Same run: that is what makes its finished steps reusable.
+    expect(resumed.id).toBe(run.id);
+    expect(resumed.status).toBe('pending');
+    expect(releaseRunForResume).toHaveBeenCalledWith(run.id);
+    expect(requestStart).toHaveBeenLastCalledWith({
+      idempotencyKey: `workflow-start:${run.id}:resume:1`,
+      runId: run.id,
+      pipeline: 'feature',
+      resumeGeneration: 1,
+    });
+
+    // A second resume must not reuse the first generation: Trigger holds a key
+    // for thirty days and would hand back the execution that already ran.
+    effectKeys.push({ key: `workflow-start:${run.id}:resume:1` });
+    const reopened = await repository.getRun(persistenceId('run', run.id));
+    await repository.transitionRun(
+      persistenceId('run', run.id),
+      ['pending'],
+      { status: 'failed', updatedAt: now, completedAt: now },
+      reopened?.stateVersion ?? 0,
+    );
+    await service.resumeRun(run.id);
+    expect(requestStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resumeGeneration: 2 }),
+    );
+  });
+
+  it('refuses to resume a run that finished successfully or is still live', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+      [],
+      undefined,
+      undefined,
+      {
+        releaseRunForResume: async () => ({ released: 0 }),
+        listEffects: async () => [],
+      },
+    );
+    const applied = await service.applyConfiguration('resume-cfg-2', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const live = await service.startRunForProject('resume-2', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    // Still pending: a worker may hold it, and two paid sessions must never
+    // share one run.
+    await expect(service.resumeRun(live.id)).rejects.toMatchObject({
+      code: 'run_not_resumable',
+    });
+
+    await finish(repository, live.id, 'succeeded');
+    await expect(service.resumeRun(live.id)).rejects.toMatchObject({
+      code: 'run_not_resumable',
+    });
+  });
 
   it('re-issues the request as a new run, leaving the original as the record', async () => {
     const { repository, service, applied } = await seeded();

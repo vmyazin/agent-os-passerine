@@ -12,6 +12,7 @@ import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
 import {
   CancelRunAction,
   RestartRunAction,
+  ResumeRunAction,
 } from '../../../src/ui/mutation-forms';
 import { diagnoseDispatch } from '../../../src/ui/dispatch-diagnostics-model';
 import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
@@ -79,7 +80,20 @@ export default async function RunPage({
         </p>
         {TERMINAL_STATUSES.has(run.status) ? (
           run.pipeline === 'feature' || run.pipeline === 'goal' ? (
-            <RestartRunAction runId={run.id} />
+            <>
+              {run.status === 'failed' || run.status === 'cancelled' ? (
+                <>
+                  <p className="run-status-explanation">
+                    Resume continues this run from the step that stopped it,
+                    keeping the steps it already finished and the configuration
+                    and commit it started from. Start again re-runs the whole
+                    request against the configuration applied now.
+                  </p>
+                  <ResumeRunAction runId={run.id} />
+                </>
+              ) : null}
+              <RestartRunAction runId={run.id} />
+            </>
           ) : null
         ) : (
           <CancelRunAction

@@ -111,6 +111,48 @@ export function ApprovalActions({
  * configuration applied now -- usually the reason the operator is here.
  * Two-step, because it spends money.
  */
+/**
+ * Continuing a finished run from where it stopped, keeping the steps it
+ * already paid for. Single-step, unlike starting again: it spends only what
+ * the remaining steps cost, and the work it reuses was already bought.
+ */
+export function ResumeRunAction({ runId }: { readonly runId: string }) {
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const resume = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Resuming…');
+    const response = await fetch(`/api/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (response.ok) {
+      location.reload();
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    setMessage(
+      typeof body.error?.message === 'string'
+        ? `Could not resume it: ${body.error.message}.`
+        : 'Could not resume it.',
+    );
+    setPending(false);
+  };
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        <button disabled={pending} onClick={() => void resume()} type="button">
+          {pending ? 'Resuming…' : 'Resume'}
+        </button>
+      </div>
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
 export function RestartRunAction({ runId }: { readonly runId: string }) {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
