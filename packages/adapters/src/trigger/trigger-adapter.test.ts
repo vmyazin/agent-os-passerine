@@ -114,6 +114,45 @@ describe('Trigger SDK boundary', () => {
     ]);
   });
 
+  it('gives each resume a key Trigger has not seen, without disturbing the first', async () => {
+    const { sdk, calls } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    // Generation 0 must render exactly the key minted before resume existed,
+    // or every run already dispatched would be re-triggered on redeploy.
+    await dispatcher.startFeature('run-1', 'project-1', 0, 0);
+    await dispatcher.startFeature('run-1', 'project-1', 0, 1);
+    await dispatcher.startFeature('run-1', 'project-1', 0, 2);
+    await dispatcher.startGoal('goal-1', 'project-2', 0, 1);
+
+    const keys = calls.map(
+      (call) =>
+        (call.args[2] as { idempotencyKey: string } | undefined)
+          ?.idempotencyKey,
+    );
+    expect(keys).toEqual([
+      'feature-workflow:run-1:v1',
+      'feature-workflow:run-1:v1:resume:1',
+      'feature-workflow:run-1:v1:resume:2',
+      'goal-workflow:goal-1:v1:resume:1',
+    ]);
+    // Trigger holds a key for thirty days; a repeated generation would be
+    // handed back the finished execution instead of starting a new one.
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('refuses a resume generation that is not a whole count', async () => {
+    const { sdk } = fakeSdk();
+    const dispatcher = createTriggerWorkflowDispatcher(sdk);
+
+    await expect(
+      dispatcher.startFeature('run-1', 'project-1', 0, -1),
+    ).rejects.toThrow('resume generation');
+    await expect(
+      dispatcher.startFeature('run-1', 'project-1', 0, 1.5),
+    ).rejects.toThrow('resume generation');
+  });
+
   it('exposes the SDK boundary best-effort run state', async () => {
     const { sdk, calls } = fakeSdk();
     const dispatcher = createTriggerWorkflowDispatcher(sdk);

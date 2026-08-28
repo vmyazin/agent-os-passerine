@@ -122,11 +122,13 @@ export interface TriggerWorkflowDispatcher {
     runId: string,
     projectId: string,
     attempt?: 0 | 1,
+    resumeGeneration?: number,
   ): Promise<{ readonly externalRunRef: string }>;
   startGoal(
     runId: string,
     projectId: string,
     attempt?: 0 | 1,
+    resumeGeneration?: number,
   ): Promise<{ readonly externalRunRef: string }>;
   retrieve(
     externalRunRef: string,
@@ -134,28 +136,50 @@ export interface TriggerWorkflowDispatcher {
   cancel(externalRunRef: string): Promise<void>;
 }
 
+/**
+ * Trigger keeps a task idempotency key for thirty days, so a resumed run has
+ * to ask for a key it has not used before or it is handed back the execution
+ * that already finished. Generation 0 renders nothing, which keeps every key
+ * minted before resume existed byte-identical.
+ */
+function resumeSuffix(generation: number): string {
+  if (!Number.isSafeInteger(generation) || generation < 0)
+    throw new Error('resume generation must be a non-negative integer');
+  return generation === 0 ? '' : `:resume:${String(generation)}`;
+}
+
 export function createTriggerWorkflowDispatcher(
   sdk: TriggerSdkBoundary = createTriggerSdkBoundary(),
 ): TriggerWorkflowDispatcher {
   return Object.freeze({
-    async startFeature(runId: string, projectId: string, attempt: 0 | 1 = 0) {
+    async startFeature(
+      runId: string,
+      projectId: string,
+      attempt: 0 | 1 = 0,
+      resumeGeneration = 0,
+    ) {
       const result = await sdk.triggerTask(
         FEATURE_WORKFLOW_TASK_ID,
         { version: 'feature-task-payload-v1', runId },
         {
-          idempotencyKey: `feature-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}`,
+          idempotencyKey: `feature-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}${resumeSuffix(resumeGeneration)}`,
           idempotencyKeyTTL: '30d',
           concurrencyKey: projectId,
         },
       );
       return { externalRunRef: result.id };
     },
-    async startGoal(runId: string, projectId: string, attempt: 0 | 1 = 0) {
+    async startGoal(
+      runId: string,
+      projectId: string,
+      attempt: 0 | 1 = 0,
+      resumeGeneration = 0,
+    ) {
       const result = await sdk.triggerTask(
         GOAL_WORKFLOW_TASK_ID,
         { version: 'goal-task-payload-v1', runId },
         {
-          idempotencyKey: `goal-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}`,
+          idempotencyKey: `goal-workflow:${runId}:v1${attempt === 1 ? ':retry:1' : ''}${resumeSuffix(resumeGeneration)}`,
           idempotencyKeyTTL: '30d',
           concurrencyKey: projectId,
         },

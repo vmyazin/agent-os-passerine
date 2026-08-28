@@ -323,6 +323,27 @@ export class PostgresWorkflowCheckpointStore implements WorkflowCheckpointStore 
     }));
   }
 
+  async releaseRunForResume(runId: string): Promise<{ released: number }> {
+    const rows = await this.sql.execute(
+      `delete from "workflow_effects"
+       where "run_id" = $1 and "status" <> 'succeeded'
+       returning "effect_key"`,
+      [runId],
+    );
+    // A reservation or lease left behind by a crash keeps counting against the
+    // project's budget and its one-session-at-a-time gate, so a resume that
+    // did not clear them would be refused before it ran anything.
+    await this.sql.execute(
+      `delete from "workflow_budget_reservations" where "run_id" = $1`,
+      [runId],
+    );
+    await this.sql.execute(
+      `delete from "workflow_session_leases" where "run_id" = $1`,
+      [runId],
+    );
+    return { released: rows.length };
+  }
+
   async #require(key: string): Promise<WorkflowEffect> {
     const value = await this.getEffect(key);
     if (value === undefined)

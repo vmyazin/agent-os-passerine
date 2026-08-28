@@ -114,6 +114,8 @@ export interface DurableTriggerOutbox {
     readonly idempotencyKey: string;
     readonly runId: string;
     readonly pipeline: 'feature' | 'goal';
+    /** Non-zero when an operator resumed this run; see `resumeSuffix`. */
+    readonly resumeGeneration?: number;
   }): Promise<void>;
   requestApprovalResume(request: {
     readonly idempotencyKey: string;
@@ -400,8 +402,18 @@ export function createDurableTriggerOutbox(
         );
         if (run === undefined) throw new Error('workflow run not found');
         const result = await (request.pipeline === 'goal'
-          ? options.trigger.startGoal(request.runId, run.projectId, 1)
-          : options.trigger.startFeature(request.runId, run.projectId, 1));
+          ? options.trigger.startGoal(
+              request.runId,
+              run.projectId,
+              1,
+              request.resumeGeneration ?? 0,
+            )
+          : options.trigger.startFeature(
+              request.runId,
+              run.projectId,
+              1,
+              request.resumeGeneration ?? 0,
+            ));
         await options.checkpoints.attachExternalRef(
           retryClaim.lease,
           result.externalRunRef,
@@ -424,8 +436,18 @@ export function createDurableTriggerOutbox(
       if (run === undefined) throw new Error('workflow run not found');
       // Trigger task idempotency makes retry after an ambiguous response safe.
       const result = await (request.pipeline === 'goal'
-        ? options.trigger.startGoal(request.runId, run.projectId)
-        : options.trigger.startFeature(request.runId, run.projectId));
+        ? options.trigger.startGoal(
+            request.runId,
+            run.projectId,
+            0,
+            request.resumeGeneration ?? 0,
+          )
+        : options.trigger.startFeature(
+            request.runId,
+            run.projectId,
+            0,
+            request.resumeGeneration ?? 0,
+          ));
       await options.checkpoints.attachExternalRef(
         claim.lease,
         result.externalRunRef,

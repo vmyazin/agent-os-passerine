@@ -381,6 +381,20 @@ export interface WorkflowCheckpointStore {
     runId: string,
     now: string,
   ): Promise<readonly WorkflowBudgetReservation[]>;
+  /**
+   * Clears the checkpoints that would otherwise make a finished run refuse to
+   * continue, so an operator can resume it instead of paying to redo every
+   * step from the start.
+   *
+   * Succeeded effects are deliberately kept: they carry the approval that was
+   * already granted and the source snapshot that was already taken, and a
+   * succeeded step replays from its stored step run without ever reaching its
+   * effects. Only the unfinished ones -- including the dead-lettered effect
+   * whose whole purpose is to refuse a replay -- are released, together with
+   * the run's budget reservations and session lease, which a crash between
+   * settlement and cleanup can otherwise strand.
+   */
+  releaseRunForResume(runId: string): Promise<{ readonly released: number }>;
 }
 
 export interface DurableFeatureWorkflowDependencies {
