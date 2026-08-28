@@ -145,8 +145,27 @@ function triggerWaitDuration(deadlineMs: number, now: string): string {
   return `${String(remainingSeconds)}s`;
 }
 
+/**
+ * What actually went wrong, in terms an operator can act on.
+ *
+ * The database driver prefixes a failure with the whole statement and its
+ * parameters, so the message an operator was shown was the query rather than
+ * the reason -- a run reported "Failed query: select ... from approvals"
+ * while the cause underneath went unmentioned. The statement is dropped and
+ * the cause is reported in its place.
+ */
+function describedError(error: unknown): string {
+  if (!(error instanceof Error)) return 'workflow operation failed';
+  if (!error.message.startsWith('Failed query:')) return error.message;
+  const cause = error.cause;
+  const reason = cause instanceof Error ? cause.message.trim() : '';
+  return reason === ''
+    ? 'a database statement failed'
+    : `a database statement failed: ${reason}`;
+}
+
 function safeError(error: unknown): string {
-  return (error instanceof Error ? error.message : 'workflow operation failed')
+  return describedError(error)
     .replace(
       /((?:token|secret|password|private.?key))\s*[:=]\s*\S+/gi,
       '$1=[REDACTED]',
@@ -858,6 +877,20 @@ const TRANSIENT_ERROR_CODES = new Set<unknown>([
   504,
 ]);
 
+/**
+ * The serverless database driver reports a lost or refused connection as a
+ * bare `fetch failed`, with no code anywhere in the chain to recognise it by.
+ * Left unclassified it reads as a permanent workflow failure, which retries
+ * nothing and discards the run's remaining work over a blip.
+ */
+const TRANSIENT_ERROR_MESSAGES = [
+  'fetch failed',
+  'terminating connection',
+  'connection terminated',
+  'socket hang up',
+  'network error',
+];
+
 function isTransientOperationError(error: unknown): boolean {
   let candidate = error;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -868,6 +901,14 @@ function isTransientOperationError(error: unknown): boolean {
       TRANSIENT_ERROR_CODES.has(code) ||
       TRANSIENT_ERROR_CODES.has(status) ||
       (typeof code === 'string' && code.startsWith('08'))
+    )
+      return true;
+    const message = Reflect.get(candidate, 'message');
+    if (
+      typeof message === 'string' &&
+      TRANSIENT_ERROR_MESSAGES.some((known) =>
+        message.toLowerCase().includes(known),
+      )
     )
       return true;
     candidate = Reflect.get(candidate, 'cause');
@@ -2395,7 +2436,13 @@ export function createDurableFeatureWorkflow(
       } catch (error) {
         const latest = await dependencies.repository.getRun(runId);
         if (latest?.status === 'cancelled') return { status: 'cancelled' };
-        if (error instanceof WorkflowTransientError)
+        // Infrastructure that blinked is not a failed run: the step results
+        // already paid for are still on disk, so hand it back to Trigger to
+        // retry rather than burning the run over a lost connection.
+        if (
+          error instanceof WorkflowTransientError ||
+          isTransientOperationError(error)
+        )
           throw new FeatureWorkflowTaskTransientError(safeError(error));
         const result: FeatureWorkflowResult =
           error instanceof WorkflowBudgetExhaustedError

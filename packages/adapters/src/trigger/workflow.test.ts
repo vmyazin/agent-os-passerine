@@ -1745,6 +1745,88 @@ describe('durable feature workflow', () => {
     }
   });
 
+  it('reports a database failure by its cause, and retries it', async () => {
+    const f = await fixture();
+    // Exactly the shape the driver produces: the whole statement as the
+    // message, the actual reason underneath as the cause.
+    const failure = Object.assign(
+      new Error(
+        'Failed query: select "id", "run_id" from "approvals" where "approvals"."id" = $1\nparams: approval_x,1',
+      ),
+      { cause: new Error('fetch failed') },
+    );
+    const getApproval = f.repository.getApproval.bind(f.repository);
+    let reads = 0;
+    f.repository.getApproval = async (id) => {
+      reads += 1;
+      if (reads === 1) throw failure;
+      return getApproval(id);
+    };
+
+    await expect(
+      createDurableFeatureWorkflow({
+        repository: f.repository,
+        checkpoints: new InMemoryWorkflowCheckpointStore(),
+        artifacts: f.artifacts,
+        runtime: f.runtime,
+        approval: f.waiter,
+        roles,
+        clock: () => now,
+        priceUsage: () => 100,
+        resolveTestCommand: () => 'pnpm test',
+        verifier: {
+          verify: async () => ({
+            passed: true,
+            evidenceDigest: f.verificationMeta.digest,
+            evidenceArtifact: f.verificationMeta,
+          }),
+        },
+        publicationAuthority: { authorize: async () => ({}) },
+        publisher: {
+          publish: async () => ({
+            status: 'succeeded' as const,
+            draft: true,
+            pullRequestUrl: 'https://github.test/pr/1',
+          }),
+        },
+      }).run(input),
+      // A lost connection is infrastructure, not a failed run: it is handed
+      // back for retry instead of discarding the steps already paid for.
+    ).rejects.toMatchObject({
+      // The operator is told the reason, never the statement.
+      message: expect.stringContaining('fetch failed'),
+    });
+    const raised = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    })
+      .run(input)
+      .catch((error: unknown) => error);
+    expect(String(raised)).not.toContain('select "id"');
+  });
+
   it('sees control events past the first repository page', async () => {
     // Created long before the clock this test drives, so only the resume
     // event -- appended after 150 rows of operational chatter -- can save it
