@@ -765,22 +765,28 @@ export async function createProductionFeatureWorkflowFromEnv(
             config,
             roleDefinitions[request.role].agent,
           );
-          const stageOrUpload = (input: {
+          const stageOrUpload = async (input: {
             readonly mcpUrl?: string;
             readonly bearerToken?: string;
             readonly files: typeof files;
           }) =>
             runtimeKey === 'kimi'
-              ? kimiAccessStore.stage({
-                  files: input.files.map((file) => ({
-                    bytes: file.bytes,
-                    mountPath: file.mountPath,
+              ? {
+                  ...(await kimiAccessStore.stage({
+                    files: input.files.map((file) => ({
+                      bytes: file.bytes,
+                      mountPath: file.mountPath,
+                    })),
+                    credentials:
+                      input.bearerToken === undefined
+                        ? []
+                        : [{ token: input.bearerToken }],
                   })),
-                  credentials:
-                    input.bearerToken === undefined
-                      ? []
-                      : [{ token: input.bearerToken }],
-                })
+                  // Staged in this worker process's memory: a checkpoint of
+                  // these references must not be replayed by another worker,
+                  // which is exactly what a resume or a crash retry does.
+                  ephemeral: true,
+                }
               : projectManagedProvider.provisionSessionAccess({
                   idempotencyKey: request.idempotencyKey,
                   ...input,

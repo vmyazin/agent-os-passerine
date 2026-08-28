@@ -413,6 +413,12 @@ export interface DurableFeatureWorkflowDependencies {
     }): Promise<{
       readonly resources: readonly RuntimeFileResource[];
       readonly credentialRefs: readonly string[];
+      /**
+       * True when the references live in this worker process's memory: the
+       * checkpoint then records that access was granted, but a replay in
+       * another process must prepare fresh instead of reusing them.
+       */
+      readonly ephemeral?: boolean;
     }>;
   };
   readonly approval: WorkflowApprovalWaiter;

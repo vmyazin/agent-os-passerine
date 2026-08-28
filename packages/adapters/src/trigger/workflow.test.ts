@@ -1650,6 +1650,101 @@ describe('durable feature workflow', () => {
     ).toHaveLength(2);
   });
 
+  it('re-stages ephemeral session access instead of replaying dead references', async () => {
+    const f = await fixture();
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    let staged = 0;
+    // Process-local staging, as the kimi runtime does: each call mints ids
+    // that only mean something to the process that staged them.
+    const prepare = vi.fn(async () => ({
+      resources: [
+        { type: 'file' as const, fileId: `kimi-file-${String((staged += 1))}` },
+      ],
+      credentialRefs: [],
+      ephemeral: true,
+    }));
+    const dependencies = (runtime: RuntimeProvider) => ({
+      repository: f.repository,
+      checkpoints,
+      artifacts: f.artifacts,
+      runtime,
+      runtimeAccess: { prepare },
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    });
+
+    // First execution: planning's access is staged and checkpointed, then the
+    // step fails permanently on invalid output.
+    const failing = new FakeRuntime([
+      f.stepOutputs[0]!,
+      { artifacts: [], data: { version: 'plan-output-v1' } },
+    ]);
+    const first = await createDurableFeatureWorkflow(
+      dependencies(failing),
+    ).run(input);
+    expect(first.status).toBe('failed');
+    const firstPassIds = new Set(
+      failing.starts.flatMap(({ request }) =>
+        ((request as { resources?: { fileId: string }[] }).resources ?? []).map(
+          (resource) => resource.fileId,
+        ),
+      ),
+    );
+    expect(firstPassIds.size).toBeGreaterThan(0);
+
+    await checkpoints.releaseRunForResume('run-1');
+    await f.repository.appendEvent({
+      runId: persistenceId('run', 'run-1'),
+      eventId: persistenceId('event', 'resumed-access-1'),
+      fingerprint: 'resumed-access-1',
+      type: RUN_RESUMED_EVENT,
+      payload: { generation: 1 },
+      occurredAt: now,
+    });
+    await f.repository.transitionRun(
+      persistenceId('run', 'run-1'),
+      ['failed'],
+      { status: 'pending', updatedAt: now },
+    );
+
+    // The second execution is a different worker process: the first pass's
+    // staged ids no longer resolve anywhere. Planning's access checkpoint
+    // survived the resume as succeeded, so reusing its stored references --
+    // instead of staging fresh -- is exactly the live failure.
+    const resumed = new FakeRuntime(f.stepOutputs.slice(1));
+    resumed.reportedUsage = { inputTokens: 9, outputTokens: 4, runtimeMs: 7 };
+    const second = await createDurableFeatureWorkflow(
+      dependencies(resumed),
+    ).run(input);
+
+    expect(second.status).toBe('succeeded');
+    for (const { request } of resumed.starts) {
+      const resources =
+        (request as { resources?: { fileId: string }[] }).resources ?? [];
+      expect(resources.length).toBeGreaterThan(0);
+      for (const resource of resources)
+        expect(firstPassIds.has(resource.fileId)).toBe(false);
+    }
+  });
+
   it('starts the execution clock at the latest resume, not the original creation', async () => {
     // Created three hours before the clock this test drives: measured from
     // creation, the one-hour workflow deadline passed long ago.

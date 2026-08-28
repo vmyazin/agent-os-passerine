@@ -77,11 +77,14 @@ function parseRuntimeAccess(value: JsonValue | undefined): {
     readonly mountPath?: string;
   }[];
   readonly credentialRefs: readonly string[];
+  /** Process-local references that do not survive into another worker. */
+  readonly ephemeral?: boolean;
 } {
   if (
     !isJsonObject(value) ||
     !Array.isArray(value.resources) ||
-    !Array.isArray(value.credentialRefs)
+    !Array.isArray(value.credentialRefs) ||
+    (value.ephemeral !== undefined && typeof value.ephemeral !== 'boolean')
   )
     throw new WorkflowPermanentError('runtime access checkpoint is invalid');
   const resources = value.resources.map((resource) => {
@@ -115,7 +118,11 @@ function parseRuntimeAccess(value: JsonValue | undefined): {
   });
   if (resources.length > 32 || credentialRefs.length > 4)
     throw new WorkflowPermanentError('runtime access checkpoint is invalid');
-  return { resources, credentialRefs };
+  return {
+    resources,
+    credentialRefs,
+    ...(value.ephemeral === true ? { ephemeral: true } : {}),
+  };
 }
 
 const hash = (value: unknown): string =>
@@ -1221,8 +1228,31 @@ async function runAgentStep<T>(
           ),
           2 * 60_000,
         );
-        if (accessClaim.effect.status === 'succeeded') {
-          runtimeAccess = parseRuntimeAccess(accessClaim.effect.output);
+        const storedAccess =
+          accessClaim.effect.status === 'succeeded'
+            ? parseRuntimeAccess(accessClaim.effect.output)
+            : undefined;
+        if (storedAccess !== undefined && storedAccess.ephemeral !== true) {
+          runtimeAccess = storedAccess;
+        } else if (storedAccess !== undefined) {
+          // The checkpoint is real but its references are process-local --
+          // staged in whichever worker completed it, gone with that worker.
+          // Managed uploads are remote and reusable; local staging is cheap
+          // and side-effect-free, so a fresh preparation is the correct
+          // replay, and the succeeded effect stays as the record that access
+          // was granted.
+          runtimeAccess = parseRuntimeAccess(
+            asJson(
+              await dependencies.runtimeAccess.prepare({
+                workflow,
+                stepId,
+                logicalStepId: stepKey,
+                role,
+                stepInput: input,
+                idempotencyKey: accessKey,
+              }),
+            ),
+          );
         } else {
           await dependencies.checkpoints.markEffectStarted(
             accessClaim.lease,
