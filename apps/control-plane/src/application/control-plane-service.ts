@@ -1866,7 +1866,9 @@ export class ControlPlaneService {
     const reopened = await this.repository.transitionRun(
       run.id,
       ['failed', 'cancelled'],
-      { status: 'pending', updatedAt: at },
+      // The previous failure is cleared with the status it belonged to. A run
+      // that is pending again must not still explain why it failed.
+      { status: 'pending', error: null, output: null, updatedAt: at },
       run.stateVersion ?? 0,
     );
     if (reopened === undefined)

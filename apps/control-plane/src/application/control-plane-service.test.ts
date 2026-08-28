@@ -14,6 +14,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import { ControlPlaneService, ServiceError } from './control-plane-service';
+import { runProjectionSchema } from '../http/contracts';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const ids = (kind: string, key: string) =>
@@ -2082,6 +2083,31 @@ runtime: { provider: local }
       description: 'a page describing the purpose of the app',
       pipeline: 'feature',
     });
+    // A run worth resuming has already executed a step, and that step carries
+    // its activity. Returning one is what a resume response actually does.
+    await repository.upsertStepRun({
+      id: persistenceId('stepRun', `${run.id}:specification:1`),
+      runId: persistenceId('run', run.id),
+      stepKey: 'specification',
+      attempt: 1,
+      status: 'succeeded',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.appendEvent({
+      runId: persistenceId('run', run.id),
+      eventId: persistenceId('event', `${run.id}-progress`),
+      fingerprint: `${run.id}-progress`,
+      type: 'step.progress',
+      payload: {
+        stepRunId: `${run.id}:specification:1`,
+        stepKey: 'specification',
+        attempt: 1,
+        phase: 'tool',
+        message: 'Model is using glob',
+      },
+      occurredAt: now,
+    });
     await finish(repository, run.id);
 
     const resumed = await service.resumeRun(run.id);
@@ -2089,6 +2115,21 @@ runtime: { provider: local }
     // Same run: that is what makes its finished steps reusable.
     expect(resumed.id).toBe(run.id);
     expect(resumed.status).toBe('pending');
+    // The run is pending again, so the failure it is being resumed past must
+    // not still be attached to it.
+    expect(resumed.error).toBeUndefined();
+    // The response has to satisfy the route's own output contract. A step's
+    // activity was missing from that contract, so every resume of a run that
+    // had actually run a step failed with an internal error.
+    // projectId is substituted because this suite's fake id generator derives
+    // it from the repository binding and yields a slash, which a real
+    // (hash-derived) project id never contains.
+    expect(() =>
+      runProjectionSchema.parse({ ...resumed, projectId: 'project-test' }),
+    ).not.toThrow();
+    expect(resumed.steps[0]?.progress?.[0]?.message).toBe(
+      'Model is using glob',
+    );
     expect(releaseRunForResume).toHaveBeenCalledWith(run.id);
     expect(requestStart).toHaveBeenLastCalledWith({
       idempotencyKey: `workflow-start:${run.id}:resume:1`,

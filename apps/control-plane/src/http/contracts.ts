@@ -337,6 +337,19 @@ export const runProjectionSchema = z
           attempt: z.number(),
           status: z.string(),
           model: z.string().max(120).optional(),
+          // The per-step activity the run page renders. Absent here until a
+          // response carried a run that had actually executed a step, which
+          // made every such response fail its own output contract.
+          progress: z.array(
+            z
+              .object({
+                eventId: id,
+                phase: z.string(),
+                message: z.string(),
+                occurredAt: z.string(),
+              })
+              .strict(),
+          ),
         })
         .strict(),
     ),
