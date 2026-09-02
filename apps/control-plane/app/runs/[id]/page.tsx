@@ -9,9 +9,11 @@ import {
   RunStepTimeline,
 } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
+import { isRunPreviewAvailable } from '../../../src/local-system/run-preview';
 import {
   CancelRunAction,
   OverrideRunBudgetAction,
+  PreviewRunAction,
   RestartRunAction,
   ResumeRunAction,
 } from '../../../src/ui/mutation-forms';
@@ -87,9 +89,9 @@ export default async function RunPage({
           <>
             <p className="run-status-explanation">
               A budget stopped this run, so continuing it as it stands would
-              stop at the same place. Allowing more raises this run&apos;s caps by
-              that amount; it does not change the project&apos;s budget or start
-              anything.
+              stop at the same place. Allowing more raises this run&apos;s caps
+              by that amount; it does not change the project&apos;s budget or
+              start anything.
             </p>
             <OverrideRunBudgetAction runId={run.id} />
           </>
@@ -305,6 +307,18 @@ export default async function RunPage({
               <code>git log {run.outcome.localBranch}</code>
             </p>
           )}
+          {run.status === 'succeeded' &&
+          run.outcome.localBranch !== undefined &&
+          run.outcome.localRepositoryUrl !== undefined &&
+          isRunPreviewAvailable() ? (
+            <>
+              <p>
+                Preview it: this checks the branch out in a scratch worktree and
+                runs the delivered code on this machine.
+              </p>
+              <PreviewRunAction runId={run.id} />
+            </>
+          ) : null}
         </section>
       )}
       <section aria-labelledby="timeline-title">

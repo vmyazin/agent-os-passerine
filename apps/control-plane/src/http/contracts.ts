@@ -396,7 +396,10 @@ export const projectListProjectionSchema = z
     name: z.string().max(120),
     binding: z.string().max(4_096),
     latestRevision: z.number().int().positive().optional(),
-    configDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    configDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     lastRunStatus: z
       .enum([
         'pending',
@@ -499,6 +502,28 @@ export const directoryPickerResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('cancelled') }).strict(),
 ]);
 
+/**
+ * A preview of the code one run delivered, running on the operator's own
+ * machine. `no_server` is a success, not a failure: the branch is checked out
+ * and the hint says what to do with it, there is simply nothing to open.
+ */
+export const runPreviewSchema = z
+  .object({
+    runId: id,
+    branch: z.string().min(1).max(255),
+    worktree: z.string().min(1).max(4_096),
+    url: z.string().url().max(2_048).optional(),
+    script: z.string().min(1).max(128).optional(),
+    startedAt: z.string(),
+    status: z.enum(['running', 'no_server']),
+    hint: z.string().max(2_000).optional(),
+  })
+  .strict();
+
+export const runPreviewStoppedSchema = z
+  .object({ stopped: z.literal(true) })
+  .strict();
+
 export const commitPageSchema = z
   .object({
     items: z
@@ -518,23 +543,31 @@ export const commitPageSchema = z
   })
   .strict();
 
-export const projectDetailProjectionSchema = projectListProjectionSchema.extend({
-  workflowBudgetMicrodollars: z.number().int().positive().optional(),
-  dailyBudgetMicrodollars: z.number().int().positive().optional(),
-  appliedSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
-  headSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
-  drifted: z.boolean().optional(),
-  source: z
-    .object({
-      kind: z.enum(['github', 'local']),
-      location: z.string().min(1).max(4_096),
-      defaultBranch: z.string().min(1).max(255),
-      publisherReady: z.boolean().optional(),
-    })
-    .strict()
-    .optional(),
-  recentRuns: z.array(runProjectionSchema),
-});
+export const projectDetailProjectionSchema = projectListProjectionSchema.extend(
+  {
+    workflowBudgetMicrodollars: z.number().int().positive().optional(),
+    dailyBudgetMicrodollars: z.number().int().positive().optional(),
+    appliedSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    headSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    drifted: z.boolean().optional(),
+    source: z
+      .object({
+        kind: z.enum(['github', 'local']),
+        location: z.string().min(1).max(4_096),
+        defaultBranch: z.string().min(1).max(255),
+        publisherReady: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    recentRuns: z.array(runProjectionSchema),
+  },
+);
 
 export const approvalSchema = z
   .object({

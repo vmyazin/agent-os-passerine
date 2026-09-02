@@ -46,7 +46,16 @@ session leases.
 
 No runtime request contains GitHub App, branch-push, merge, or publication
 credentials. Agent outputs are bounded JSON results containing artifact
-manifests; raw reasoning and secrets are not persisted as domain events.
+manifests, and reasoning is not persisted.
+
+Two operator-facing exceptions are deliberate, because a feed that says only
+"the model sent a message" cannot explain the failure it is describing. A
+step's progress notes carry the model's message text, and its completed note
+carries the step's schema-validated result with artifact manifests summarized.
+Both are stripped of control characters, collapsed to one line, and bounded,
+so neither can forge feed structure or flood the run page. Both are
+provider-influenced text: read them as something the model said, never as
+instruction.
 
 Local experiment projects (`project.localPath` instead of
 `project.repository`) swap only the two edges of the pipeline: source

@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import type { InboxAttentionChangedDetail } from './inbox-count-client';
@@ -223,6 +223,154 @@ export function ResumeRunAction({ runId }: { readonly runId: string }) {
   );
 }
 
+/** What the preview endpoints report back about one run's checkout. */
+export interface RunPreviewView {
+  readonly status: 'running' | 'no_server';
+  readonly url?: string;
+  readonly script?: string;
+  readonly hint?: string;
+}
+
+async function previewFailure(
+  response: Response,
+  prefix: string,
+): Promise<string> {
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: { message?: string };
+  };
+  return typeof body.error?.message === 'string' && body.error.message !== ''
+    ? `${prefix}: ${body.error.message}`
+    : `${prefix}.`;
+}
+
+/**
+ * Running the code a finished run delivered, on this machine, from the page
+ * that describes it. A diff says whether the change reads correctly; only a
+ * running copy says whether it works.
+ *
+ * Deliberately never reloads the page: starting a preview can take a minute,
+ * and throwing the operator's scroll position away at the end of it -- or
+ * worse, mid-install -- would be its own small betrayal. State moves in place.
+ */
+export function PreviewRunAction({
+  runId,
+  initialPreview,
+}: {
+  readonly runId: string;
+  /** Seeds the rendered state; when absent the preview is fetched on mount. */
+  readonly initialPreview?: RunPreviewView | null;
+}) {
+  // undefined: not yet known. null: no preview is running.
+  const [preview, setPreview] = useState<RunPreviewView | null | undefined>(
+    initialPreview,
+  );
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (initialPreview !== undefined) return;
+    let abandoned = false;
+    void (async () => {
+      const response = await fetch(`/api/runs/${runId}/preview`).catch(
+        () => undefined,
+      );
+      if (abandoned) return;
+      setPreview(
+        response !== undefined && response.ok
+          ? ((await response.json()) as RunPreviewView)
+          : null,
+      );
+    })();
+    return () => {
+      abandoned = true;
+    };
+  }, [initialPreview, runId]);
+
+  const start = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Starting it — the first run of a branch installs it first…');
+    const response = await fetch(`/api/runs/${runId}/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (response.ok) {
+      setPreview((await response.json()) as RunPreviewView);
+      setMessage('');
+    } else {
+      setMessage(await previewFailure(response, 'Could not start the preview'));
+    }
+    setPending(false);
+  };
+
+  const stop = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Stopping it…');
+    const response = await fetch(`/api/runs/${runId}/preview`, {
+      method: 'DELETE',
+    });
+    if (response.ok) {
+      setPreview(null);
+      setMessage('Preview stopped and its checkout removed.');
+    } else {
+      setMessage(await previewFailure(response, 'Could not stop the preview'));
+    }
+    setPending(false);
+  };
+
+  return (
+    <div className="action-stack">
+      {preview === undefined ? (
+        <p>Checking for a running preview…</p>
+      ) : preview === null ? (
+        <div className="button-row">
+          <button
+            className="secondary"
+            disabled={pending}
+            onClick={() => void start()}
+            type="button"
+          >
+            {pending ? 'Starting…' : 'Start preview'}
+          </button>
+        </div>
+      ) : (
+        <>
+          {preview.status === 'running' && preview.url !== undefined ? (
+            <p>
+              <a href={preview.url} rel="noreferrer" target="_blank">
+                {preview.url}
+              </a>
+              {preview.script === undefined ? null : (
+                <>
+                  {' — running '}
+                  <code>{preview.script}</code>
+                </>
+              )}
+            </p>
+          ) : (
+            <p>
+              {preview.hint ??
+                'The branch is checked out, but it declares nothing to serve.'}
+            </p>
+          )}
+          <div className="button-row">
+            <button
+              className="secondary"
+              disabled={pending}
+              onClick={() => void stop()}
+              type="button"
+            >
+              {pending ? 'Stopping…' : 'Stop'}
+            </button>
+          </div>
+        </>
+      )}
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
 export function RestartRunAction({ runId }: { readonly runId: string }) {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
@@ -259,7 +407,11 @@ export function RestartRunAction({ runId }: { readonly runId: string }) {
       <div className="button-row">
         {confirming ? (
           <>
-            <button disabled={pending} onClick={() => void start()} type="button">
+            <button
+              disabled={pending}
+              onClick={() => void start()}
+              type="button"
+            >
               {pending ? 'Starting…' : 'Confirm, start again'}
             </button>
             <button

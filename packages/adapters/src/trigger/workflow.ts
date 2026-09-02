@@ -734,6 +734,18 @@ function withModelName(
 /** Hard ceiling on the rendered result carried in a progress note. */
 const MAX_RESULT_NOTE_CHARS = 320;
 
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
+
+/**
+ * Makes a provider-supplied string safe to put in one line of the operator's
+ * feed: no control characters to forge structure, no newlines to fake a
+ * separate note, no runs of whitespace to pad it out of view.
+ */
+function sanitizeForNote(text: string): string {
+  return text.replace(CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Renders a step's validated result for the operator's activity feed.
  *
@@ -748,10 +760,7 @@ const MAX_RESULT_NOTE_CHARS = 320;
  * that the step produced `plan`, and how big it was.
  */
 function describeStepResult(value: unknown): string | undefined {
-  // eslint-disable-next-line no-control-regex
-  const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
-  const clean = (text: string): string =>
-    text.replace(CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim();
+  const clean = sanitizeForNote;
   const summarize = (input: unknown, depth: number): unknown => {
     if (depth > 4) return '...';
     if (typeof input === 'string') return clean(input).slice(0, 120);
@@ -782,6 +791,27 @@ function describeStepResult(value: unknown): string | undefined {
     : rendered;
 }
 
+/** Ceiling on model prose carried into a progress note. */
+const MAX_MESSAGE_NOTE_CHARS = 240;
+
+/**
+ * The text of a model message, if the provider reported one. Providers name
+ * this field differently, so the three known spellings are tried before
+ * giving up and leaving the note unqualified.
+ */
+function runtimeMessageText(payload: unknown): string | undefined {
+  for (const field of ['detail', 'text', 'message']) {
+    const value = payloadField(payload, field);
+    if (typeof value !== 'string') continue;
+    const cleaned = sanitizeForNote(value);
+    if (cleaned.length === 0) continue;
+    return cleaned.length > MAX_MESSAGE_NOTE_CHARS
+      ? `${cleaned.slice(0, MAX_MESSAGE_NOTE_CHARS)}...`
+      : cleaned;
+  }
+  return undefined;
+}
+
 function runtimeProgress(
   event: RuntimeEvent,
   toolCalls: ReadonlyMap<string, string>,
@@ -792,8 +822,18 @@ function runtimeProgress(
     variant = '',
   ): RuntimeProgressNote => ({ phase, message, variant });
   switch (event.type) {
-    case 'message':
-      return note('working', 'Model sent a message');
+    case 'message': {
+      // Provider-authored text, shown deliberately. The failure this diagnoses
+      // -- a model answering in prose instead of submitting its result -- is
+      // unreadable without it, and "Model sent a message" is exactly the note
+      // that leaves an operator with nothing to go on. It is sanitized and
+      // bounded like any other rendered value, and it is data: a reader should
+      // treat it as something the model said, never as instruction.
+      const text = runtimeMessageText(event.payload);
+      return text === undefined
+        ? note('working', 'Model sent a message')
+        : note('working', `Model sent a message: ${text}`);
+    }
     case 'thread_message':
       return note('working', 'Subagent exchanged a message');
     case 'message_summary':
