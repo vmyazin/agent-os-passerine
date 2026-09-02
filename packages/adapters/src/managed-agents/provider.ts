@@ -152,10 +152,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     return this.syncAgentForProject(DEFAULT_PROJECT_SCOPE, agent);
   }
 
-  syncAgentForProject(
-    projectId: string,
-    agent: RuntimeAgent,
-  ): Promise<void> {
+  syncAgentForProject(projectId: string, agent: RuntimeAgent): Promise<void> {
     validateLocalId(agent.id, 'agent.id');
     validateLocalId(projectId, 'projectId');
     const cacheKey = scopedCacheKey(projectId, agent.id);
@@ -682,9 +679,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           { signal },
         );
         const iterator = stream[Symbol.asyncIterator]();
-        let pending:
-          | Promise<IteratorResult<ManagedAgentsEvent>>
-          | undefined;
+        let pending: Promise<IteratorResult<ManagedAgentsEvent>> | undefined;
         try {
           for (;;) {
             pending ??= iterator.next();
@@ -1099,9 +1094,7 @@ class ProjectScopedManagedAgentsProvider implements ManagedAgentsProvider {
     return this.inner.syncAgentForProject(this.projectId, agent);
   }
 
-  syncEnvironment(
-    environment: ManagedAgentsRuntimeEnvironment,
-  ): Promise<void> {
+  syncEnvironment(environment: ManagedAgentsRuntimeEnvironment): Promise<void> {
     return this.inner.syncEnvironmentForProject(this.projectId, environment);
   }
 

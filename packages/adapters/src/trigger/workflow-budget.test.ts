@@ -108,10 +108,7 @@ describe('workflow budget helpers', () => {
 
   it('loads budget limits from the run config snapshot', async () => {
     const repository = new InMemoryDomainRepository();
-    const {
-      configJson,
-      configDigest,
-    } = budgetConfig();
+    const { configJson, configDigest } = budgetConfig();
     const projectId = persistenceId('project', 'project-1');
     const runId = persistenceId('run', 'run-1');
     const revisionId = persistenceId('configRevision', 'revision-1');

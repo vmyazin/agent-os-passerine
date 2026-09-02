@@ -15,6 +15,8 @@ import {
   resolveFeatureRolesFromSnapshot,
 } from './production-composition.js';
 import {
+  exactLocalTrustedCommand,
+  exactTrustedCommand,
   kimiFromEnv,
   resolveRoleRuntimeKeys,
   resolveRuntimeKey,
@@ -643,5 +645,73 @@ describe('composePublicationTarget', () => {
         },
       ),
     ).toThrow(/allowlist/i);
+  });
+});
+
+describe('local-direct runtime routing', () => {
+  function resolveLocal(runtimeYaml: string) {
+    const snapshotValue = routedSnapshot({ runtimeYaml });
+    return resolveRoleRuntimeKeys(
+      snapshotValue.config as unknown as AgentOsConfig,
+      resolveFeatureRolesFromSnapshot(snapshotValue, ROLE_OPTIONS),
+      {
+        builtRuntimeKeys: new Set(['process']),
+        kimiConfigured: false,
+        verificationCapableKeys: new Set(['process']),
+      },
+    );
+  }
+
+  it('routes every role, verification included, to the process runtime', () => {
+    const { runtimeKeys, requiresKimi } = resolveLocal(
+      'runtime: { provider: process }',
+    );
+    expect(runtimeKeys.size).toBeGreaterThan(0);
+    expect([...new Set(runtimeKeys.values())]).toEqual(['process']);
+    // `requiresKimi` gates the routing facade; a single-provider run needs none.
+    expect(requiresKimi).toBe(false);
+  });
+
+  it('refuses a runtime key the local profile did not build', () => {
+    expect(() => resolveLocal('runtime: { provider: managed }')).toThrow(
+      /unknown runtime 'managed'/,
+    );
+  });
+});
+
+describe('exactLocalTrustedCommand', () => {
+  const definition = { executable: 'pnpm', arguments: ['test'] };
+
+  it('roots materialization at the working directory, never at /workspace', () => {
+    const command = exactLocalTrustedCommand(definition);
+    expect(command).not.toContain('/workspace');
+    expect(command).not.toContain('/mnt/session');
+    expect(command).toContain('rm -rf repo');
+    expect(command).toContain('cd repo');
+  });
+
+  it('keeps the managed command container-absolute', () => {
+    // The two must not converge: a container command run in a process sandbox
+    // would delete a real directory on the host.
+    expect(exactTrustedCommand(definition)).toContain('rm -rf /workspace/repo');
+  });
+
+  it('runs the project suite and then the sealed acceptance tests, and reports the exit code', () => {
+    const command = exactLocalTrustedCommand(definition);
+    expect(command).toContain(
+      'pnpm install --frozen-lockfile --ignore-scripts',
+    );
+    expect(command.indexOf("'pnpm' 'test'")).toBeLessThan(
+      command.indexOf("node --test 'test/acceptance/*.test.mjs'"),
+    );
+    expect(command).toContain('AGENTOS_EXIT_CODE');
+  });
+
+  it('quotes an argument that tries to escape the invocation', () => {
+    const command = exactLocalTrustedCommand({
+      executable: 'pnpm',
+      arguments: ["test'; rm -rf /"],
+    });
+    expect(command).toContain(`'test'"'"'; rm -rf /'`);
   });
 });

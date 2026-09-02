@@ -649,11 +649,12 @@ describe('createKimiHttpTransport', () => {
   it('classifies an empty successful response as a transient transport failure', async () => {
     const transport = createKimiHttpTransport({
       apiKey: 'kimi-key',
-      fetchImpl: vi.fn<typeof fetch>(async () =>
-        new Response('', {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+      fetchImpl: vi.fn<typeof fetch>(
+        async () =>
+          new Response('', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
       ),
     });
 

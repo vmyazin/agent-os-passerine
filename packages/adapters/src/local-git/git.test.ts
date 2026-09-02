@@ -150,9 +150,9 @@ describe('runGit argument validation', () => {
     expect(commit).toMatch(/^[0-9a-f]{40}$/);
 
     await runGit(repo, ['update-ref', 'refs/heads/x', commit, '']);
-    await expect(
-      runGit(repo, ['rev-parse', 'refs/heads/x']),
-    ).resolves.toBe(commit);
+    await expect(runGit(repo, ['rev-parse', 'refs/heads/x'])).resolves.toBe(
+      commit,
+    );
   });
 });
 
@@ -175,26 +175,11 @@ describe('readGitBlobs', () => {
 
   it.each([
     ['malformed header', Buffer.from('not-a-header\n')],
-    [
-      'mismatched object',
-      Buffer.from(`${'b'.repeat(40)} blob 1\nx\n`),
-    ],
-    [
-      'wrong object type',
-      Buffer.from(`${'a'.repeat(40)} tree 1\nx\n`),
-    ],
-    [
-      'truncated body',
-      Buffer.from(`${'a'.repeat(40)} blob 2\nx\n`),
-    ],
-    [
-      'invalid delimiter',
-      Buffer.from(`${'a'.repeat(40)} blob 1\nxx`),
-    ],
-    [
-      'trailing output',
-      Buffer.from(`${'a'.repeat(40)} blob 1\nx\nextra`),
-    ],
+    ['mismatched object', Buffer.from(`${'b'.repeat(40)} blob 1\nx\n`)],
+    ['wrong object type', Buffer.from(`${'a'.repeat(40)} tree 1\nx\n`)],
+    ['truncated body', Buffer.from(`${'a'.repeat(40)} blob 2\nx\n`)],
+    ['invalid delimiter', Buffer.from(`${'a'.repeat(40)} blob 1\nxx`)],
+    ['trailing output', Buffer.from(`${'a'.repeat(40)} blob 1\nx\nextra`)],
   ])('rejects %s', (_label, output) => {
     expect(() => parseGitBlobBatch(output, ['a'.repeat(40)])).toThrow(
       /batch output/,
@@ -222,9 +207,7 @@ describe('runGit env injection', () => {
     );
     const shown = await runGit(repo, ['cat-file', '-p', commit]);
     expect(shown).toContain('author Agent OS Publisher <agentos@localhost>');
-    expect(
-      shown,
-    ).toContain('committer Agent OS Publisher <agentos@localhost>');
+    expect(shown).toContain('committer Agent OS Publisher <agentos@localhost>');
   });
 
   it('rejects environment variables outside the allowlist', async () => {

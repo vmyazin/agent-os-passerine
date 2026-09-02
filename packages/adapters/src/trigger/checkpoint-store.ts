@@ -243,13 +243,9 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
           request.admissionDenominator,
       );
       if (
-        deploymentSpent +
-          deploymentReserved +
-          request.estimatedMicrodollars >=
+        deploymentSpent + deploymentReserved + request.estimatedMicrodollars >=
           deploymentThreshold ||
-        deploymentSpent +
-          deploymentReserved +
-          request.estimatedMicrodollars >
+        deploymentSpent + deploymentReserved + request.estimatedMicrodollars >
           deploymentLimit
       ) {
         return { admitted: false, reason: 'daily_budget' };

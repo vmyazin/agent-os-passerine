@@ -5,6 +5,10 @@ export {
   type ArtifactCursorKey,
 } from './cursor.js';
 export {
+  createFilesystemArtifactStorage,
+  type FilesystemArtifactStorageOptions,
+} from './filesystem.js';
+export {
   createInMemoryArtifactStorage,
   type InMemoryArtifactStorageOptions,
 } from './in-memory.js';

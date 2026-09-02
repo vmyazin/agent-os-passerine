@@ -6,6 +6,14 @@ export type Identifier = string;
 export interface RuntimeAgent {
   readonly id: Identifier;
   readonly model: string;
+  /**
+   * The model profile's `provider` value (`anthropic`, `kimi`, ...). A
+   * provider that speaks to more than one upstream API selects its transport
+   * by this field; every other provider ignores it. Optional because it
+   * describes where `model` is served, not what the agent is, and older
+   * persisted callers never set it.
+   */
+  readonly modelProvider?: string;
   readonly instructions?: string;
   readonly tools: readonly string[];
   readonly mcps: readonly string[];

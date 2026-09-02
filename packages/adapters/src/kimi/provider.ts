@@ -47,11 +47,28 @@ export class KimiRuntimeProviderError extends Error {
 }
 
 export interface KimiRuntimeProviderOptions {
-  readonly apiKey: string;
+  /**
+   * Credential for the default transport. Required unless `transports`
+   * supplies at least one model-provider transport, because then every
+   * session can be served without a default.
+   */
+  readonly apiKey?: string;
   readonly ownershipSecret: string; // >= 32 bytes
   readonly sandboxRoot: string;
   readonly baseUrl?: string;
   readonly transport?: KimiTransport; // test seam; default createKimiHttpTransport
+  /**
+   * Transports keyed by model provider (`RuntimeAgent.modelProvider`, i.e. the
+   * config model profile's `provider`). This is what lets one process serve
+   * both Anthropic- and Moonshot-hosted roles: the wire format is the same
+   * Anthropic Messages shape, only the base URL and key differ.
+   *
+   * Lookup is fail-closed. An agent whose `modelProvider` is absent from a
+   * non-empty registry is refused by name rather than quietly falling back to
+   * the default transport, because a silent fallback would bill the wrong
+   * account and run the wrong model.
+   */
+  readonly transports?: Readonly<Record<string, KimiTransport>>;
   readonly resolveFile?: (fileId: string) => Promise<Uint8Array>; // resolves RuntimeFileResource fileIds
   readonly artifactMcp?: {
     readonly url: string; // AGENTOS_ARTIFACT_MCP_URL
@@ -253,7 +270,8 @@ interface ResolvedArtifactMcp {
 }
 
 interface ValidatedOptions {
-  readonly transport: KimiTransport;
+  readonly transport: KimiTransport | undefined;
+  readonly transports: ReadonlyMap<string, KimiTransport>;
   readonly sandboxRoot: string;
   readonly ownershipSecret: string;
   readonly resolveFile: ((fileId: string) => Promise<Uint8Array>) | undefined;
@@ -279,7 +297,8 @@ function isTerminal(status: KimiSessionStatus): boolean {
 }
 
 class KimiRuntimeProviderImpl implements RuntimeProvider {
-  readonly #transport: KimiTransport;
+  readonly #transport: KimiTransport | undefined;
+  readonly #transports: ReadonlyMap<string, KimiTransport>;
   readonly #sandboxRoot: string;
   readonly #ownershipSecret: string;
   readonly #resolveFile: ((fileId: string) => Promise<Uint8Array>) | undefined;
@@ -297,6 +316,7 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
 
   constructor(options: ValidatedOptions) {
     this.#transport = options.transport;
+    this.#transports = options.transports;
     this.#sandboxRoot = options.sandboxRoot;
     this.#ownershipSecret = options.ownershipSecret;
     this.#resolveFile = options.resolveFile;
@@ -307,6 +327,29 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
 
   async syncAgent(agent: RuntimeAgent): Promise<void> {
     this.#agents.set(agent.id, agent);
+  }
+
+  /**
+   * Which upstream serves this agent's model. Resolved before any session
+   * state exists so a misrouted agent costs nothing: an empty registry keeps
+   * the historical single-transport behaviour, and a populated one refuses an
+   * unknown provider by name instead of billing the default account for a
+   * model it does not serve.
+   */
+  #transportFor(agent: RuntimeAgent): KimiTransport {
+    if (this.#transports.size > 0 && agent.modelProvider !== undefined) {
+      const routed = this.#transports.get(agent.modelProvider);
+      if (routed !== undefined) return routed;
+      throw new KimiRuntimeProviderError(
+        `no transport is configured for model provider '${agent.modelProvider}' (agent '${agent.id}', model '${agent.model}')`,
+      );
+    }
+    if (this.#transport === undefined) {
+      throw new KimiRuntimeProviderError(
+        `no transport is configured for agent '${agent.id}' (model '${agent.model}'): it declares no model provider and there is no default transport`,
+      );
+    }
+    return this.#transport;
   }
 
   async syncEnvironment(environment: RuntimeEnvironment): Promise<void> {
@@ -323,6 +366,9 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
         `unknown environmentId: ${request.environmentId}`,
       );
     }
+    // Resolved before any session, sandbox, or upstream call exists, so a
+    // misrouted agent fails free rather than half-way through a paid start.
+    const transport = this.#transportFor(agent);
     const resources = request.resources ?? [];
     if (resources.length > 0 && this.#resolveFile === undefined) {
       throw new KimiRuntimeProviderError(
@@ -377,7 +423,10 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
             content: await resolveFile(resource.fileId),
           })),
         );
-        await sandbox.materialize(materialized);
+        await sandbox.materialize([
+          ...materialized,
+          ...unpackedSourceTree(materialized),
+        ]);
       } catch (error) {
         await sandbox.destroy().catch(() => undefined);
         throw error;
@@ -427,7 +476,7 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
 
     this.#sessions.set(sessionId, session);
     session.loopPromise = runKimiAgentLoop({
-      transport: this.#transport,
+      transport,
       model: agent.model,
       ...(agent.instructions === undefined
         ? {}
@@ -601,7 +650,9 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     }
     if (session.status !== 'submitted') {
       const detail =
-        session.failure === undefined ? '' : `: ${errorMessage(session.failure)}`;
+        session.failure === undefined
+          ? ''
+          : `: ${errorMessage(session.failure)}`;
       throw new KimiRuntimeProviderError(
         `session did not submit a result (status: ${session.status}${detail})`,
       );
@@ -992,6 +1043,62 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown error';
 }
 
+/** Where an unpacked `source-bundle-v1` tree lands inside the workdir. */
+export const SOURCE_TREE_DIRECTORY = 'repo';
+
+/**
+ * Expands a mounted `source-bundle-v1` artifact into a real file tree beside
+ * the JSON it came from.
+ *
+ * The bundle is the whole repository serialized as one JSON document. Handed
+ * only that, a model spends its first turns writing brittle `bash` to pull the
+ * tree back out, which is exactly what the 2026-08-28 dogfood specification
+ * sessions did before failing. Trusted code can do it once, correctly, for
+ * free. The JSON stays mounted so provenance is unchanged, and every path goes
+ * through the sandbox's own confinement checks in `materialize`.
+ *
+ * Anything that is not a well-formed bundle is ignored rather than rejected:
+ * most mounted resources (upstream artifacts, `materialize.mjs`) are not
+ * bundles, and this helper is a convenience, never a gate.
+ */
+function unpackedSourceTree(
+  materialized: readonly { path: string; content: Uint8Array }[],
+): readonly { path: string; content: Uint8Array }[] {
+  const unpacked: { path: string; content: Uint8Array }[] = [];
+  const seen = new Set<string>();
+  for (const file of materialized) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(file.content).toString('utf8'));
+    } catch {
+      continue;
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      (parsed as { version?: unknown }).version !== 'source-bundle-v1'
+    )
+      continue;
+    const files = (parsed as { files?: unknown }).files;
+    if (!Array.isArray(files)) continue;
+    for (const entry of files) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const entryPath = (entry as { path?: unknown }).path;
+      const content = (entry as { content?: unknown }).content;
+      if (typeof entryPath !== 'string' || typeof content !== 'string')
+        continue;
+      // `materialize` re-validates every path against the workdir, so a
+      // hostile bundle entry is refused there; skipping duplicates here only
+      // keeps two bundles from writing the same file twice.
+      const target = `${SOURCE_TREE_DIRECTORY}/${entryPath}`;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      unpacked.push({ path: target, content: Buffer.from(content, 'utf8') });
+    }
+  }
+  return unpacked;
+}
+
 /**
  * Maps a transport failure onto the closed set of runtime error codes the
  * operator-facing progress notes understand, so a refusal reads as the thing
@@ -1008,10 +1115,7 @@ function runtimeErrorCode(error: unknown): string | undefined {
   } catch {
     upstreamType = undefined;
   }
-  if (
-    upstreamType === 'exceeded_current_quota_error' ||
-    error.status === 402
-  )
+  if (upstreamType === 'exceeded_current_quota_error' || error.status === 402)
     return 'billing_error';
   if (error.status === 429) return 'model_rate_limited_error';
   if (error.status >= 500) return 'model_overloaded_error';
@@ -1041,10 +1145,17 @@ function validateHttpUrl(value: string, label: string): string {
 function validateOptions(
   options: KimiRuntimeProviderOptions,
 ): ValidatedOptions {
-  if (
-    typeof options.apiKey !== 'string' ||
-    options.apiKey.trim().length === 0
-  ) {
+  const transports = new Map<string, KimiTransport>(
+    Object.entries(options.transports ?? {}),
+  );
+  const hasApiKey =
+    typeof options.apiKey === 'string' && options.apiKey.trim().length > 0;
+  // A registry can serve every session on its own, so the default credential
+  // is only required when there is no registry to fall back on.
+  if (!hasApiKey && transports.size === 0 && options.transport === undefined) {
+    throw new KimiRuntimeProviderError('apiKey is required');
+  }
+  if (options.apiKey !== undefined && !hasApiKey) {
     throw new KimiRuntimeProviderError('apiKey is required');
   }
   if (
@@ -1076,12 +1187,17 @@ function validateOptions(
         };
   const transport =
     options.transport ??
-    createKimiHttpTransport({
-      apiKey: options.apiKey,
-      ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
-    });
+    (hasApiKey
+      ? createKimiHttpTransport({
+          apiKey: options.apiKey as string,
+          ...(options.baseUrl === undefined
+            ? {}
+            : { baseUrl: options.baseUrl }),
+        })
+      : undefined);
   return {
     transport,
+    transports,
     sandboxRoot: options.sandboxRoot,
     ownershipSecret: options.ownershipSecret,
     resolveFile: options.resolveFile,

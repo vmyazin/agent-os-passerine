@@ -76,9 +76,10 @@ function parseTreeEntry(line: string): RawTreeEntry {
   const tabIndex = line.indexOf('\t');
   if (tabIndex === -1)
     throw new Error('source snapshot tree entry is malformed');
-  const match = /^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}) +([0-9]+|-)$/.exec(
-    line.slice(0, tabIndex),
-  );
+  const match =
+    /^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}) +([0-9]+|-)$/.exec(
+      line.slice(0, tabIndex),
+    );
   if (match === null)
     throw new Error('source snapshot tree entry is malformed');
   const [, mode, type, sha, sizeText] = match;
@@ -132,9 +133,12 @@ export function createLocalSourceSnapshotIngestor(
         ]);
       } catch (error) {
         if (error instanceof LocalGitError)
-          throw new Error('source snapshot pinned SHA not found in repository', {
-            cause: error,
-          });
+          throw new Error(
+            'source snapshot pinned SHA not found in repository',
+            {
+              cause: error,
+            },
+          );
         throw error;
       }
       if (objectType !== 'commit')

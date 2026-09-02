@@ -137,7 +137,9 @@ function authorize(
   });
 }
 
-async function fixture(store: PublicationStore = new InMemoryPublicationStore()) {
+async function fixture(
+  store: PublicationStore = new InMemoryPublicationStore(),
+) {
   const root = await fixtureRoot();
   const repo = await seedNestedRepo(root, 'exp-repo');
   const base = await git(repo, ['rev-parse', 'HEAD']);
@@ -181,7 +183,7 @@ class CapturingStore implements PublicationStore {
 }
 
 describe('local git publisher', () => {
-  it('stacks a chained publication on the previous run\'s branch', async () => {
+  it("stacks a chained publication on the previous run's branch", async () => {
     const { repo, base, publisher } = await fixture();
 
     // Run A publishes off the default branch, as an unchained run does.
@@ -221,9 +223,7 @@ describe('local git publisher', () => {
       authorization: authorize(second),
     });
 
-    expect(await git(repo, ['rev-parse', `${b.commitSha}^`])).toBe(
-      a.commitSha,
-    );
+    expect(await git(repo, ['rev-parse', `${b.commitSha}^`])).toBe(a.commitSha);
     // The stack accumulates: B's tree carries A's file as well as its own,
     // so merging B's branch takes both features.
     const tree = await git(repo, ['ls-tree', '-r', '--name-only', b.commitSha]);
@@ -299,7 +299,9 @@ describe('local git publisher', () => {
     });
 
     const tree = await git(repo, ['ls-tree', '-r', result.commitSha]);
-    const line = tree.split('\n').find((entry) => entry.endsWith('\tsrc/a.txt'));
+    const line = tree
+      .split('\n')
+      .find((entry) => entry.endsWith('\tsrc/a.txt'));
     expect(line?.startsWith('100755 blob')).toBe(true);
   });
 
@@ -442,7 +444,10 @@ describe('local git publisher', () => {
       // packages/adapters/src/github/postgres-store.test.ts) -- no real
       // database is required, so this isn't gated behind TEST_DATABASE_URL.
       const rows = new Map<string, Record<string, unknown>>();
-      const execute: PublicationSqlExecutor['execute'] = async (sql, params) => {
+      const execute: PublicationSqlExecutor['execute'] = async (
+        sql,
+        params,
+      ) => {
         if (sql.includes('agentos_claim_publication')) {
           const [
             recordKey,
@@ -564,7 +569,12 @@ describe('local git publisher', () => {
         changes: [
           { operation: 'delete', path: 'src/a.txt' },
           { operation: 'delete', path: 'src/lib/b.txt' },
-          { operation: 'add', path: 'src', mode: '100644', content: 'now a file\n' },
+          {
+            operation: 'add',
+            path: 'src',
+            mode: '100644',
+            content: 'now a file\n',
+          },
         ],
       });
 
@@ -582,7 +592,13 @@ describe('local git publisher', () => {
 
       // The resulting tree must be structurally sound -- no duplicate or
       // overlapping entries anywhere reachable from refs.
-      const fsck = await exec('git', ['-C', repo, 'fsck', '--full', '--strict']);
+      const fsck = await exec('git', [
+        '-C',
+        repo,
+        'fsck',
+        '--full',
+        '--strict',
+      ]);
       expect(fsck.stdout.trim()).toBe('');
       expect(fsck.stderr.trim()).toBe('');
     });
@@ -610,7 +626,10 @@ describe('local git publisher', () => {
         ...args: Parameters<PublicationStore['save']>
       ): ReturnType<PublicationStore['save']> {
         const [, , patch] = args;
-        if (this.#failOnPhase !== undefined && patch.phase === this.#failOnPhase) {
+        if (
+          this.#failOnPhase !== undefined &&
+          patch.phase === this.#failOnPhase
+        ) {
           this.#failOnPhase = undefined;
           throw new Error('transient database failure');
         }
@@ -660,7 +679,10 @@ describe('local git publisher', () => {
       expect(recordAfterCrash?.phase).toBe('commit_created');
       // The branch really was created by the crashed attempt.
       await expect(
-        git(repo, ['rev-parse', `refs/heads/agentos/run-1-${canonicalPublicationManifestDigest(manifest).slice(0, 8)}`]),
+        git(repo, [
+          'rev-parse',
+          `refs/heads/agentos/run-1-${canonicalPublicationManifestDigest(manifest).slice(0, 8)}`,
+        ]),
       ).resolves.toMatch(/^[0-9a-f]{40}$/);
 
       // A fresh publisher instance, sharing the same underlying store,
@@ -772,12 +794,7 @@ describe('local git publisher', () => {
           patch.phase === this.#conflictOnPhase
         ) {
           this.#conflictOnPhase = undefined;
-          await this.inner.save(
-            key,
-            expectedRevision,
-            patch,
-            publicationEvent,
-          );
+          await this.inner.save(key, expectedRevision, patch, publicationEvent);
           throw new GitHubPublisherError(
             'publication_store_conflict',
             'Publication checkpoint changed concurrently',

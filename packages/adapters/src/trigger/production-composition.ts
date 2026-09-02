@@ -109,6 +109,10 @@ export function resolveFeatureRolesFromSnapshot(
           agent: {
             id: step.agent,
             model: model.model,
+            // Which upstream API serves `model`. The process runtime keys its
+            // transport registry on this, so a config can route one role to
+            // Anthropic and another to Moonshot in the same run.
+            modelProvider: model.provider,
             instructions: agent.prompt,
             // Managed Agents rejects sessions whose file resources cannot be
             // read, and every workflow session mounts the source bundle. The
@@ -244,7 +248,9 @@ export function composePublicationTarget(
         : { isCancelled: options.isCancelled }),
     });
     const target = {
-      publisher: { publish: async (input: unknown) => publisher.publish(input) },
+      publisher: {
+        publish: async (input: unknown) => publisher.publish(input),
+      },
       repository: selected,
       audience: 'github-publisher' as const,
     };

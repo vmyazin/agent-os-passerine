@@ -44,7 +44,10 @@ describe('GitHub repository allowlist', () => {
       ),
     ).toThrow(/reader and publisher/i);
     expect(() =>
-      assertReaderPublisherRepositoryPairing([sandbox, other], [sandbox, other]),
+      assertReaderPublisherRepositoryPairing(
+        [sandbox, other],
+        [sandbox, other],
+      ),
     ).not.toThrow();
   });
 

@@ -1227,8 +1227,9 @@ describe('durable feature workflow', () => {
     );
     // Repetition of one tool is sampled, but never at the cost of hiding the
     // tools the model reached for afterwards.
-    expect(messages.filter((message) => message === 'Model is using glob'))
-      .toHaveLength(3);
+    expect(
+      messages.filter((message) => message === 'Model is using glob'),
+    ).toHaveLength(3);
     // A tool name that is really a sentence is provider-controlled text, so
     // it must never reach the operator's activity feed.
     expect(JSON.stringify(messages)).not.toMatch(
@@ -1590,9 +1591,9 @@ describe('durable feature workflow', () => {
       f.stepOutputs[0]!,
       { artifacts: [], data: { version: 'plan-output-v1' } },
     ]);
-    const first = await createDurableFeatureWorkflow(
-      dependencies(failing),
-    ).run(input);
+    const first = await createDurableFeatureWorkflow(dependencies(failing)).run(
+      input,
+    );
 
     expect(first.status).toBe('failed');
     expect(failing.starts).toHaveLength(2);
@@ -1601,7 +1602,8 @@ describe('durable feature workflow', () => {
     );
     expect(
       afterFailure.filter(
-        (step) => step.stepKey === 'specification' && step.status === 'succeeded',
+        (step) =>
+          step.stepKey === 'specification' && step.status === 'succeeded',
       ),
     ).toHaveLength(1);
 
@@ -1697,9 +1699,9 @@ describe('durable feature workflow', () => {
       f.stepOutputs[0]!,
       { artifacts: [], data: { version: 'plan-output-v1' } },
     ]);
-    const first = await createDurableFeatureWorkflow(
-      dependencies(failing),
-    ).run(input);
+    const first = await createDurableFeatureWorkflow(dependencies(failing)).run(
+      input,
+    );
     expect(first.status).toBe('failed');
     const firstPassIds = new Set(
       failing.starts.flatMap(({ request }) =>
@@ -1940,8 +1942,7 @@ describe('durable feature workflow', () => {
     // The failed start is settled at zero, never at the full reservation: the
     // provider said definitively that nothing was created.
     expect(specification.map((entry) => entry.microdollars).sort()).toEqual([
-      0,
-      100,
+      0, 100,
     ]);
   });
 
@@ -2171,9 +2172,8 @@ describe('durable feature workflow', () => {
       occurredAt: now,
     });
 
-    const result = await createDurableFeatureWorkflow(dependencies()).run(
-      input,
-    );
+    const result =
+      await createDurableFeatureWorkflow(dependencies()).run(input);
 
     // Without the grant this run stops after one session; the override raises
     // the cap it settles against as well as the one it is admitted under, so
@@ -2405,7 +2405,7 @@ describe('durable feature workflow', () => {
 
     const checkpoints = new InMemoryWorkflowCheckpointStore();
     const clock = vi.fn();
-    
+
     const dependencies = {
       repository: f.repository,
       checkpoints,
@@ -2439,7 +2439,7 @@ describe('durable feature workflow', () => {
         persistenceId('run', 'run-1'),
       );
       const approval = approvals[0]!;
-      
+
       // Keep clock at 'consumed' for the consumption and subsequent immediate updates
       clock.mockReturnValue(consumed);
 
@@ -2460,7 +2460,7 @@ describe('durable feature workflow', () => {
           occurredAt: consumed,
         },
       );
-      
+
       return { status: 'completed' as const };
     };
 
@@ -2468,7 +2468,7 @@ describe('durable feature workflow', () => {
     // Since we can't easily hook into that, we'll make the first few calls after wait return 'consumed'
     // and then switch to 'late'.
     // Or better, we can mock clock to return 'consumed' and then 'late' in sequence.
-    
+
     // Let's use a smarter mock for clock.
     let clockCallCount = 0;
     clock.mockImplementation(() => {

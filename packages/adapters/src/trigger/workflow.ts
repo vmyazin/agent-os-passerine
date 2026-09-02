@@ -1145,7 +1145,8 @@ async function runAgentStep<T>(
       dependencies,
       workflow.runId,
     );
-    const projectDailyUsage = resolveProjectDailyUsageMicrodollars(dependencies);
+    const projectDailyUsage =
+      resolveProjectDailyUsageMicrodollars(dependencies);
     const workflowSpent = await sumWorkflowUsage(dependencies, workflow.runId);
     const dailySpent = await projectDailyUsage(
       dependencies.clock(),

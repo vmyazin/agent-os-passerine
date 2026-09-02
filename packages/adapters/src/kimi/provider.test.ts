@@ -767,21 +767,23 @@ describe('createKimiRuntimeProvider', () => {
         usage: { inputTokens: 1, outputTokens: 1 },
       },
     ]);
-    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { readonly id: string };
-      return new Response(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: body.id,
-          result: {
-            content: [{ type: 'text', text: 'ok' }],
-            structuredContent: { metadata },
-            isError: false,
-          },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    });
+    const fetchImpl = vi.fn(
+      async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { readonly id: string };
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              content: [{ type: 'text', text: 'ok' }],
+              structuredContent: { metadata },
+              isError: false,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    );
 
     const { provider } = await makeProvider({
       transport,
@@ -1252,5 +1254,161 @@ describe('createKimiRuntimeProvider', () => {
       transport: neverRespondingTransport(),
     });
     await expect(withoutHook.cleanupAccess!(input)).resolves.toBeUndefined();
+  });
+});
+
+describe('model-provider transports', () => {
+  const ANTHROPIC_AGENT: RuntimeAgent = {
+    ...AGENT,
+    id: 'agent-anthropic',
+    model: 'claude-sonnet-4-6',
+    modelProvider: 'anthropic',
+  };
+  const KIMI_AGENT: RuntimeAgent = {
+    ...AGENT,
+    id: 'agent-kimi',
+    model: 'kimi-k2.7-code',
+    modelProvider: 'kimi',
+  };
+
+  it('routes each agent to the transport its model provider names', async () => {
+    const anthropic = scriptedTransport([]);
+    const kimi = scriptedTransport([]);
+    const sandboxRoot = await newSandboxRoot();
+    const provider = createKimiRuntimeProvider({
+      ownershipSecret: OWNERSHIP_SECRET,
+      sandboxRoot,
+      transports: { anthropic: anthropic.transport, kimi: kimi.transport },
+    });
+    await provider.syncEnvironment(ENVIRONMENT);
+    await provider.syncAgent(ANTHROPIC_AGENT);
+    await provider.syncAgent(KIMI_AGENT);
+
+    await provider.start(baseRequest({ agentId: ANTHROPIC_AGENT.id }));
+    await vi.waitFor(() => expect(anthropic.calls.length).toBe(1));
+    expect(anthropic.calls[0]?.model).toBe('claude-sonnet-4-6');
+    expect(kimi.calls).toHaveLength(0);
+
+    await provider.start(
+      baseRequest({ agentId: KIMI_AGENT.id, stepId: 'step-2' }),
+    );
+    await vi.waitFor(() => expect(kimi.calls.length).toBe(1));
+    expect(kimi.calls[0]?.model).toBe('kimi-k2.7-code');
+  });
+
+  it('refuses an agent whose model provider has no transport, before starting a session', async () => {
+    const sandboxRoot = await newSandboxRoot();
+    const provider = createKimiRuntimeProvider({
+      ownershipSecret: OWNERSHIP_SECRET,
+      sandboxRoot,
+      transports: { kimi: neverRespondingTransport() },
+    });
+    await provider.syncEnvironment(ENVIRONMENT);
+    await provider.syncAgent(ANTHROPIC_AGENT);
+
+    await expect(
+      provider.start(baseRequest({ agentId: ANTHROPIC_AGENT.id })),
+    ).rejects.toThrow(
+      /no transport is configured for model provider 'anthropic'/,
+    );
+    // Nothing was staged: a misroute must not leave a workdir behind.
+    await expect(fs.readdir(sandboxRoot)).resolves.toEqual([]);
+  });
+
+  it('needs no apiKey when a transport registry is supplied', () => {
+    expect(() =>
+      createKimiRuntimeProvider({
+        ownershipSecret: OWNERSHIP_SECRET,
+        sandboxRoot: '/tmp/does-not-matter',
+        transports: { kimi: neverRespondingTransport() },
+      }),
+    ).not.toThrow();
+  });
+
+  it('still requires an apiKey when nothing else can serve a session', () => {
+    expect(() =>
+      createKimiRuntimeProvider({
+        ownershipSecret: OWNERSHIP_SECRET,
+        sandboxRoot: '/tmp/does-not-matter',
+        transports: {},
+      }),
+    ).toThrow(KimiRuntimeProviderError);
+  });
+
+  it('keeps the single-transport behaviour when no registry is given', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+    await provider.syncAgent({ ...AGENT, modelProvider: 'anything' });
+    await provider.start(baseRequest());
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+  });
+});
+
+describe('source bundle unpacking', () => {
+  it('materializes a source-bundle-v1 artifact as a real tree beside the JSON', async () => {
+    const bundle = JSON.stringify({
+      version: 'source-bundle-v1',
+      repositorySha: 'a'.repeat(40),
+      files: [
+        { path: 'src/index.ts', content: 'export const a = 1;\n' },
+        { path: 'README.md', content: '# hi\n' },
+      ],
+    });
+    const store = createKimiLocalAccessStore();
+    const staged = store.stage({
+      files: [
+        {
+          bytes: new TextEncoder().encode(bundle),
+          mountPath: '/workspace/inputs/source-bundle.json',
+        },
+      ],
+      credentials: [],
+    });
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: store.resolveFile,
+    });
+    const handle = await provider.start(
+      baseRequest({ resources: staged.resources }),
+    );
+
+    const workdir = path.join(sandboxRoot, handle.id);
+    await expect(
+      fs.readFile(path.join(workdir, 'repo/src/index.ts'), 'utf8'),
+    ).resolves.toBe('export const a = 1;\n');
+    await expect(
+      fs.readFile(path.join(workdir, 'repo/README.md'), 'utf8'),
+    ).resolves.toBe('# hi\n');
+    // The bundle itself stays mounted: provenance is unchanged.
+    await expect(
+      fs.readFile(path.join(workdir, 'inputs/source-bundle.json'), 'utf8'),
+    ).resolves.toBe(bundle);
+  });
+
+  it('ignores a mounted resource that is not a source bundle', async () => {
+    const store = createKimiLocalAccessStore();
+    const staged = store.stage({
+      files: [
+        {
+          bytes: new TextEncoder().encode('console.log(1)'),
+          mountPath: '/workspace/inputs/file-0.txt',
+        },
+        {
+          bytes: new TextEncoder().encode('{"version":"other-v1"}'),
+          mountPath: '/workspace/inputs/file-1.json',
+        },
+      ],
+      credentials: [],
+    });
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: store.resolveFile,
+    });
+    const handle = await provider.start(
+      baseRequest({ resources: staged.resources }),
+    );
+    await expect(
+      fs.readdir(path.join(sandboxRoot, handle.id)),
+    ).resolves.not.toContain('repo');
   });
 });

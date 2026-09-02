@@ -516,7 +516,9 @@ async function callTool(
         throw new JsonRpcCallError(
           -32602,
           `contentBase64 must decode to valid JSON for mediaType application/json: ${
-            error instanceof Error ? error.message.slice(0, 200) : 'parse failed'
+            error instanceof Error
+              ? error.message.slice(0, 200)
+              : 'parse failed'
           }`,
         );
       }
