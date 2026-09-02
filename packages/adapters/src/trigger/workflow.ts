@@ -731,6 +731,57 @@ function withModelName(
   };
 }
 
+/** Hard ceiling on the rendered result carried in a progress note. */
+const MAX_RESULT_NOTE_CHARS = 320;
+
+/**
+ * Renders a step's validated result for the operator's activity feed.
+ *
+ * Two things make this safe to show where raw model text is not. It is the
+ * schema-validated result, so its shape is known rather than provider-chosen;
+ * and every string that survives is stripped of control characters, collapsed
+ * to single spaces, and bounded, so a crafted value cannot forge feed
+ * structure or smuggle a wall of text into the run page.
+ *
+ * Artifact references are summarized rather than printed. A manifest entry is
+ * ten fields of key, digest and timestamps; what a reader wants to know is
+ * that the step produced `plan`, and how big it was.
+ */
+function describeStepResult(value: unknown): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
+  const clean = (text: string): string =>
+    text.replace(CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim();
+  const summarize = (input: unknown, depth: number): unknown => {
+    if (depth > 4) return '...';
+    if (typeof input === 'string') return clean(input).slice(0, 120);
+    if (input === null || typeof input !== 'object') return input;
+    if (Array.isArray(input))
+      return input.slice(0, 8).map((entry) => summarize(entry, depth + 1));
+    const record = input as Record<string, unknown>;
+    if (
+      typeof record.artifactId === 'string' &&
+      typeof record.key === 'string' &&
+      typeof record.sizeBytes === 'number'
+    )
+      return `artifact ${clean(record.artifactId)} v${String(record.version ?? 1)}, ${String(record.sizeBytes)} B`;
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record).slice(0, 12))
+      out[clean(key).slice(0, 40)] = summarize(entry, depth + 1);
+    return out;
+  };
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(summarize(value, 0)) ?? '';
+  } catch {
+    return undefined;
+  }
+  if (rendered.length === 0 || rendered === '{}') return undefined;
+  return rendered.length > MAX_RESULT_NOTE_CHARS
+    ? `${rendered.slice(0, MAX_RESULT_NOTE_CHARS)}...`
+    : rendered;
+}
+
 function runtimeProgress(
   event: RuntimeEvent,
   toolCalls: ReadonlyMap<string, string>,
@@ -1659,13 +1710,17 @@ async function runAgentStep<T>(
           updatedAt: at(dependencies.clock()),
         });
       }
+      const rendered = describeStepResult(parsed.data);
+      const model = progressContext.model;
       await recordStepProgress(
         dependencies,
         workflow.runId,
         progressContext,
         'completed',
         'completed',
-        'Step completed',
+        rendered === undefined
+          ? 'Step completed'
+          : `Step completed. ${model === undefined ? 'Model' : `Model (${model})`} returned: ${rendered}`,
       );
       completedResult = parsed.data;
     } catch (rawError) {

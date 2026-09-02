@@ -1320,7 +1320,11 @@ describe('durable feature workflow', () => {
         expect.objectContaining({
           stepKey: 'specification',
           phase: 'completed',
-          message: 'Step completed',
+          // The completed note carries the step's validated result, with
+          // artifact manifests summarized rather than dumped.
+          message: expect.stringContaining(
+            'Step completed. Model (sonnet) returned:',
+          ) as unknown as string,
         }),
       ]),
     );
@@ -1408,7 +1412,9 @@ describe('durable feature workflow', () => {
         expect.objectContaining({
           attempt: 2,
           phase: 'completed',
-          message: 'Step completed',
+          message: expect.stringContaining(
+            'Step completed',
+          ) as unknown as string,
         }),
       ]),
     );
@@ -2681,5 +2687,74 @@ describe('durable feature workflow', () => {
 
     expect(result.status).toBe('succeeded');
     expect(f.runtime.starts).toHaveLength(5);
+  });
+});
+
+describe('step result rendering', () => {
+  async function runAndCollectMessages(): Promise<readonly string[]> {
+    const f = await fixture();
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded',
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+    expect(result.status).toBe('succeeded');
+    return (
+      await f.repository.listEvents(persistenceId('run', 'run-1'), {
+        limit: 1_000,
+      })
+    )
+      .filter((event) => event.type === 'step.progress')
+      .map((event) =>
+        isRecord(event.payload) ? event.payload.message : undefined,
+      )
+      .filter((message): message is string => typeof message === 'string');
+  }
+
+  it('summarizes artifact references instead of dumping their manifests', async () => {
+    const messages = await runAndCollectMessages();
+    const planNote = messages.find((message) =>
+      message.includes('plan-output-v1'),
+    );
+    expect(planNote).toBeDefined();
+    // The reader learns which artifact and how big, not its digest or key.
+    expect(planNote).toContain('artifact plan v1');
+    expect(planNote).not.toContain('digest');
+    expect(planNote).not.toMatch(/[0-9a-f]{40}/);
+  });
+
+  it('bounds every completed note so one result cannot flood the feed', async () => {
+    const messages = await runAndCollectMessages();
+    const completed = messages.filter((message) =>
+      message.startsWith('Step completed'),
+    );
+    expect(completed.length).toBeGreaterThan(0);
+    for (const message of completed) {
+      expect(message.length).toBeLessThanOrEqual(420);
+      // Control characters would let a crafted result forge feed structure.
+      // eslint-disable-next-line no-control-regex
+      expect(message).not.toMatch(/[\u0000-\u001f\u007f]/);
+    }
   });
 });
