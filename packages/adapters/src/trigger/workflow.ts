@@ -609,6 +609,13 @@ interface StepProgressContext {
    * the run's first execution.
    */
   readonly resumeGeneration?: number;
+  /**
+   * The model this step is running on. Named in every note about the model so
+   * a reader of the feed can tell which one is doing the work: a run may route
+   * different roles to different models, and "the model is using bash" is a
+   * much less useful sentence than naming it.
+   */
+  readonly model?: string;
 }
 
 async function recordStepProgress(
@@ -703,6 +710,25 @@ interface RuntimeProgressNote {
    * own instead of the first three events of a type hiding the rest.
    */
   readonly variant: string;
+}
+
+/**
+ * Rewrites a note that opens by saying "Model" so it says which model. The
+ * subject is the only thing that changes; tool-centric notes ("bash finished")
+ * are already specific and are left alone.
+ */
+function withModelName(
+  note: RuntimeProgressNote | undefined,
+  model: string | undefined,
+): RuntimeProgressNote | undefined {
+  if (note === undefined) return undefined;
+  if (model === undefined || model.length === 0 || model.length > 64)
+    return note;
+  if (!note.message.startsWith('Model')) return note;
+  return {
+    ...note,
+    message: `Model (${model})${note.message.slice('Model'.length)}`,
+  };
 }
 
 function runtimeProgress(
@@ -827,7 +853,10 @@ async function consumeEvents(
       if (toolUseId !== undefined && toolName !== undefined)
         toolCalls.set(toolUseId, toolName);
     }
-    const progress = runtimeProgress(event, toolCalls);
+    const progress = withModelName(
+      runtimeProgress(event, toolCalls),
+      step.model,
+    );
     if (progress !== undefined && notes < MAX_PROGRESS_NOTES_PER_ATTEMPT) {
       const variantKey = `${event.type}:${progress.variant}`;
       const occurrence = (progressCounts.get(variantKey) ?? 0) + 1;
@@ -1087,6 +1116,7 @@ async function runAgentStep<T>(
       stepKey,
       attempt,
       resumeGeneration,
+      model: roleDefinition.agent.model,
     };
     const effectKey = `runtime:${workflow.runId}:${stepKey}:${String(attempt)}`;
     const claim = await claimEffect(

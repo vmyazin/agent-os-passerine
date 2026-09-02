@@ -31,6 +31,7 @@ import {
   githubOwnerNameFromUrl,
   githubRepositoryBindingKey,
   parseGitHubRepositoryAllowlist,
+  recoverLocalDirectRuns,
   runGit,
   selectGitHubRepositoryFromUrl,
   kimiFromEnv,
@@ -557,6 +558,14 @@ export function localCancellationRuntime(): RuntimeProvider {
   } as unknown as RuntimeProvider;
 }
 
+/**
+ * Restart recovery is a once-per-process sweep, not a per-dispatch one. The
+ * flag lives at module scope because `localDirectDispatchFromEnv` may be
+ * called more than once in a process (tests, a re-read of the environment),
+ * and a second sweep would race the first for the same runs.
+ */
+let localDirectRecoveryStarted = false;
+
 function localDirectDispatchFromEnv() {
   const repository = repositoryFromEnv();
   const checkpoints = createNeonWorkflowCheckpointStore(process.env);
@@ -649,7 +658,7 @@ function localDirectDispatchFromEnv() {
   const handlerOnce = () =>
     (composed ??= createLocalDirectFeatureWorkflowFromEnv(process.env));
 
-  return createDurableTriggerOutbox({
+  const outbox = createDurableTriggerOutbox({
     checkpoints,
     trigger: createLocalDirectDispatcher({
       handler: {
@@ -682,6 +691,37 @@ function localDirectDispatchFromEnv() {
     // local session lives in this process and is recovered by resume instead.
     sourceSnapshot,
   });
+
+  // Fire-and-forget, and once per process. This sweep reopens the runs the
+  // *previous* process died holding -- nothing in this process is waiting on
+  // its answer, and the control plane must come up whether or not it works.
+  // Awaiting it would put a database round-trip per stranded run in front of
+  // boot; letting it throw would take the app down over runs that are already
+  // stuck. A sweep that fails leaves those runs exactly as it found them, and
+  // the next restart tries again.
+  if (!localDirectRecoveryStarted) {
+    localDirectRecoveryStarted = true;
+    void recoverLocalDirectRuns({
+      repository,
+      checkpoints,
+      dispatch: async ({ runId, pipeline, resumeGeneration }) => {
+        if (pipeline !== 'feature' && pipeline !== 'goal')
+          throw new Error(`run ${runId} has no dispatchable pipeline`);
+        await outbox.requestStart({
+          // The same key the operator-driven resume mints, so a resume and a
+          // recovery of one run at one generation are one dispatch.
+          idempotencyKey: `workflow-start:${runId}:resume:${String(resumeGeneration)}`,
+          runId,
+          pipeline,
+          resumeGeneration,
+        });
+      },
+    }).catch((error: unknown) => {
+      console.error('local-direct restart recovery failed', error);
+    });
+  }
+
+  return outbox;
 }
 
 export function workflowDispatchFromEnv() {

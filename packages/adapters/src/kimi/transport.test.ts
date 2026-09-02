@@ -120,3 +120,60 @@ describe('kimi http transport retries', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('forward compatibility', () => {
+  it('accepts a known block carrying a field this transport does not read', async () => {
+    // Anthropic added `caller` to tool_use blocks. A strict schema turned that
+    // into a failed run after the turn had already been paid for.
+    const transport = createKimiHttpTransport({
+      apiKey: 'k',
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            content: [
+              { type: 'text', text: 'thinking about it' },
+              {
+                type: 'tool_use',
+                id: 'call_1',
+                name: 'bash',
+                input: { command: 'ls' },
+                caller: 'assistant',
+              },
+            ],
+            stop_reason: 'tool_use',
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )) as typeof fetch,
+    });
+    const response = await transport.send({
+      model: 'claude-sonnet-4-6',
+      messages: [],
+      tools: [],
+      maxTokens: 16,
+    });
+    expect(response.content).toHaveLength(2);
+    expect(response.content[1]).toMatchObject({
+      type: 'tool_use',
+      name: 'bash',
+    });
+  });
+
+  it('still refuses an unknown block type', async () => {
+    const transport = createKimiHttpTransport({
+      apiKey: 'k',
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            content: [{ type: 'server_tool_use', id: 'x' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )) as typeof fetch,
+    });
+    await expect(
+      transport.send({ model: 'm', messages: [], tools: [], maxTokens: 16 }),
+    ).rejects.toThrow();
+  });
+});

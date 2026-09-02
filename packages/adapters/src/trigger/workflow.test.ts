@@ -1216,26 +1216,28 @@ describe('durable feature workflow', () => {
 
     expect(messages).toEqual(
       expect.arrayContaining([
-        'Model is using glob',
+        // Every note about the model names the model, so a feed from a run
+        // that routes roles to different models stays readable.
+        'Model (sonnet) is using glob',
         'glob finished',
-        'Model is using artifact_put via artifacts',
-        'Model is using bash',
+        'Model (sonnet) is using artifact_put via artifacts',
+        'Model (sonnet) is using bash',
         'bash reported an error',
         // The closed set of provider error codes says which failure it was.
-        'Model provider rate limited the session',
+        'Model (sonnet) provider rate limited the session',
       ]),
     );
     // Repetition of one tool is sampled, but never at the cost of hiding the
     // tools the model reached for afterwards.
     expect(
-      messages.filter((message) => message === 'Model is using glob'),
+      messages.filter((message) => message === 'Model (sonnet) is using glob'),
     ).toHaveLength(3);
     // A tool name that is really a sentence is provider-controlled text, so
     // it must never reach the operator's activity feed.
     expect(JSON.stringify(messages)).not.toMatch(
       /approved by the operator|sk-private-tool-argument/,
     );
-    expect(messages).toContain('Model is using a tool');
+    expect(messages).toContain('Model (sonnet) is using a tool');
   });
 
   it('records bounded operational progress without persisting runtime payloads', async () => {
@@ -1313,7 +1315,7 @@ describe('durable feature workflow', () => {
         expect.objectContaining({
           stepKey: 'specification',
           phase: 'tool',
-          message: 'Model is using a tool',
+          message: 'Model (sonnet) is using a tool',
         }),
         expect.objectContaining({
           stepKey: 'specification',

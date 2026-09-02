@@ -1,8 +1,12 @@
+import { isoTimestamp, persistenceId, type RunStatus } from '@agentos/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { InMemoryDomainRepository } from '../persistence/in-memory.js';
+import { InMemoryWorkflowCheckpointStore } from '../trigger/checkpoint-store.js';
 import { FeatureWorkflowTaskTransientError } from '../trigger/types.js';
 import {
   createLocalDirectDispatcher,
+  recoverLocalDirectRuns,
   LocalDirectGoalUnsupportedError,
   type LocalDirectDispatcher,
   type LocalDirectDispatcherOptions,
@@ -428,5 +432,333 @@ describe('local-direct dispatcher', () => {
     await expect(dispatcher.startFeature('run-2', 'project-1')).rejects.toThrow(
       /closed/,
     );
+  });
+});
+
+const recoveryCreatedAt = '2026-08-24T09:00:00.000Z';
+const recoveryNow = '2026-09-02T09:00:00.000Z';
+const neverExpires = '2099-01-01T00:00:00.000Z';
+
+/** The owner string the workflow derives from this dispatcher's execution. */
+const localOwner = (runId: string, generation = 0) =>
+  `workflow:local-direct:${runId}:${String(generation)}:local-direct`;
+
+/** The owner string the workflow derives from a real Trigger execution. */
+const triggerOwner = (triggerRunId: string) =>
+  `workflow:${triggerRunId}:20260824.1`;
+
+async function seedProject(repository: InMemoryDomainRepository) {
+  const at = isoTimestamp(recoveryCreatedAt);
+  await repository.createProject({
+    id: persistenceId('project', 'project-1'),
+    name: 'Local direct',
+    createdAt: at,
+    updatedAt: at,
+  });
+}
+
+async function seedRun(
+  repository: InMemoryDomainRepository,
+  input: {
+    readonly id: string;
+    readonly status: RunStatus;
+    readonly createdAt?: string;
+    readonly pipeline?: string;
+  },
+) {
+  const at = isoTimestamp(input.createdAt ?? recoveryCreatedAt);
+  return repository.createRun({
+    id: persistenceId('run', input.id),
+    projectId: persistenceId('project', 'project-1'),
+    pipeline: input.pipeline ?? 'feature',
+    status: input.status,
+    createdAt: at,
+    updatedAt: at,
+  });
+}
+
+async function seedEffect(
+  checkpoints: InMemoryWorkflowCheckpointStore,
+  input: {
+    readonly key: string;
+    readonly runId: string;
+    readonly ownerId: string;
+    readonly succeed?: boolean;
+  },
+) {
+  const claimed = await checkpoints.claimEffect(
+    {
+      key: input.key,
+      runId: input.runId,
+      kind: 'workflow-step',
+      inputFingerprint: 'f'.repeat(64),
+      createdAt: recoveryCreatedAt,
+      updatedAt: recoveryCreatedAt,
+    },
+    {
+      ownerId: input.ownerId,
+      now: recoveryCreatedAt,
+      leaseExpiresAt: neverExpires,
+    },
+  );
+  if (input.succeed !== true) return claimed;
+  const lease = {
+    key: input.key,
+    ownerId: input.ownerId,
+    leaseVersion: claimed.leaseVersion,
+  };
+  await checkpoints.markEffectStarted(lease, recoveryCreatedAt);
+  return checkpoints.completeEffect(
+    lease,
+    { replayed: true },
+    recoveryCreatedAt,
+  );
+}
+
+async function recordingRecovery() {
+  const repository = new InMemoryDomainRepository();
+  await seedProject(repository);
+  const checkpoints = new InMemoryWorkflowCheckpointStore();
+  const dispatched: {
+    runId: string;
+    projectId: string;
+    pipeline: string;
+    resumeGeneration: number;
+  }[] = [];
+  const released: string[] = [];
+  const store = {
+    listEffects: (runId: string) => checkpoints.listEffects(runId),
+    releaseRunForResume: async (runId: string) => {
+      released.push(runId);
+      return checkpoints.releaseRunForResume(runId);
+    },
+  };
+  return { repository, checkpoints, dispatched, released, store };
+}
+
+describe('local-direct restart recovery', () => {
+  it('reopens and re-dispatches a running run this executor owned', async () => {
+    const { repository, checkpoints, dispatched, released, store } =
+      await recordingRecovery();
+    await seedRun(repository, { id: 'run-a', status: 'running' });
+    await seedEffect(checkpoints, {
+      key: 'step:run-a:spec',
+      runId: 'run-a',
+      ownerId: localOwner('run-a'),
+    });
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(result).toEqual({ recovered: ['run-a'], skipped: [] });
+    expect(released).toEqual(['run-a']);
+    expect(dispatched).toEqual([
+      {
+        runId: 'run-a',
+        projectId: 'project-1',
+        pipeline: 'feature',
+        resumeGeneration: 1,
+      },
+    ]);
+    const reopened = await repository.getRun(persistenceId('run', 'run-a'));
+    expect(reopened?.status).toBe('pending');
+    // The workflow reads the generation and the deadline anchor back off this
+    // event; without it the replay would key its ledger as generation zero.
+    const events = await repository.listEvents(persistenceId('run', 'run-a'));
+    expect(events.map((event) => event.type)).toEqual(['run.resumed']);
+    expect(events[0]?.payload).toEqual({ generation: 1 });
+    expect(events[0]?.occurredAt).toBe(recoveryNow);
+  });
+
+  it('brings a waiting run back to its approval without discarding paid work', async () => {
+    const { repository, checkpoints, dispatched, store } =
+      await recordingRecovery();
+    await seedRun(repository, { id: 'run-w', status: 'waiting' });
+    // The spec step that was already paid for, and the waitpoint the dead
+    // process was parked on.
+    await seedEffect(checkpoints, {
+      key: 'step:run-w:spec',
+      runId: 'run-w',
+      ownerId: localOwner('run-w'),
+      succeed: true,
+    });
+    await seedEffect(checkpoints, {
+      key: 'waitpoint:run-w:approval_1',
+      runId: 'run-w',
+      ownerId: localOwner('run-w'),
+    });
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(result.recovered).toEqual(['run-w']);
+    expect(dispatched[0]?.resumeGeneration).toBe(1);
+    const remaining = await checkpoints.listEffects('run-w');
+    // The succeeded step survives, so the replay reaches the approval from
+    // storage instead of paying a model to redo it; only the unfinished
+    // waitpoint is released.
+    expect(remaining.map((effect) => effect.key)).toEqual(['step:run-w:spec']);
+    expect(remaining[0]?.status).toBe('succeeded');
+    expect(remaining[0]?.output).toEqual({ replayed: true });
+  });
+
+  it('leaves a run owned by the Trigger executor completely alone', async () => {
+    const { repository, checkpoints, dispatched, released, store } =
+      await recordingRecovery();
+    await seedRun(repository, { id: 'run-t', status: 'running' });
+    await seedEffect(checkpoints, {
+      key: 'step:run-t:spec',
+      runId: 'run-t',
+      ownerId: triggerOwner('run_abc123'),
+    });
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(result).toEqual({ recovered: [], skipped: ['run-t'] });
+    expect(released).toEqual([]);
+    expect(dispatched).toEqual([]);
+    const untouched = await repository.getRun(persistenceId('run', 'run-t'));
+    expect(untouched?.status).toBe('running');
+    expect(await repository.listEvents(persistenceId('run', 'run-t'))).toEqual(
+      [],
+    );
+    expect((await checkpoints.listEffects('run-t')).length).toBe(1);
+  });
+
+  it('leaves a run with no effects at all alone', async () => {
+    const { repository, dispatched, released, store } =
+      await recordingRecovery();
+    await seedRun(repository, { id: 'run-n', status: 'running' });
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(result).toEqual({ recovered: [], skipped: ['run-n'] });
+    expect(released).toEqual([]);
+    expect(dispatched).toEqual([]);
+    expect(
+      (await repository.getRun(persistenceId('run', 'run-n')))?.status,
+    ).toBe('running');
+  });
+
+  it('derives the next generation from the resume suffix already on the keys', async () => {
+    const { repository, checkpoints, dispatched, store } =
+      await recordingRecovery();
+    await seedRun(repository, { id: 'run-g', status: 'running' });
+    await seedEffect(checkpoints, {
+      key: 'step:run-g:spec',
+      runId: 'run-g',
+      ownerId: localOwner('run-g'),
+    });
+    await seedEffect(checkpoints, {
+      key: 'workflow-start:run-g:resume:2',
+      runId: 'run-g',
+      ownerId: localOwner('run-g', 2),
+    });
+
+    await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(dispatched[0]?.resumeGeneration).toBe(3);
+    const events = await repository.listEvents(persistenceId('run', 'run-g'));
+    expect(events[0]?.payload).toEqual({ generation: 3 });
+  });
+
+  it('keeps sweeping when one run fails to recover', async () => {
+    const { repository, checkpoints, dispatched, store } =
+      await recordingRecovery();
+    await seedRun(repository, {
+      id: 'run-1',
+      status: 'running',
+      createdAt: '2026-08-24T09:00:00.000Z',
+    });
+    await seedRun(repository, {
+      id: 'run-2',
+      status: 'running',
+      createdAt: '2026-08-24T10:00:00.000Z',
+    });
+    await seedRun(repository, {
+      id: 'run-3',
+      status: 'waiting',
+      createdAt: '2026-08-24T11:00:00.000Z',
+    });
+    for (const runId of ['run-1', 'run-2', 'run-3'])
+      await seedEffect(checkpoints, {
+        key: `step:${runId}:spec`,
+        runId,
+        ownerId: localOwner(runId),
+      });
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: {
+        listEffects: store.listEffects,
+        releaseRunForResume: async (runId: string) => {
+          if (runId === 'run-2') throw new Error('checkpoint release exploded');
+          return store.releaseRunForResume(runId);
+        },
+      },
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+    });
+
+    expect(result.recovered).toEqual(['run-1', 'run-3']);
+    expect(result.skipped).toEqual(['run-2']);
+    expect(dispatched.map((call) => call.runId)).toEqual(['run-1', 'run-3']);
+    expect(
+      (await repository.getRun(persistenceId('run', 'run-2')))?.status,
+    ).toBe('running');
+  });
+
+  it('sweeps no more runs than the limit allows', async () => {
+    const { repository, checkpoints, dispatched, store } =
+      await recordingRecovery();
+    for (const [index, runId] of ['run-1', 'run-2', 'run-3'].entries()) {
+      await seedRun(repository, {
+        id: runId,
+        status: 'running',
+        createdAt: `2026-08-24T0${String(index + 1)}:00:00.000Z`,
+      });
+      await seedEffect(checkpoints, {
+        key: `step:${runId}:spec`,
+        runId,
+        ownerId: localOwner(runId),
+      });
+    }
+
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: store,
+      dispatch: async (input) => void dispatched.push({ ...input }),
+      clock: () => recoveryNow,
+      limit: 2,
+    });
+
+    expect(result.recovered).toEqual(['run-1', 'run-2']);
+    expect(dispatched.length).toBe(2);
+    expect(
+      (await repository.getRun(persistenceId('run', 'run-3')))?.status,
+    ).toBe('running');
   });
 });

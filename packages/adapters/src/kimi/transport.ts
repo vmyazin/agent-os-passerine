@@ -15,40 +15,38 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const RETRYABLE_STATUS = (status: number): boolean =>
   status === 429 || (status >= 500 && status < 600);
 
+// Blocks are validated on the fields this transport reads, and tolerate
+// fields it does not. An unknown block TYPE still fails closed through the
+// discriminated union, which is the protocol violation worth rejecting; an
+// unknown KEY on a known block is just the provider having shipped since
+// this was written. Anthropic's `tool_use` blocks now carry `caller`, and a
+// strict schema turned that addition into a failed run after the model had
+// already been paid for the turn -- the whole cost of the request, thrown
+// away over a field nothing here reads.
 const contentBlockSchema = z.discriminatedUnion('type', [
-  z
-    .object({
-      type: z.literal('text'),
-      text: z.string(),
-    })
-    .strict(),
+  z.object({
+    type: z.literal('text'),
+    text: z.string(),
+  }),
   // Current Kimi models are reasoning models and emit thinking blocks on
-  // the Anthropic-compatible endpoint. The block may carry extra fields
-  // (e.g. a signature), so it alone is not strict; unknown block TYPES
-  // still fail closed via the discriminated union.
-  z
-    .object({
-      type: z.literal('thinking'),
-      thinking: z.string(),
-      signature: z.string().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('tool_use'),
-      id: z.string(),
-      name: z.string(),
-      input: z.unknown(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('tool_result'),
-      tool_use_id: z.string(),
-      content: z.string(),
-      is_error: z.boolean().optional(),
-    })
-    .strict(),
+  // the Anthropic-compatible endpoint.
+  z.object({
+    type: z.literal('thinking'),
+    thinking: z.string(),
+    signature: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('tool_use'),
+    id: z.string(),
+    name: z.string(),
+    input: z.unknown(),
+  }),
+  z.object({
+    type: z.literal('tool_result'),
+    tool_use_id: z.string(),
+    content: z.string(),
+    is_error: z.boolean().optional(),
+  }),
 ]);
 
 // The outer envelope and usage object are intentionally NOT `.strict()`:

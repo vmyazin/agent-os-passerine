@@ -1,5 +1,20 @@
+import { createHash } from 'node:crypto';
+
+import {
+  canonicalJsonValue,
+  isoTimestamp,
+  persistenceId,
+  type DomainRepository,
+  type RunStatus,
+  type WorkflowRun,
+} from '@agentos/core';
+
 import type { TriggerWorkflowDispatcher } from '../trigger/trigger-adapter.js';
-import { FeatureWorkflowTaskTransientError } from '../trigger/types.js';
+import {
+  FeatureWorkflowTaskTransientError,
+  type WorkflowCheckpointStore,
+} from '../trigger/types.js';
+import { RUN_RESUMED_EVENT } from '../trigger/workflow.js';
 
 /**
  * The feature task handler, seen through the narrowest hole that lets this
@@ -310,4 +325,201 @@ export function createLocalDirectDispatcher(
     },
   };
   return Object.freeze(dispatcher);
+}
+
+/**
+ * The statuses a worker that died mid-flight leaves behind. `running` is an
+ * execution that was never finished; `waiting` is one parked on an approval
+ * whose in-process waiter died with it. Both are terminal in practice on this
+ * executor -- nothing re-attaches -- which is exactly the five-day `running`
+ * run the 2026-08-28 evaluation found.
+ */
+const RECOVERABLE_RUN_STATUSES: readonly RunStatus[] = ['running', 'waiting'];
+
+/**
+ * The prefix on the `ownerId` of every effect this executor claimed.
+ *
+ * The workflow builds its owner string as
+ * `workflow:<triggerRunId>:<taskVersion>` (`trigger/workflow.ts`), and this
+ * dispatcher hands it `triggerRunId = local-direct:<runId>:<generation>`. So
+ * ownership is readable from the effect row alone, which is the only way a
+ * restarting process can tell its own abandoned work from another executor's
+ * still-live work -- and telling them apart is the whole safety property
+ * here. A run with no locally-owned effect is left completely untouched.
+ */
+const LOCAL_DIRECT_EFFECT_OWNER_PREFIX = 'workflow:local-direct:';
+
+/** Matches the resume suffix the outbox mints for a regenerated effect key. */
+const RESUME_GENERATION_PATTERN = /:resume:(\d+)$/;
+
+const DEFAULT_RECOVERY_LIMIT = 100;
+
+/**
+ * The two checkpoint operations recovery needs, named so a caller can pass a
+ * real {@link WorkflowCheckpointStore} (which satisfies this) without the
+ * function claiming authority over the other twenty methods.
+ */
+export type LocalDirectRecoveryCheckpoints = Pick<
+  WorkflowCheckpointStore,
+  'listEffects' | 'releaseRunForResume'
+>;
+
+export interface LocalDirectRecoveryOptions {
+  readonly repository: DomainRepository;
+  readonly checkpoints: LocalDirectRecoveryCheckpoints;
+  readonly dispatch: (input: {
+    readonly runId: string;
+    readonly projectId: string;
+    readonly pipeline: string;
+    readonly resumeGeneration: number;
+  }) => Promise<void>;
+  readonly clock?: () => string;
+  /** How many unfinished runs one sweep will look at. Defaults to 100. */
+  readonly limit?: number;
+}
+
+export interface LocalDirectRecoveryResult {
+  /** Runs reopened and re-dispatched by this sweep. */
+  readonly recovered: readonly string[];
+  /**
+   * Runs deliberately left alone: another executor's, never started, or one
+   * whose own recovery failed. A failure is reported here rather than thrown,
+   * because one bad run must not strand every other one.
+   */
+  readonly skipped: readonly string[];
+}
+
+function fingerprintOf(value: string): string {
+  return createHash('sha256').update(canonicalJsonValue(value)).digest('hex');
+}
+
+/** True when any effect of this run was claimed by a local-direct execution. */
+function ownedLocally(effects: readonly { ownerId?: string }[]): boolean {
+  return effects.some(
+    (effect) =>
+      effect.ownerId?.startsWith(LOCAL_DIRECT_EFFECT_OWNER_PREFIX) === true,
+  );
+}
+
+/**
+ * The generation the next execution of this run must use -- derived exactly
+ * as `ControlPlaneService.resumeRun` derives it, from the resume suffix on the
+ * effect keys, so a resume started by the operator and one started by this
+ * sweep can never land on the same generation.
+ */
+function nextResumeGeneration(effects: readonly { key: string }[]): number {
+  return (
+    effects.reduce((highest, effect) => {
+      const match = RESUME_GENERATION_PATTERN.exec(effect.key);
+      return match === null
+        ? highest
+        : Math.max(highest, Number.parseInt(match[1]!, 10));
+    }, 0) + 1
+  );
+}
+
+/**
+ * Brings this executor's own in-flight runs back after the process that was
+ * running them died.
+ *
+ * Trigger re-attaches to a task across a worker restart; this driver cannot,
+ * so a run left `running` or `waiting` when the process went away stays that
+ * way forever. This sweep is the replacement: it finds those runs, keeps only
+ * the ones whose effects this executor owned, and puts each one back through
+ * the same resume path an operator would use -- release the unfinished
+ * checkpoints, reopen the run as `pending`, record the resume, dispatch the
+ * next generation. Succeeded effects survive `releaseRunForResume`, so the
+ * replay reaches where it stopped without paying a model again; a `waiting`
+ * run in particular comes back to its approval for free.
+ *
+ * Deliberately a function rather than something the dispatcher's constructor
+ * does: it writes to the database, and a constructor that writes is both
+ * untestable and surprising.
+ *
+ * It never throws. Every per-run failure is recorded in `skipped` and the
+ * sweep carries on, because a recovery pass that aborts halfway has left the
+ * remaining runs in exactly the state it existed to fix.
+ */
+export async function recoverLocalDirectRuns(
+  options: LocalDirectRecoveryOptions,
+): Promise<LocalDirectRecoveryResult> {
+  const limit = options.limit ?? DEFAULT_RECOVERY_LIMIT;
+  const now = (): string => options.clock?.() ?? new Date().toISOString();
+  const recovered: string[] = [];
+  const skipped: string[] = [];
+
+  const listed: WorkflowRun[] = [];
+  for (const status of RECOVERABLE_RUN_STATUSES)
+    listed.push(...(await options.repository.listRuns({ status, limit })));
+  // One bounded, deterministic sweep across both statuses: oldest first,
+  // because the run that has been stuck longest is the one an operator is
+  // waiting on.
+  const runs = listed
+    .sort((left, right) =>
+      left.createdAt === right.createdAt
+        ? left.id.localeCompare(right.id)
+        : left.createdAt.localeCompare(right.createdAt),
+    )
+    .slice(0, limit);
+
+  for (const run of runs) {
+    try {
+      const effects = await options.checkpoints.listEffects(run.id);
+      if (!ownedLocally(effects)) {
+        // Another executor's run, or one that never started. Touching it
+        // would be this executor claiming work it does not own.
+        skipped.push(run.id);
+        continue;
+      }
+      const generation = nextResumeGeneration(effects);
+      // Cleared before reopening: a replay that met a dead-lettered
+      // checkpoint would refuse to continue and fail the run all over again.
+      await options.checkpoints.releaseRunForResume(run.id);
+      const at = isoTimestamp(now());
+      const reopened = await options.repository.transitionRun(
+        run.id,
+        RECOVERABLE_RUN_STATUSES,
+        { status: 'pending', error: null, output: null, updatedAt: at },
+        run.stateVersion ?? 0,
+      );
+      if (reopened === undefined) {
+        // Something else moved this run while the sweep was on it -- the
+        // operator resumed or cancelled it. Theirs wins.
+        skipped.push(run.id);
+        continue;
+      }
+      // The resume event is not bookkeeping: the workflow reads it back for
+      // both the generation that keys the usage ledger and the anchor for the
+      // execution deadline. Without it a run that sat unfinished for days
+      // would replay against a deadline measured from its creation and die
+      // immediately, and its ledger keys would collide with money already
+      // spent.
+      await options.repository.appendEvent({
+        runId: run.id,
+        eventId: persistenceId(
+          'event',
+          `run-resumed:${run.id}:${String(generation)}`,
+        ),
+        fingerprint: fingerprintOf(
+          `run-resumed:${run.id}:${String(generation)}`,
+        ),
+        type: RUN_RESUMED_EVENT,
+        payload: { generation },
+        occurredAt: at,
+      });
+      await options.dispatch({
+        runId: run.id,
+        projectId: run.projectId,
+        pipeline: run.pipeline,
+        resumeGeneration: generation,
+      });
+      recovered.push(run.id);
+    } catch {
+      // The reopened run is durable either way; a failed dispatch is retried
+      // by reconciliation, and a run this sweep could not touch stays exactly
+      // as it was.
+      skipped.push(run.id);
+    }
+  }
+  return { recovered, skipped };
 }
