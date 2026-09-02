@@ -2,6 +2,7 @@ import {
   loadRunDispatch,
   loadRunPageModel,
 } from '../../../src/application/run-page-model';
+import { controlPlaneService } from '../../../src/application/runtime';
 import { requirePageSession } from '../../../src/auth/page-session';
 import {
   EmptyState,
@@ -56,6 +57,12 @@ export default async function RunPage({
       : undefined;
   const diagnosis =
     dispatch === undefined ? undefined : diagnoseDispatch(dispatch);
+  // Only for a failed run: a succeeded one was approved, and its reviewer had
+  // nothing to ask for.
+  const review =
+    run.status === 'failed'
+      ? await controlPlaneService().reviewOutcome(run.id)
+      : undefined;
   const explanation = explainRunStatus({
     status: run.status,
     stepCount: run.steps.length,
@@ -133,6 +140,24 @@ export default async function RunPage({
             Why it failed
           </h2>
           <p>{run.error.message ?? 'No reason was recorded.'}</p>
+          {review === undefined || review.findings.length === 0 ? null : (
+            <>
+              <p>
+                {review.stepId === 'review-after-fix'
+                  ? 'The final review asked for these changes:'
+                  : 'The review asked for these changes:'}
+              </p>
+              <ul>
+                {review.findings.map((finding: string) => (
+                  <li key={finding}>{finding}</li>
+                ))}
+              </ul>
+              <p className="dispatch-remedy">
+                Findings come from the reviewing model. Check one before acting
+                on it: a review can be wrong about working code.
+              </p>
+            </>
+          )}
           {run.error.details === undefined ||
           run.error.details.length === 0 ? null : (
             <ul>

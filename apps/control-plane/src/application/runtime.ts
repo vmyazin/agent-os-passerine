@@ -920,6 +920,18 @@ export function workflowDispatchFromEnv() {
  * does.
  */
 export function approvalArtifactStoreFromEnv() {
+  // Follow the executor. The local one keeps artifact bodies on disk, and
+  // without this the inbox degrades to bare approvals -- which means the
+  // operator approves a Definition of Done without seeing the acceptance
+  // tests it froze, defeating the point of that gate.
+  if (executorFromEnv() === 'local-direct') {
+    const stateDirectory = process.env.AGENTOS_LOCAL_STATE_DIR?.trim();
+    if (!stateDirectory) return undefined;
+    return createFilesystemArtifactStorage({
+      root: join(stateDirectory, 'artifacts'),
+      manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
+    }).store;
+  }
   const configured =
     (process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() ?? '') !== '' &&
     (process.env.CLOUDFLARE_R2_ARTIFACT_BUCKET?.trim() ?? '') !== '' &&

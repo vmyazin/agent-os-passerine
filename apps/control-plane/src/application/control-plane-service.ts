@@ -417,6 +417,13 @@ export interface InboxProjection {
   readonly repliedAt?: IsoTimestamp;
 }
 
+export interface ReviewOutcome {
+  /** Which review produced it: `review` or `review-after-fix`. */
+  readonly stepId: string;
+  readonly decision: string;
+  readonly findings: readonly string[];
+}
+
 export interface ApprovalSummary {
   readonly title?: string;
   readonly requirements?: readonly string[];
@@ -1947,10 +1954,7 @@ export class ControlPlaneService {
     const at = this.clock();
     await this.repository.appendEvent({
       runId: run.id,
-      eventId: persistenceId(
-        'event',
-        `budget-override:${runId}:${String(at)}`,
-      ),
+      eventId: persistenceId('event', `budget-override:${runId}:${String(at)}`),
       fingerprint: fingerprint(`budget-override:${runId}:${String(at)}`),
       type: BUDGET_OVERRIDE_EVENT,
       payload: { microdollars },
@@ -2958,6 +2962,62 @@ export class ControlPlaneService {
    */
   async countRunsByStatus(status: RunStatus): Promise<number> {
     return this.repository.countRuns({ status });
+  }
+
+  /**
+   * What the reviewer said, for a run that review stopped.
+   *
+   * "final review after fix must be approved" is a true sentence and a dead
+   * end: it names the gate without naming the objection, so the one thing the
+   * operator needs in order to act is the one thing the page does not show.
+   * The findings live in the review artifact, so read them.
+   *
+   * Fail-soft like every other artifact read here: an unreadable review
+   * degrades to the bare failure reason, never to an error page.
+   */
+  async reviewOutcome(runId: string): Promise<ReviewOutcome | undefined> {
+    if (this.artifacts === undefined) return undefined;
+    try {
+      const run = await this.repository.getRun(persistenceId('run', runId));
+      if (run === undefined) return undefined;
+      // The last word wins: a run that was fixed and re-reviewed is explained
+      // by the re-review, not by the objection that triggered the fix.
+      for (const stepId of ['review-after-fix', 'review']) {
+        const scope = { projectId: run.projectId, runId: run.id, stepId };
+        const page = await this.artifacts.list({ scope, limit: 10 });
+        const item = page.items.find(
+          (candidate) => candidate.artifactId === 'review',
+        );
+        if (item === undefined) continue;
+        const value = await this.artifacts.get({
+          scope,
+          key: item.key,
+          maxBytes: 1_000_000,
+        });
+        if (value === undefined) continue;
+        const body = record(
+          JSON.parse(new TextDecoder().decode(value.bytes)) as JsonValue,
+        );
+        if (body?.version !== 'review-result-v1') continue;
+        const decision = safeString(body, 'decision');
+        const rawFindings = body.findings;
+        const findings = Array.isArray(rawFindings)
+          ? rawFindings
+              .slice(0, 20)
+              .map((entry: unknown) =>
+                typeof entry === 'string'
+                  ? redactText(entry).slice(0, 1_000)
+                  : undefined,
+              )
+              .filter((entry): entry is string => entry !== undefined)
+          : [];
+        if (decision === undefined) continue;
+        return { stepId, decision, findings };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
