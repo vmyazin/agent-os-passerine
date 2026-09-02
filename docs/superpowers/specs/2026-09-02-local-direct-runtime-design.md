@@ -1,9 +1,24 @@
 # Local Direct Runtime
 
-Status: Draft for operator approval
+Status: Approved design
 Date: 2026-09-02
 Approach: compose the existing in-process pieces behind the existing ports; add
 nothing to the workflow engine
+
+> **Follow-up decision — 2026-09-02, overrides the "Local dispatcher" bullet on
+> `retrieve`.** The spec said a lost execution returns `{status: 'lost'}` and
+> that the outbox would read it as an unreachable executor. The code disproves
+> it: `isExecutorUnavailable` (`packages/adapters/src/trigger/outbox.ts`)
+> requires both `status === 'SYSTEM_FAILURE'` and an error containing
+> `COULD_NOT_FIND_EXECUTOR`. The dispatcher returns exactly that shape, which
+> is a faithful description of a lost execution rather than a workaround.
+
+> **Follow-up decision — 2026-09-02, overrides "Local composition".** The spec
+> planned a second composition sharing extracted helpers. It is instead a
+> `profile` parameter on `createProductionFeatureWorkflowFromEnv`. Same intent,
+> stronger guarantee: the drift the spec worried about is impossible when there
+> is one composition, and the boundary rules are literally the same code rather
+> than two copies that agree today.
 
 ## Context
 

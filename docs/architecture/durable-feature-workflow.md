@@ -105,7 +105,7 @@ chained onto the last.
 `advanceBacklog` (`packages/core/src/backlog.ts`) is the whole scheduler as
 one pure function over durable state: given a backlog, its items in order,
 and the runs those items produced, is there an item to start now and on what
-base? Reconciliation calls it per project *after* its run scan — an item's
+base? Reconciliation calls it per project _after_ its run scan — an item's
 run may have just been settled by that scan — and acts on the answer:
 dispatch through the ordinary `createFeatureRun` with `baseRunId`, complete
 the backlog, or pause it.
@@ -207,6 +207,37 @@ version. Integer-safe ceiling prices every bucket; undifferentiated legacy
 cache creation is conservatively charged at the 1-hour rate. Trigger
 queue concurrency is defense in depth; it is not the budget or concurrency
 authority.
+
+## Executors
+
+The workflow engine imports nothing from Trigger.dev. `createDurableFeatureWorkflow`
+takes ports, and only one of them -- the approval waiter -- is Trigger-shaped.
+Two executors therefore drive the same engine, selected by `AGENTOS_EXECUTOR`:
+
+- **`trigger`** (default when `TRIGGER_SECRET_KEY` is set): the deployed shape.
+  Trigger.dev coordination, Managed Agents sessions, R2 artifacts, an artifact
+  MCP served over public HTTPS.
+- **`local-direct`**: everything in the control-plane process. Sessions run in
+  the process sandbox against the model API directly, artifacts are files under
+  `AGENTOS_LOCAL_STATE_DIR`, the artifact MCP is a function call, and approvals
+  wake by polling the approval row. Local projects only; a GitHub-bound project
+  is refused by name.
+
+Setting both is a boot error: two executors could claim one run.
+
+This is one composition with a `profile` parameter, not two compositions. What
+decides whether a change is safe -- role isolation, budget admission, the
+sealed acceptance tests, the signed trusted-test-report, the publication
+authority -- is the same code on both paths, so it cannot drift. What differs
+is only how work is scheduled and where bytes live.
+
+Two consequences worth stating plainly. Verification may run on the process
+runtime because the local profile supplies a workdir-relative trusted command;
+the container-absolute one (`exactTrustedCommand`) still may not, because
+`rm -rf /workspace/repo` outside a container is a real directory on the host.
+And a local session does not survive a process restart: the dispatcher answers
+`COULD_NOT_FIND_EXECUTOR` for an execution it no longer holds, which is what
+the existing recovery paths already understand.
 
 ## Local verification
 
