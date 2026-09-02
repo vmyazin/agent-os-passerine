@@ -20,7 +20,8 @@
     "test:e2e": "pnpm build && playwright test",
     "trigger:deploy": "trigger deploy",
     "trigger:dev": "trigger dev",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "preview": "node scripts/preview-run.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -239,6 +239,30 @@ And a local session does not survive a process restart: the dispatcher answers
 `COULD_NOT_FIND_EXECUTOR` for an execution it no longer holds, which is what
 the existing recovery paths already understand.
 
+## Previewing what a run delivered
+
+A finished local run leaves an `agentos/<run>` branch. Reading a diff answers
+whether the change looks right; it does not answer whether the thing runs.
+
+```sh
+pnpm preview <runId> [--port 4173] [--script dev]
+```
+
+It reads the run's own outcome for the branch and repository, checks the
+branch out detached in a scratch worktree, installs, and starts whatever
+dev/start script the project declares, printing the URL. A project with no
+such script gets its checkout left in place with the command to run its tests
+and the command to discard it. Ctrl+C stops the server and removes the
+worktree; the operator's own checkout is never touched and the branch is never
+moved.
+
+This runs model-written code on the operator's machine, outside the sandbox
+the pipeline keeps it inside. The run's sealed verification has already run
+the project's suite and the frozen acceptance tests in that sandbox, so this
+is for looking at the result rather than for deciding whether it is safe.
+A GitHub-bound run has nothing to preview locally: its result is a draft pull
+request.
+
 ## Local verification
 
 Install dependencies, apply migrations, and run the no-cost contract suite:
