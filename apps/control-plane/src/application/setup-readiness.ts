@@ -3,6 +3,7 @@ import { loadAgentOsConfig, type AgentOsConfig } from '@agentos/core';
 import {
   assertReaderPublisherRepositoryPairing,
   listGitHubRepositoryBindings,
+  missingLocalDirectVariables,
   parseGitHubRepositoryAllowlist,
   selectGitHubRepositoryFromUrl,
 } from '@agentos/adapters';
@@ -25,6 +26,8 @@ export interface DeploymentSetupReadiness {
   readonly ready: boolean;
   readonly readyForGitHub: boolean;
   readonly readyForLocal: boolean;
+  /** Which executor this deployment's runs are dispatched to. */
+  readonly executor: 'trigger' | 'local-direct';
   readonly repositories?: readonly string[];
   readonly groups: readonly SetupReadinessGroup[];
 }
@@ -80,12 +83,61 @@ function githubAllowlistReady(environment: Environment): boolean {
 }
 
 /**
+ * Which executor the report describes.
+ *
+ * Readiness reports; it never refuses. An unrecognised `AGENTOS_EXECUTOR` is
+ * therefore described as the Trigger deployment it is not, and the executor
+ * group below is the place that says the value is wrong -- the boot-time
+ * `executorFromEnv` is what actually fails on it.
+ */
+function selectedExecutor(
+  environment: Environment,
+): 'trigger' | 'local-direct' {
+  return environment.AGENTOS_EXECUTOR?.trim() === 'local-direct'
+    ? 'local-direct'
+    : 'trigger';
+}
+
+/**
+ * The local executor's own group. Its variables are not enumerated here:
+ * `missingLocalDirectVariables` is the single authority on what the local
+ * composition needs, and duplicating that list is how the two would drift.
+ */
+function localDirectExecutorGroup(
+  environment: Environment,
+): SetupReadinessGroup {
+  const exclusive = !present(environment, 'TRIGGER_SECRET_KEY');
+  return group('executor', 'Workflow dispatch (local-direct executor)', [
+    {
+      key: 'AGENTOS_EXECUTOR',
+      label: 'Executor selection',
+      ready: exclusive,
+      hint: exclusive
+        ? 'Runs execute in this process; no Trigger.dev worker is involved.'
+        : 'AGENTOS_EXECUTOR=local-direct cannot be combined with TRIGGER_SECRET_KEY: only one executor may be active, otherwise both would claim the same run.',
+    },
+    ...missingLocalDirectVariables(environment).map((name) => ({
+      key: name,
+      label: 'Required by the local-direct executor',
+      ready: false,
+      hint: `The local-direct executor cannot compose its workflow without ${name}.`,
+    })),
+  ]);
+}
+
+/**
  * Deployment-wide readiness: database, dispatch, storage, GitHub Apps env,
  * local workspaces, and trust anchors. Never echoes secret values.
+ *
+ * The executor decides which of those are even read: a `local-direct`
+ * deployment reaches neither Trigger.dev, nor R2, nor a public artifact MCP
+ * URL, so reporting those as unmet requirements would send an operator
+ * configuring services their runs never call.
  */
 export function deploymentSetupReadiness(
   environment: Environment,
 ): DeploymentSetupReadiness {
+  const executor = selectedExecutor(environment);
   const groups: SetupReadinessGroup[] = [
     group('database', 'Database', [
       item(
@@ -255,20 +307,35 @@ export function deploymentSetupReadiness(
       ),
     ]),
   ];
+  // `dispatch`, `models`, `storage` and `artifactMcp` describe variables only
+  // the Trigger executor reads; the local one's requirements all live in its
+  // own group, including its model key (either Anthropic or Kimi) and its
+  // filesystem artifact root.
+  const reported =
+    executor === 'trigger'
+      ? groups
+      : [
+          ...groups.filter((entry) => entry.id === 'database'),
+          localDirectExecutorGroup(environment),
+          ...groups.filter((entry) =>
+            ['github', 'local', 'trust'].includes(entry.id),
+          ),
+        ];
   const repositories = listGitHubRepositoryBindings(
     environment.GITHUB_SELECTED_REPOSITORIES_JSON,
   );
-  const github = groups.find((entry) => entry.id === 'github');
-  const local = groups.find((entry) => entry.id === 'local');
-  const ready = groups
+  const github = reported.find((entry) => entry.id === 'github');
+  const local = reported.find((entry) => entry.id === 'local');
+  const ready = reported
     .filter((entry) => entry.id !== 'github' && entry.id !== 'local')
     .every((entry) => entry.ready);
   return {
     ready,
     readyForGitHub: ready && (github?.ready ?? false),
     readyForLocal: ready && (local?.ready ?? false),
+    executor,
     ...(repositories === undefined ? {} : { repositories }),
-    groups,
+    groups: reported,
   };
 }
 

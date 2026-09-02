@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
   assertContainedRepository,
@@ -9,7 +9,11 @@ import {
   createAesWorkflowHandleSealer,
   createKimiLocalAccessStore,
   createKimiRuntimeProviderFromEnv,
+  createFilesystemArtifactStorage,
   createGitHubProjectSourceReader,
+  createLocalApprovalWaiter,
+  createLocalDirectDispatcher,
+  createLocalDirectFeatureWorkflowFromEnv,
   createLocalSourceSnapshotIngestor,
   inspectLocalProjectSource,
   listLocalProjectCommits,
@@ -158,7 +162,8 @@ function deploymentRegistryHostsFromEnv(): readonly string[] {
   }
   if (!Array.isArray(parsed)) return [];
   return parsed.filter(
-    (host): host is string => typeof host === 'string' && host.trim().length > 0,
+    (host): host is string =>
+      typeof host === 'string' && host.trim().length > 0,
   );
 }
 
@@ -250,7 +255,9 @@ export function repositoryHeadResolverFromEnv(): {
 } {
   let github:
     | {
-        readonly resolver: ReturnType<typeof createTrustedRepositoryHeadResolver>;
+        readonly resolver: ReturnType<
+          typeof createTrustedRepositoryHeadResolver
+        >;
         readonly readerRepositories: readonly GitHubPublicationRepository[];
       }
     | undefined;
@@ -468,7 +475,219 @@ function cancellationRuntime(): RuntimeProvider {
   };
 }
 
+/**
+ * Which executor claims this deployment's runs.
+ *
+ * Exactly one executor may be active, because both claim a run by writing the
+ * same outbox effects: two of them would race for the same start and the same
+ * runtime session. `AGENTOS_EXECUTOR` states the choice; when it is unset the
+ * answer is the historical one -- Trigger if a secret key is present, no
+ * dispatcher at all otherwise.
+ */
+export function executorFromEnv(): 'trigger' | 'local-direct' | undefined {
+  const selected = process.env.AGENTOS_EXECUTOR?.trim() ?? '';
+  const triggerConfigured =
+    (process.env.TRIGGER_SECRET_KEY?.trim() ?? '') !== '';
+  if (selected === '') return triggerConfigured ? 'trigger' : undefined;
+  if (selected === 'trigger') return 'trigger';
+  if (selected === 'local-direct') {
+    if (triggerConfigured)
+      throw new Error(
+        'AGENTOS_EXECUTOR=local-direct cannot be combined with TRIGGER_SECRET_KEY: only one executor may be active, otherwise both would claim the same run',
+      );
+    return 'local-direct';
+  }
+  throw new Error(
+    `AGENTOS_EXECUTOR must be "trigger" or "local-direct" (received "${selected}")`,
+  );
+}
+
+/**
+ * The composed local feature workflow. Named from the factory rather than
+ * imported: the task module that declares the interface also registers the
+ * Trigger task, and this process must not load it.
+ */
+type LocalDirectFeatureWorkflow = Awaited<
+  ReturnType<typeof createLocalDirectFeatureWorkflowFromEnv>
+>;
+
+/**
+ * The same durable outbox the Trigger branch builds, wired to pieces that all
+ * live in this process: a filesystem artifact store, the local source
+ * ingestor, the database-polling approval waiter, and a dispatcher that calls
+ * the feature workflow directly. Postgres stays authoritative; only the
+ * coordination and execution edges move.
+ */
+/**
+ * The cancellation runtime for the local executor.
+ *
+ * The cloud one (`cancellationRuntime`) exists because a Managed Agents
+ * session outlives the worker that started it: a different process has to be
+ * able to reach in and stop it, which is why it needs credentials and an
+ * artifact MCP URL. Neither statement is true here. A local session is an
+ * object in this process, owned by the composition's own provider, and the
+ * dispatcher's abort -- delivered through `trigger.cancel(externalRunRef)` in
+ * the same cancellation flow -- is what actually stops it.
+ *
+ * So these are deliberate no-ops rather than an oversight, and they are not a
+ * silent success: a session this process cannot see is a session that is
+ * already gone, because it could only ever have lived here. Every method the
+ * cancellation path does not use throws instead of pretending, so a future
+ * caller finds out rather than getting a plausible answer.
+ */
+export function localCancellationRuntime(): RuntimeProvider {
+  const unsupported = (method: string) => (): never => {
+    throw new Error(
+      `the local-direct executor's cancellation runtime does not implement ${method}: local sessions are owned by the process that started them`,
+    );
+  };
+  return {
+    syncAgent: async () => undefined,
+    syncEnvironment: async () => undefined,
+    start: unsupported('start'),
+    events: unsupported('events'),
+    send: unsupported('send'),
+    resume: unsupported('resume'),
+    collectOutput: unsupported('collectOutput'),
+    usage: unsupported('usage'),
+    // Nothing remote holds this session, and nothing outlives the process.
+    cancel: async () => undefined,
+    cleanup: async () => undefined,
+    cleanupAccess: async () => undefined,
+  } as unknown as RuntimeProvider;
+}
+
+function localDirectDispatchFromEnv() {
+  const repository = repositoryFromEnv();
+  const checkpoints = createNeonWorkflowCheckpointStore(process.env);
+  const stateDirectory = requiredRuntime('AGENTOS_LOCAL_STATE_DIR');
+  // The very same root the local composition uses, so the ingestor writing a
+  // source snapshot here and the workflow reading it there are one store.
+  const artifacts = createFilesystemArtifactStorage({
+    root: join(stateDirectory, 'artifacts'),
+    manifest: createDomainArtifactManifestStore(repository),
+  }).store;
+
+  const resolveSourceSnapshotRun = async (runId: string) => {
+    const run = await repository.getRun(persistenceId('run', runId));
+    if (
+      run === undefined ||
+      (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+    )
+      throw new Error('source snapshot workflow run does not exist');
+    const snapshots = await repository.listConfigSnapshots(run.id, {
+      limit: 2,
+    });
+    if (snapshots.length !== 1)
+      throw new Error('source snapshot config binding is unavailable');
+    const config = parseAgentOsConfig(snapshots[0]!.config);
+    const provenance = run.input as {
+      provenance?: { repositorySha?: unknown };
+    };
+    const repositorySha = provenance.provenance?.repositorySha;
+    if (
+      typeof repositorySha !== 'string' ||
+      !/^[0-9a-f]{40}$/.test(repositorySha) ||
+      repositorySha !== snapshots[0]!.repositorySha
+    )
+      throw new Error('source snapshot repository SHA binding is invalid');
+    return { run, config, repositorySha };
+  };
+
+  let localIngestor: TrustedSourceSnapshotIngestor | undefined;
+  const getLocalIngestor = (): TrustedSourceSnapshotIngestor =>
+    (localIngestor ??= createLocalSourceSnapshotIngestor({
+      artifacts,
+      workspacesRoot:
+        localWorkspacesRootFromEnv() ??
+        (() => {
+          throw new Error(
+            'AGENTOS_LOCAL_WORKSPACES_ROOT is required to ingest local experiment source snapshots',
+          );
+        })(),
+      resolveBinding: async (runId) => {
+        const resolved = await resolveSourceSnapshotRun(runId);
+        const localPath = resolved.config.project.localPath;
+        if (localPath === undefined)
+          throw new Error(
+            'source snapshot binding is not a local experiment run',
+          );
+        return {
+          projectId: resolved.run.projectId,
+          runId: resolved.run.id,
+          localPath,
+          baseBranch: resolved.config.project.defaultBranch,
+          repositorySha: resolved.repositorySha,
+        };
+      },
+    }));
+
+  const sourceSnapshot: TrustedSourceSnapshotIngestor = {
+    async ensure(runId) {
+      const resolved = await resolveSourceSnapshotRun(runId);
+      if (resolved.config.project.localPath === undefined)
+        throw new Error(
+          'the local-direct executor runs local projects only; this run has no project.localPath in its config, so use the Trigger executor for it',
+        );
+      return getLocalIngestor().ensure(runId);
+    },
+  };
+
+  let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;
+  const runtimeHandles = () =>
+    (vault ??= createRepositoryRuntimeHandleVault({
+      repository,
+      sealer: createAesWorkflowHandleSealer(
+        Buffer.from(requiredRuntime('AGENTOS_RUNTIME_HANDLE_KEY'), 'base64url'),
+      ),
+    }));
+
+  // Composed on first dispatch, not here: an unconfigured environment should
+  // report the local executor's missing variables by name from the
+  // composition, rather than failing the whole control plane at import time.
+  let composed: Promise<LocalDirectFeatureWorkflow> | undefined;
+  const handlerOnce = () =>
+    (composed ??= createLocalDirectFeatureWorkflowFromEnv(process.env));
+
+  return createDurableTriggerOutbox({
+    checkpoints,
+    trigger: createLocalDirectDispatcher({
+      handler: {
+        // The dispatcher builds the very payload and execution context the
+        // Trigger task builds (`feature-task-payload-v1`); the structural
+        // `unknown` on its side only keeps the Trigger types out of a process
+        // that has left Trigger behind.
+        run: async (payload, execution) =>
+          (await handlerOnce()).run(
+            payload as Parameters<LocalDirectFeatureWorkflow['run']>[0],
+            execution as Parameters<LocalDirectFeatureWorkflow['run']>[1],
+          ),
+      },
+    }),
+    approval: createLocalApprovalWaiter({ repository }),
+    clock: () => new Date().toISOString(),
+    runtime: localCancellationRuntime(),
+    repository,
+    runtimeHandles: {
+      store: (input) => runtimeHandles().store(input),
+      load: (externalId, runId): Promise<RuntimeHandle> =>
+        runtimeHandles().load(externalId, runId),
+      markCancelled: (externalId, at) =>
+        runtimeHandles().markCancelled(externalId, at),
+      markCleaned: (externalId, at) =>
+        runtimeHandles().markCleaned(externalId, at),
+    },
+    // Deliberately absent. Start recovery exists to reconcile a cloud session
+    // whose start may or may not have landed while the process was away; a
+    // local session lives in this process and is recovered by resume instead.
+    sourceSnapshot,
+  });
+}
+
 export function workflowDispatchFromEnv() {
+  const executor = executorFromEnv();
+  if (executor === undefined) return undefined;
+  if (executor === 'local-direct') return localDirectDispatchFromEnv();
   const triggerSecret = process.env.TRIGGER_SECRET_KEY?.trim() || undefined;
   const databaseUrl = process.env.DATABASE_URL?.trim() || undefined;
   if (triggerSecret === undefined) return undefined;
@@ -671,7 +890,9 @@ export function approvalArtifactStoreFromEnv() {
     accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
     bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
     accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
-    secretAccessKey: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY'),
+    secretAccessKey: requiredRuntime(
+      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
+    ),
     manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
   });
 }
@@ -698,10 +919,9 @@ export function workflowCheckpointsFromEnv() {
  * worker that will never arrive". Gated on the same key that enables
  * dispatch, and silent when it cannot answer.
  */
-export async function externalRunStateFromEnv(externalRef: string): Promise<
-  | { readonly status: string; readonly error?: string }
-  | undefined
-> {
+export async function externalRunStateFromEnv(
+  externalRef: string,
+): Promise<{ readonly status: string; readonly error?: string } | undefined> {
   if ((process.env.TRIGGER_SECRET_KEY?.trim() ?? '') === '') return undefined;
   try {
     return await createTriggerSdkBoundary().retrieveRun(externalRef);
@@ -723,9 +943,8 @@ export function controlPlaneService(): ControlPlaneService {
         : (() => {
             const resolver = repositoryHeadResolverFromEnv();
             return {
-              resolve: async (
-                config: ReturnType<typeof parseAgentOsConfig>,
-              ) => (await resolver.resolve(config)).repositorySha,
+              resolve: async (config: ReturnType<typeof parseAgentOsConfig>) =>
+                (await resolver.resolve(config)).repositorySha,
             };
           })();
     const approvalArtifacts = approvalArtifactStoreFromEnv();
