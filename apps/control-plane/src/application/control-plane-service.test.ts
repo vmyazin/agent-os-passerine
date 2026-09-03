@@ -1043,6 +1043,63 @@ runtime: { provider: local }
     expect(JSON.stringify(projection)).not.toContain('must never escape');
   });
 
+  it('shows a run past the first page of its events', async () => {
+    // The repositories clamp one listing to a hundred rows, oldest first. A
+    // single read showed a run's opening and nothing after it -- which reads
+    // as a frozen run rather than a truncated page, since what an operator
+    // needs most is the work happening now.
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'run-long');
+    const stepRunId = persistenceId('stepRun', 'run-long:implementation:1');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.upsertStepRun({
+      id: stepRunId,
+      runId,
+      stepKey: 'implementation',
+      attempt: 1,
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let index = 0; index < 250; index += 1)
+      await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', `progress-${String(index)}`),
+        fingerprint: `progress-${String(index)}`,
+        type: 'step.progress',
+        payload: {
+          stepRunId,
+          stepKey: 'implementation',
+          attempt: 1,
+          phase: 'tool',
+          message: `note ${String(index)}`,
+        },
+        occurredAt: now,
+      });
+
+    const projection = await createService(repository).getRun('run-long');
+
+    const progress = projection.steps[0]?.progress ?? [];
+    // A step keeps its newest hundred notes, so the feed ends at the work
+    // happening now rather than at the hundredth event the run ever wrote.
+    expect(progress).toHaveLength(100);
+    expect(progress.at(-1)).toMatchObject({ message: 'note 249' });
+    expect(progress.at(0)).toMatchObject({ message: 'note 150' });
+  });
+
   it('orders step progress by the time it shows, not by append order', async () => {
     const repository = new InMemoryDomainRepository();
     const runId = persistenceId('run', 'run-progress-order');

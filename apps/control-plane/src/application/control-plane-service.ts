@@ -3287,10 +3287,41 @@ export class ControlPlaneService {
     throw error;
   }
 
+  /**
+   * Every event of a run, however many there are.
+   *
+   * The repositories clamp one listing to a bounded page, oldest first, so a
+   * single read showed a run's opening and nothing after it: past a hundred
+   * events the activity feed stopped dead, which reads as a frozen run rather
+   * than a truncated page. What an operator needs most -- the work happening
+   * now, and how the run ended -- is exactly what fell off.
+   *
+   * Bounded defensively: pagination that fails to advance, or a run larger
+   * than any real one, stops the scan rather than looping.
+   */
+  private async readAllEvents(
+    runId: WorkflowRun['id'],
+  ): Promise<readonly DomainEvent[]> {
+    const collected: DomainEvent[] = [];
+    let after: number | undefined;
+    for (let pages = 0; pages < 200; pages += 1) {
+      const events = await this.repository.listEvents(runId, {
+        limit: 1_000,
+        ...(after === undefined ? {} : { after }),
+      });
+      if (events.length === 0) return collected;
+      collected.push(...events);
+      const last = events[events.length - 1]!.sequence;
+      if (after !== undefined && last <= after) return collected;
+      after = last;
+    }
+    return collected;
+  }
+
   private async project(run: WorkflowRun): Promise<RunProjection> {
     const [steps, events, goal, usage] = await Promise.all([
       this.repository.listStepRuns(run.id, { limit: 100 }),
-      this.repository.listEvents(run.id, { limit: 1_000 }),
+      this.readAllEvents(run.id),
       this.projectGoal(run),
       // Per-step model info is decorative; a failed usage lookup (e.g. a
       // transient database hiccup) must never take a page down with it.
