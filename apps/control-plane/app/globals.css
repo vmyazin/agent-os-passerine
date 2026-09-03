@@ -584,6 +584,14 @@ h1 {
   gap: 0.4rem;
 }
 
+/* Sits on the text baseline beside the status word, at the text's own colour
+   so a status keeps one colour rather than gaining a second. */
+.status-icon {
+  flex: none;
+  width: 0.95em;
+  height: 0.95em;
+}
+
 /* Work in flight. The badge already says which state, so this only has to
    read as motion; it is aria-hidden and carries no information of its own. */
 .status-spinner {
