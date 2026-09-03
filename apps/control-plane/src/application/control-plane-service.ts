@@ -2965,6 +2965,54 @@ export class ControlPlaneService {
   }
 
   /**
+   * The acceptance criteria the specifier froze for a run: one per
+   * requirement, each already exercised by a sealed acceptance test. For an
+   * operator about to look at the delivered code, this is the smoke test,
+   * written before the implementation existed. Fail-soft like every other
+   * artifact read here.
+   */
+  async doneCriteria(
+    runId: string,
+  ): Promise<readonly { readonly id: string; readonly description: string }[]> {
+    if (this.artifacts === undefined) return [];
+    try {
+      const run = await this.repository.getRun(persistenceId('run', runId));
+      if (run === undefined) return [];
+      const scope = {
+        projectId: run.projectId,
+        runId: run.id,
+        stepId: 'specification',
+      };
+      const page = await this.artifacts.list({ scope, limit: 10 });
+      const item = page.items.find(
+        (candidate) => candidate.artifactId === 'dod',
+      );
+      if (item === undefined) return [];
+      const value = await this.artifacts.get({
+        scope,
+        key: item.key,
+        maxBytes: 1_000_000,
+      });
+      if (value === undefined) return [];
+      const body = record(
+        JSON.parse(new TextDecoder().decode(value.bytes)) as JsonValue,
+      );
+      const criteria = body?.criteria;
+      if (!Array.isArray(criteria)) return [];
+      return criteria.slice(0, 20).flatMap((entry) => {
+        const candidate = record(entry);
+        const id = safeString(candidate, 'id');
+        const description = safeString(candidate, 'description');
+        return id !== undefined && description !== undefined
+          ? [{ id, description: description.slice(0, 500) }]
+          : [];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * What the reviewer said, for a run that review stopped.
    *
    * "final review after fix must be approved" is a true sentence and a dead

@@ -49,3 +49,22 @@ describe('PreviewRunAction', () => {
     expect(render(null)).toContain('aria-live="polite"');
   });
 });
+
+describe('PreviewRunAction root-path guidance', () => {
+  it('says the root is a 404 and links the paths the request named', () => {
+    const markup = renderToStaticMarkup(
+      createElement(PreviewRunAction, {
+        runId: 'run-1',
+        initialPreview: {
+          status: 'running',
+          url: 'http://localhost:58284',
+          script: 'start',
+          rootStatus: 404,
+        },
+        suggestedPaths: ['/health'],
+      }),
+    );
+    expect(markup).toContain('answers 404 at the root');
+    expect(markup).toContain('href="http://localhost:58284/health"');
+  });
+});

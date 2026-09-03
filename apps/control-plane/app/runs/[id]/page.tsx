@@ -32,6 +32,26 @@ export const dynamic = 'force-dynamic';
 // it with 409, so the button must not be offered in the first place.
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 
+/**
+ * URL paths a feature request mentions, as written. The request is the only
+ * place that reliably says where a delivered API answers, and a preview link
+ * to a root that returns 404 tells the operator nothing.
+ */
+function pathsNamedBy(description: unknown): readonly string[] {
+  if (typeof description !== 'string') return [];
+  const seen = new Set<string>();
+  for (const match of description.matchAll(
+    /(?:^|[\s(`'"])(\/[A-Za-z0-9_./:-]*[A-Za-z0-9_-])/g,
+  )) {
+    const path = match[1]!;
+    // A file path carries an extension; a route seldom does.
+    if (/\.[a-z]{1,5}$/i.test(path) || path.length > 64) continue;
+    seen.add(path);
+    if (seen.size === 6) break;
+  }
+  return [...seen];
+}
+
 export default async function RunPage({
   params,
 }: {
@@ -62,6 +82,10 @@ export default async function RunPage({
   const review = TERMINAL_STATUSES.has(run.status)
     ? await controlPlaneService().reviewOutcome(run.id)
     : undefined;
+  const criteria =
+    run.status === 'succeeded'
+      ? await controlPlaneService().doneCriteria(run.id)
+      : [];
   const explanation = explainRunStatus({
     status: run.status,
     stepCount: run.steps.length,
@@ -358,7 +382,25 @@ export default async function RunPage({
                 Preview it: this checks the branch out in a scratch worktree and
                 runs the delivered code on this machine.
               </p>
-              <PreviewRunAction runId={run.id} />
+              {criteria.length === 0 ? null : (
+                <>
+                  <p>
+                    How to smoke test it. These are the acceptance criteria the
+                    specifier froze before implementation, and each one already
+                    passed in sealed verification; this is you seeing it with
+                    your own eyes.
+                  </p>
+                  <ol>
+                    {criteria.map((criterion) => (
+                      <li key={criterion.id}>{criterion.description}</li>
+                    ))}
+                  </ol>
+                </>
+              )}
+              <PreviewRunAction
+                runId={run.id}
+                suggestedPaths={pathsNamedBy(run.input?.description)}
+              />
             </>
           ) : null}
         </section>

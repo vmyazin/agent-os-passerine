@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -53,17 +53,61 @@ export interface RunPreview {
   readonly status: 'running' | 'no_server';
   /** What to run by hand when there is no server to start. */
   readonly hint?: string;
+  /**
+   * HTTP status the server gave for `/` once it came up. Many delivered apps
+   * are APIs with no root route, and a bare 404 in a new tab reads as "the
+   * preview is broken" when it is the app answering exactly as specified.
+   */
+  readonly rootStatus?: number;
 }
 
 interface ActivePreview extends RunPreview {
   readonly repository: string;
   readonly child?: ChildProcess;
+  rootStatus?: number;
 }
 
 // Module state: one preview per run, for as long as this process lives. A
 // server restart loses the handles, which is why stop() also prunes the
 // worktree by path rather than trusting the map alone.
 const previews = new Map<string, ActivePreview>();
+
+// When this process goes down, so do its previews. Without this, restarting
+// the control plane (a dev-server reload, a deploy) leaves every preview's
+// server running on its port and its checkout registered in the operator's
+// repository, with nothing left that remembers either. Only synchronous work
+// is possible in an exit handler, hence spawnSync; the git call is best
+// effort and the directory removal is what actually matters.
+let shutdownRegistered = false;
+function registerShutdownCleanup(): void {
+  if (shutdownRegistered) return;
+  shutdownRegistered = true;
+  const tearDown = () => {
+    for (const active of previews.values()) {
+      active.child?.kill('SIGTERM');
+      spawnSync(
+        'git',
+        [
+          '-C',
+          active.repository,
+          'worktree',
+          'remove',
+          '--force',
+          active.worktree,
+        ],
+        { stdio: 'ignore', timeout: 5_000 },
+      );
+    }
+    previews.clear();
+  };
+  process.once('exit', tearDown);
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      tearDown();
+      process.exit(0);
+    });
+  }
+}
 
 export function isRunPreviewAvailable(
   environment: NodeJS.ProcessEnv = process.env,
@@ -86,7 +130,30 @@ export function getRunPreview(runId: string): RunPreview | undefined {
     ...(active.url === undefined ? {} : { url: active.url }),
     ...(active.script === undefined ? {} : { script: active.script }),
     ...(active.hint === undefined ? {} : { hint: active.hint }),
+    ...(active.rootStatus === undefined
+      ? {}
+      : { rootStatus: active.rootStatus }),
   };
+}
+
+/**
+ * Waits briefly for the server to answer `/` and records what it said. Any
+ * HTTP status counts as "up"; a server that never answers within the window
+ * simply leaves the field unset, and the operator sees the link as before.
+ */
+async function probeRoot(url: string): Promise<number | undefined> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(1_000),
+      });
+      return response.status;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  return undefined;
 }
 
 export function listRunPreviews(): readonly RunPreview[] {
@@ -148,6 +215,7 @@ export async function startRunPreview(input: {
 }): Promise<RunPreview> {
   const existing = getRunPreview(input.runId);
   if (existing !== undefined) return existing;
+  registerShutdownCleanup();
   if (previews.size >= MAX_PREVIEWS)
     throw new RunPreviewError(
       'preview_limit_reached',
@@ -291,6 +359,8 @@ export async function startRunPreview(input: {
     child,
   };
   previews.set(input.runId, preview);
+  const rootStatus = await probeRoot(preview.url!);
+  if (rootStatus !== undefined) preview.rootStatus = rootStatus;
   return getRunPreview(input.runId)!;
 }
 

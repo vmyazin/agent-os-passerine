@@ -229,6 +229,7 @@ export interface RunPreviewView {
   readonly url?: string;
   readonly script?: string;
   readonly hint?: string;
+  readonly rootStatus?: number;
 }
 
 async function previewFailure(
@@ -255,10 +256,16 @@ async function previewFailure(
 export function PreviewRunAction({
   runId,
   initialPreview,
+  suggestedPaths = [],
 }: {
   readonly runId: string;
   /** Seeds the rendered state; when absent the preview is fetched on mount. */
   readonly initialPreview?: RunPreviewView | null;
+  /**
+   * Paths the feature request itself named. An API with no root route is the
+   * common case, and the request is the one place that says where to look.
+   */
+  readonly suggestedPaths?: readonly string[];
 }) {
   // undefined: not yet known. null: no preview is running.
   const [preview, setPreview] = useState<RunPreviewView | null | undefined>(
@@ -347,6 +354,32 @@ export function PreviewRunAction({
                   <code>{preview.script}</code>
                 </>
               )}
+            </p>
+          ) : null}
+          {preview.status === 'running' &&
+          preview.url !== undefined &&
+          (preview.rootStatus === 404 || suggestedPaths.length > 0) ? (
+            <p>
+              {preview.rootStatus === 404
+                ? 'It answers 404 at the root, so it serves specific paths. '
+                : null}
+              {suggestedPaths.length > 0 ? (
+                <>
+                  {'Paths the request named: '}
+                  {suggestedPaths.map((path, index) => (
+                    <span key={path}>
+                      {index > 0 ? ', ' : null}
+                      <a
+                        href={`${preview.url}${path}`}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        {path}
+                      </a>
+                    </span>
+                  ))}
+                </>
+              ) : null}
             </p>
           ) : (
             <p>

@@ -517,6 +517,7 @@ export const runPreviewSchema = z
     startedAt: z.string(),
     status: z.enum(['running', 'no_server']),
     hint: z.string().max(2_000).optional(),
+    rootStatus: z.number().int().min(100).max(599).optional(),
   })
   .strict();
 
