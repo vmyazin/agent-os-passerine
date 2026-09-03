@@ -43,6 +43,16 @@ Modify:
       Verify: `pnpm --filter @agentos/control-plane exec vitest run`
 - [x] **6. Configs and docs.** Three YAML files, runbook, progress.
       Verify: `pnpm typecheck && pnpm lint`
-- [ ] **7. Exit gate.** Re-apply `ld-smoke.yaml`, run "Serve a health
+- [x] **7. Exit gate.** Re-apply `ld-smoke.yaml`, run "Serve a health
       endpoint" on the local executor. Verify: run succeeds, branch published,
       review finding visible as a note.
+
+## Exit gate result — 2026-09-03
+
+`run_ff7e902deda839eb0c2a21d905a92620` ("Serve a health endpoint", the feature
+the old review wrongly blocked) succeeded on the three-step configuration with
+review declared: specification, implementation, verification, review, publish.
+12 minutes 18 seconds wall clock; $0.107 total on kimi-k2.7-code; verification
+recorded 0 tokens. The branch's six acceptance tests pass when cloned and run
+by hand, none use import attributes, and the run page's preview started the
+delivered server: `/health` answered 200 `{"status":"ok"}`, another path 404.

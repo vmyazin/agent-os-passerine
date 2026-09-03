@@ -260,7 +260,10 @@ declare. Review, when declared, runs after the gate and never blocks; its
 findings are notes on the run page. The change was made after a real run was
 failed by a reviewer's claim that was true of `||` and false of `??`, on code
 whose acceptance tests passed. On the process runtime verification no longer
-starts a model session.
+starts a model session. The feature the old review had wrongly blocked was re-run
+on the three-step configuration and succeeded in twelve minutes for eleven cents,
+verification at zero tokens, and its server answered `/health` through the run
+page's preview.
 
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.
