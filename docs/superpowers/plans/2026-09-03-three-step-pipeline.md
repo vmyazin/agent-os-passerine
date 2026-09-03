@@ -31,17 +31,17 @@ Modify:
 
 ## Tasks
 
-- [ ] **1. Optional roles.** `types.ts`, `production-composition.ts` + test.
+- [x] **1. Optional roles.** `types.ts`, `production-composition.ts` + test.
       Verify: `pnpm --filter @agentos/adapters exec vitest run src/trigger/production-composition.test.ts`
-- [ ] **2. Verifier without review.** `verifier.ts` + test.
+- [x] **2. Verifier without review.** `verifier.ts` + test.
       Verify: `... vitest run src/trigger/verifier.test.ts`
-- [ ] **3. Workflow sequence.** `workflow.ts`, `schemas.ts` + tests: planning
+- [x] **3. Workflow sequence.** `workflow.ts`, `schemas.ts` + tests: planning
       optional, review after verification and advisory, fix loop removed.
       Verify: `... vitest run src/trigger/workflow.test.ts`
-- [ ] **4. Zero-cost verification on the process runtime.** `kimi/provider.ts` + test. Verify: `... vitest run src/kimi/provider.test.ts`
-- [ ] **5. Review notes on the run page.** `page.tsx`.
+- [x] **4. Zero-cost verification on the process runtime.** `kimi/provider.ts` + test. Verify: `... vitest run src/kimi/provider.test.ts`
+- [x] **5. Review notes on the run page.** `page.tsx`.
       Verify: `pnpm --filter @agentos/control-plane exec vitest run`
-- [ ] **6. Configs and docs.** Three YAML files, runbook, progress.
+- [x] **6. Configs and docs.** Three YAML files, runbook, progress.
       Verify: `pnpm typecheck && pnpm lint`
 - [ ] **7. Exit gate.** Re-apply `ld-smoke.yaml`, run "Serve a health
       endpoint" on the local executor. Verify: run succeeds, branch published,

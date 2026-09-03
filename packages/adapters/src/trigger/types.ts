@@ -57,8 +57,20 @@ export interface FeatureRoleDefinition {
   readonly maxReservationMicrodollars?: number;
 }
 
+/** The roles a feature run needs: three always, two when the project asks. */
+export type RequiredFeatureRole =
+  'specification' | 'implementation' | 'verification';
+export type OptionalFeatureRole = 'planning' | 'review';
+
+/**
+ * A step is present when the project's feature pipeline declares it. Planning
+ * and review are optional: four real runs showed planning re-derived by the
+ * implementer and review vetoing code the acceptance tests then passed. A
+ * project that wants either keeps it by declaring the step.
+ */
 export type FeatureWorkflowRoles = Readonly<
-  Record<FeatureRole, FeatureRoleDefinition>
+  Record<RequiredFeatureRole, FeatureRoleDefinition> &
+    Partial<Record<OptionalFeatureRole, FeatureRoleDefinition>>
 >;
 
 export interface FeatureWorkflowInput {
@@ -196,7 +208,12 @@ export interface WorkflowVerifier {
     readonly definitionOfDone: JsonValue;
     readonly changeSet: JsonValue;
     readonly testEvidence: JsonValue;
-    readonly review: JsonValue;
+    /**
+     * Present only for callers that still pass one. Verification no longer
+     * reads it: review is advisory and runs after this gate, so a review
+     * cannot be a precondition of the check it is supposed to follow.
+     */
+    readonly review?: JsonValue;
     readonly trustedCommandObservation: TrustedCommandObservation;
   }): Promise<WorkflowVerificationResult>;
 }

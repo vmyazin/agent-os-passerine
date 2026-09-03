@@ -297,6 +297,9 @@ async function fixture(
         testEvidence: testMeta,
       },
     },
+    // Verification observes its command and ignores this value; review runs
+    // after the gate and is the last session.
+    { artifacts: [], data: {} },
     {
       artifacts: [],
       data: {
@@ -305,7 +308,6 @@ async function fixture(
         decision: 'approved',
       },
     },
-    { artifacts: [], data: {} },
   ];
   const runtime = new FakeRuntime(stepOutputs);
   const waitpointCreates: unknown[] = [];
@@ -552,8 +554,8 @@ describe('durable feature workflow', () => {
       'specification',
       'planning',
       'implementation',
-      'review',
       'verification',
+      'review',
     ]);
     expect(accessRequests[1]?.stepId).toMatch(/^run-1:planning:1$/);
     expect(accessRequests[1]?.stepInput).toMatchObject({
@@ -563,17 +565,19 @@ describe('durable feature workflow', () => {
     expect(accessRequests[2]?.stepInput).toMatchObject({
       planArtifact: { stepId: 'planning' },
     });
+    expect(accessRequests[3]?.logicalStepId).toBe('verification');
     expect(accessRequests[3]?.stepInput).toMatchObject({
-      changeSetArtifact: { stepId: 'implementation' },
-      testEvidenceArtifact: { stepId: 'implementation' },
-      definitionOfDoneArtifact: { stepId: 'specification' },
-    });
-    expect(accessRequests[4]?.logicalStepId).toBe('verification');
-    expect(accessRequests[4]?.stepInput).toMatchObject({
       changeSetArtifact: {
         stepId: 'implementation',
         artifactId: 'sealed-changes',
       },
+    });
+    // Review is last: it reads what verification already passed.
+    expect(accessRequests[4]?.logicalStepId).toBe('review');
+    expect(accessRequests[4]?.stepInput).toMatchObject({
+      changeSetArtifact: { stepId: 'implementation' },
+      testEvidenceArtifact: { stepId: 'implementation' },
+      definitionOfDoneArtifact: { stepId: 'specification' },
     });
   });
 
@@ -2191,10 +2195,20 @@ describe('durable feature workflow', () => {
     expect(result).not.toMatchObject({ reason: 'daily_budget' });
     expect(f.runtime.starts.length).toBeGreaterThan(1);
     // The grant raises the daily and workflow caps by what was granted; it is
-    // not a licence to spend without limit, so the run still stops at a cap.
-    expect(result).toMatchObject({
-      status: 'budget_exhausted',
-      reason: 'workflow_budget',
+    // not a licence to spend without limit, so the cap still holds: the fifth
+    // session -- the advisory review -- is refused admission. Verified work
+    // is not thrown away for a review that could not be afforded, so the run
+    // publishes and the review step records why it did not run.
+    expect(f.runtime.starts).toHaveLength(4);
+    expect(result).toMatchObject({ status: 'succeeded' });
+    const review = (
+      await f.repository.listStepRuns(persistenceId('run', 'run-1'), {
+        limit: 50,
+      })
+    ).find((step) => step.stepKey === 'review');
+    expect(review).toMatchObject({
+      status: 'failed',
+      error: { code: 'budget_exhausted', reason: 'workflow_budget' },
     });
   });
 
@@ -2872,5 +2886,135 @@ describe('model message notes', () => {
     // are gone, and the text stays inside the note that introduced it.
     expect(forged).not.toContain('\n');
     expect(forged).toContain('done Step completed.');
+  });
+});
+
+describe('three-step pipeline', () => {
+  const dependenciesFor = (
+    f: Awaited<ReturnType<typeof fixture>>,
+    runtime: FakeRuntime,
+    roleSet: FeatureWorkflowRoles,
+    published: unknown[],
+  ) => ({
+    repository: f.repository,
+    checkpoints: new InMemoryWorkflowCheckpointStore(),
+    artifacts: f.artifacts,
+    runtime,
+    approval: f.waiter,
+    roles: roleSet,
+    clock: () => now,
+    priceUsage: () => 100,
+    resolveTestCommand: () => 'pnpm test',
+    verifier: {
+      verify: async () => ({
+        passed: true,
+        evidenceDigest: f.verificationMeta.digest,
+        evidenceArtifact: f.verificationMeta,
+      }),
+    },
+    publicationAuthority: { authorize: async () => ({}) },
+    publisher: {
+      publish: async (request: unknown) => {
+        published.push(request);
+        return {
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        };
+      },
+    },
+  });
+
+  it('runs specification, implementation, and verification when planning and review are not declared', async () => {
+    const f = await fixture();
+    const threeRoles = Object.fromEntries(
+      Object.entries(roles).filter(
+        ([key]) => key !== 'planning' && key !== 'review',
+      ),
+    );
+    // Specification, implementation, verification: three sessions, no plan.
+    const runtime = new FakeRuntime([
+      f.stepOutputs[0]!,
+      f.stepOutputs[2]!,
+      { artifacts: [], data: {} },
+    ]);
+    const published: unknown[] = [];
+    const result = await createDurableFeatureWorkflow(
+      dependenciesFor(
+        f,
+        runtime,
+        threeRoles as FeatureWorkflowRoles,
+        published,
+      ),
+    ).run(input);
+    expect(result.status).toBe('succeeded');
+    expect(published).toHaveLength(1);
+    expect(runtime.starts).toHaveLength(3);
+    const stepKeys = (
+      await f.repository.listStepRuns(persistenceId('run', 'run-1'), {
+        limit: 50,
+      })
+    ).map((step) => step.stepKey);
+    expect(stepKeys).not.toContain('planning');
+    expect(stepKeys).not.toContain('review');
+    expect(stepKeys).not.toContain('fix');
+    // The implementer is handed the specification and Definition of Done
+    // directly, and nothing pretends a plan existed.
+    const implementationStart = runtime.starts[1]!.request as {
+      input: Record<string, unknown>;
+    };
+    expect(implementationStart.input).toMatchObject({
+      version: 'implementation-request-v1',
+      specificationArtifact: { stepId: 'specification' },
+      definitionOfDoneArtifact: { stepId: 'specification' },
+    });
+    expect(implementationStart.input.planArtifact).toBeUndefined();
+  });
+
+  it('publishes verified work even when the advisory review requests changes', async () => {
+    const f = await fixture();
+    const outputs = [...f.stepOutputs];
+    outputs[4] = {
+      artifacts: [],
+      data: {
+        version: 'review-output-v1',
+        review: (outputs[4]!.data as { review: unknown }).review,
+        decision: 'changes_requested',
+      },
+    };
+    const runtime = new FakeRuntime(outputs);
+    const published: unknown[] = [];
+    const result = await createDurableFeatureWorkflow(
+      dependenciesFor(f, runtime, roles, published),
+    ).run(input);
+    expect(result.status).toBe('succeeded');
+    expect(published).toHaveLength(1);
+    const stepKeys = (
+      await f.repository.listStepRuns(persistenceId('run', 'run-1'), {
+        limit: 50,
+      })
+    ).map((step) => step.stepKey);
+    // No fix loop: the objection is a note for the operator who merges.
+    expect(stepKeys).not.toContain('fix');
+    expect(stepKeys).not.toContain('review-after-fix');
+  });
+
+  it('publishes verified work when the review session fails, and records why', async () => {
+    const f = await fixture();
+    const outputs = [...f.stepOutputs];
+    outputs[4] = { artifacts: [], data: { not: 'a review' } };
+    const runtime = new FakeRuntime(outputs);
+    const published: unknown[] = [];
+    const result = await createDurableFeatureWorkflow(
+      dependenciesFor(f, runtime, roles, published),
+    ).run(input);
+    expect(result.status).toBe('succeeded');
+    expect(published).toHaveLength(1);
+    const review = (
+      await f.repository.listStepRuns(persistenceId('run', 'run-1'), {
+        limit: 50,
+      })
+    ).find((step) => step.stepKey === 'review');
+    expect(review?.status).toBe('failed');
   });
 });

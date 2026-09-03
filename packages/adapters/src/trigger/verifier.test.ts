@@ -118,3 +118,28 @@ describe('trusted workflow verifier', () => {
     expect(result.findings?.join(' ')).toMatch(/denied path/i);
   });
 });
+
+describe('verification without a review', () => {
+  it('passes on evidence alone: review is advisory and runs after this gate', async () => {
+    const changeSet = {
+      version: 'change-set-v1' as const,
+      changes: [
+        {
+          operation: 'add' as const,
+          path: 'src/status.ts',
+          mode: '100644' as const,
+          content: 'export {};\n',
+        },
+      ],
+    };
+    const withoutReview = Object.fromEntries(
+      Object.entries(base).filter(([key]) => key !== 'review'),
+    ) as Omit<typeof base, 'review'>;
+    const result = await verifier().verify({
+      ...withoutReview,
+      changeSet,
+      trustedCommandObservation: observation(changeSet),
+    });
+    expect(result).toMatchObject({ passed: true });
+  });
+});

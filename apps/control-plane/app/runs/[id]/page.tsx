@@ -57,12 +57,11 @@ export default async function RunPage({
       : undefined;
   const diagnosis =
     dispatch === undefined ? undefined : diagnoseDispatch(dispatch);
-  // Only for a failed run: a succeeded one was approved, and its reviewer had
-  // nothing to ask for.
-  const review =
-    run.status === 'failed'
-      ? await controlPlaneService().reviewOutcome(run.id)
-      : undefined;
+  // Review is advisory and runs after the gate, so a succeeded run can carry
+  // findings too; those are notes for whoever merges.
+  const review = TERMINAL_STATUSES.has(run.status)
+    ? await controlPlaneService().reviewOutcome(run.id)
+    : undefined;
   const explanation = explainRunStatus({
     status: run.status,
     stepCount: run.steps.length,
@@ -314,6 +313,24 @@ export default async function RunPage({
       {run.outcome === undefined ? null : (
         <section aria-labelledby="outcome-title">
           <h2 id="outcome-title">Outcome</h2>
+          {review === undefined || review.findings.length === 0 ? null : (
+            <>
+              <p>
+                {review.decision === 'changes_requested'
+                  ? 'Review notes. The reviewer would have asked for changes; verification passed, so this is published and these are for you to weigh before merging:'
+                  : 'Review notes:'}
+              </p>
+              <ul>
+                {review.findings.map((finding: string) => (
+                  <li key={finding}>{finding}</li>
+                ))}
+              </ul>
+              <p className="dispatch-remedy">
+                Findings come from the reviewing model and can be wrong about
+                working code.
+              </p>
+            </>
+          )}
           {run.outcome.draftPullRequestUrl === undefined ? null : (
             <p>
               <a href={run.outcome.draftPullRequestUrl}>Draft pull request</a>

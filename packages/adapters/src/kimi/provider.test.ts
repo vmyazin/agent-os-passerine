@@ -1412,3 +1412,104 @@ describe('source bundle unpacking', () => {
     ).resolves.not.toContain('repo');
   });
 });
+
+describe('trusted verification requests', () => {
+  const verificationRequest = (): RuntimeStartRequest =>
+    baseRequest({
+      input: {
+        version: 'trusted-verification-request-v1',
+        exactCommand: 'echo verified',
+        instruction: 'run the command exactly as given',
+      },
+    });
+
+  it('starts without a model session: no transport call, empty output, zero usage, one message event', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(verificationRequest());
+    const events = await collectEvents(provider, handle);
+
+    expect(calls).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('message');
+    expect(events[0]?.payload).toEqual({
+      detail:
+        'Trusted verification: no model session; the command is observed directly.',
+    });
+    await expect(provider.collectOutput(handle)).resolves.toEqual({
+      data: {},
+      artifacts: [],
+    });
+    const usage = await provider.usage(handle);
+    expect(usage.inputTokens).toBe(0);
+    expect(usage.outputTokens).toBe(0);
+    expect(usage.runtimeMs).toBeGreaterThanOrEqual(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('observeCommand runs the trusted command in the sandbox', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+    const handle = await provider.start(verificationRequest());
+
+    const observed = await provider.observeCommand!(handle, 'echo verified');
+
+    expect(observed.command).toBe('echo verified');
+    expect(observed.exitCode).toBe(0);
+    expect(Date.parse(observed.startedAt)).not.toBeNaN();
+    expect(Date.parse(observed.completedAt)).not.toBeNaN();
+    expect(runBashCalls).toHaveLength(1);
+    expect(runBashCalls[0]?.command).toBe('echo verified');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('a start that is not a verification request still runs the model loop', async () => {
+    const { transport, calls } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'submit_result',
+            input: { done: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 3, outputTokens: 1 },
+      },
+    ]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'other-v1', exactCommand: 'true' } }),
+    );
+    const events = await collectEvents(provider, handle);
+
+    expect(calls).toHaveLength(1);
+    expect(events.at(-1)?.type).toBe('terminated');
+    await expect(provider.collectOutput(handle)).resolves.toEqual({
+      data: { done: true },
+      artifacts: [],
+    });
+    await expect(provider.usage(handle)).resolves.toMatchObject({
+      inputTokens: 3,
+      outputTokens: 1,
+    });
+  });
+
+  it('cleanup destroys the workdir of a verification session', async () => {
+    const { transport } = scriptedTransport([]);
+    const { provider, sandboxRoot } = await makeProvider({ transport });
+    const handle = await provider.start(verificationRequest());
+    const workdir = path.join(sandboxRoot, handle.id);
+    await expect(fs.stat(workdir)).resolves.toBeDefined();
+
+    await provider.cleanup(handle);
+
+    await expect(fs.stat(workdir)).rejects.toThrow();
+    await expect(
+      provider.reconcileStart!(verificationRequest()),
+    ).resolves.toBeUndefined();
+  });
+});

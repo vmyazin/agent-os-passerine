@@ -213,6 +213,7 @@ function assertRoleIsolation(
   const environmentIds = new Set<string>();
   for (const role of Object.keys(roles) as FeatureRole[]) {
     const definition = roles[role];
+    if (definition === undefined) continue;
     if (agentIds.has(definition.agent.id))
       throw new WorkflowPermanentError(
         'feature roles must use separate agents',
@@ -1100,6 +1101,42 @@ async function withTimeout<T>(
   }
 }
 
+/**
+ * A review that could not run is a fact the operator should see on the step,
+ * not a reason to discard verified work. Admission refusals throw before the
+ * step run is marked, leaving it pending, so this records the reason there.
+ */
+async function recordAdvisoryReviewFailure(
+  dependencies: DurableFeatureWorkflowDependencies,
+  workflow: FeatureWorkflowInput,
+  error: unknown,
+): Promise<void> {
+  const steps = await dependencies.repository.listStepRuns(
+    persistenceId('run', workflow.runId),
+    { limit: 100 },
+  );
+  const failure =
+    error instanceof WorkflowBudgetExhaustedError
+      ? { code: 'budget_exhausted', reason: error.reason }
+      : {
+          code: 'review_unavailable',
+          message:
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : 'review step did not complete',
+        };
+  for (const step of steps) {
+    if (step.stepKey !== 'review' || step.status === 'succeeded') continue;
+    await dependencies.repository.upsertStepRun({
+      ...step,
+      status: 'failed',
+      error: asJson(failure),
+      updatedAt: at(dependencies.clock()),
+      completedAt: at(dependencies.clock()),
+    });
+  }
+}
+
 async function runAgentStep<T>(
   dependencies: DurableFeatureWorkflowDependencies,
   workflow: FeatureWorkflowInput,
@@ -1159,6 +1196,10 @@ async function runAgentStep<T>(
     );
     const now = at(dependencies.clock());
     const roleDefinition = dependencies.roles[role];
+    if (roleDefinition === undefined)
+      throw new WorkflowPermanentError(
+        `feature role '${role}' is not declared by this project`,
+      );
     const prior = existing.find(
       (candidate) =>
         candidate.stepKey === stepKey && candidate.attempt === attempt,
@@ -2167,33 +2208,41 @@ export function createDurableFeatureWorkflow(
           await assertContinuable(dependencies, workflow, deadlineMs);
           throw new WorkflowPermanentError('run state changed after approval');
         }
-        const plan = await runAgentStep(
-          dependencies,
-          workflow,
-          deadlineMs,
-          'planning',
-          'planning',
-          asJson({
-            version: 'plan-request-v1',
-            approvedScopeHash: scopeHash,
-            specificationDigest: specification.specification.digest,
-            definitionOfDoneDigest: specification.definitionOfDone.digest,
-            specificationArtifact: specification.specification,
-            definitionOfDoneArtifact: specification.definitionOfDone,
-            digests: workflow.digests,
-          }),
-          planOutputSchema,
-          executionOwner,
-          handleSealer,
-        );
-        await parseArtifact(
-          dependencies,
-          workflow,
-          plan.plan,
-          { stepId: 'planning', artifactId: 'plan' },
-          implementationPlanSchema,
-        );
-        let implementation = await runAgentStep(
+        // Planning is a step the project may declare. Four real runs showed
+        // the implementer re-deriving the plan from the specification anyway,
+        // so absent a declared step the specification and Definition of Done
+        // go straight to implementation and no session is spent on a list.
+        const plan =
+          dependencies.roles.planning === undefined
+            ? undefined
+            : await runAgentStep(
+                dependencies,
+                workflow,
+                deadlineMs,
+                'planning',
+                'planning',
+                asJson({
+                  version: 'plan-request-v1',
+                  approvedScopeHash: scopeHash,
+                  specificationDigest: specification.specification.digest,
+                  definitionOfDoneDigest: specification.definitionOfDone.digest,
+                  specificationArtifact: specification.specification,
+                  definitionOfDoneArtifact: specification.definitionOfDone,
+                  digests: workflow.digests,
+                }),
+                planOutputSchema,
+                executionOwner,
+                handleSealer,
+              );
+        if (plan !== undefined)
+          await parseArtifact(
+            dependencies,
+            workflow,
+            plan.plan,
+            { stepId: 'planning', artifactId: 'plan' },
+            implementationPlanSchema,
+          );
+        const implementation = await runAgentStep(
           dependencies,
           workflow,
           deadlineMs,
@@ -2201,9 +2250,14 @@ export function createDurableFeatureWorkflow(
           'implementation',
           asJson({
             version: 'implementation-request-v1',
-            planDigest: plan.plan.digest,
-            planArtifact: plan.plan,
             approvedScopeHash: scopeHash,
+            specificationDigest: specification.specification.digest,
+            definitionOfDoneDigest: specification.definitionOfDone.digest,
+            specificationArtifact: specification.specification,
+            definitionOfDoneArtifact: specification.definitionOfDone,
+            ...(plan === undefined
+              ? {}
+              : { planDigest: plan.plan.digest, planArtifact: plan.plan }),
             source: workflow.source,
             digests: workflow.digests,
           }),
@@ -2211,7 +2265,7 @@ export function createDurableFeatureWorkflow(
           executionOwner,
           handleSealer,
         );
-        let producingStepId = 'implementation';
+        const producingStepId = 'implementation';
         let changeSet = await parseArtifact(
           dependencies,
           workflow,
@@ -2219,114 +2273,13 @@ export function createDurableFeatureWorkflow(
           { stepId: 'implementation', artifactId: 'changes' },
           changeSetSchema,
         );
-        let testEvidence = await parseArtifact(
+        const testEvidence = await parseArtifact(
           dependencies,
           workflow,
           implementation.testEvidence,
           { stepId: 'implementation', artifactId: 'tests' },
           testEvidenceSchema,
         );
-        const review = await runAgentStep(
-          dependencies,
-          workflow,
-          deadlineMs,
-          'review',
-          'review',
-          asJson({
-            version: 'review-request-v1',
-            changeSetDigest: implementation.changeSet.digest,
-            testEvidenceDigest: implementation.testEvidence.digest,
-            definitionOfDoneDigest: specification.definitionOfDone.digest,
-            changeSetArtifact: implementation.changeSet,
-            testEvidenceArtifact: implementation.testEvidence,
-            definitionOfDoneArtifact: specification.definitionOfDone,
-            digests: workflow.digests,
-          }),
-          reviewOutputSchema,
-          executionOwner,
-          handleSealer,
-        );
-        let reviewBody = await parseArtifact(
-          dependencies,
-          workflow,
-          review.review,
-          { stepId: 'review', artifactId: 'review' },
-          reviewArtifactSchema,
-        );
-        if (review.decision !== reviewBody.decision)
-          throw new WorkflowPermanentError('review decision mismatch');
-        if (review.decision === 'changes_requested') {
-          implementation = await runAgentStep(
-            dependencies,
-            workflow,
-            deadlineMs,
-            'fix',
-            'implementation',
-            asJson({
-              version: 'fix-request-v1',
-              priorChangeSetDigest: implementation.changeSet.digest,
-              reviewDigest: review.review.digest,
-              planDigest: plan.plan.digest,
-              priorChangeSetArtifact: implementation.changeSet,
-              reviewArtifact: review.review,
-              planArtifact: plan.plan,
-              digests: workflow.digests,
-            }),
-            implementationOutputSchema,
-            executionOwner,
-            handleSealer,
-          );
-          producingStepId = 'fix';
-          changeSet = await parseArtifact(
-            dependencies,
-            workflow,
-            implementation.changeSet,
-            { stepId: 'fix', artifactId: 'changes' },
-            changeSetSchema,
-          );
-          testEvidence = await parseArtifact(
-            dependencies,
-            workflow,
-            implementation.testEvidence,
-            { stepId: 'fix', artifactId: 'tests' },
-            testEvidenceSchema,
-          );
-          const finalReview = await runAgentStep(
-            dependencies,
-            workflow,
-            deadlineMs,
-            'review-after-fix',
-            'review',
-            asJson({
-              version: 'review-request-v1',
-              changeSetDigest: implementation.changeSet.digest,
-              testEvidenceDigest: implementation.testEvidence.digest,
-              definitionOfDoneDigest: specification.definitionOfDone.digest,
-              changeSetArtifact: implementation.changeSet,
-              testEvidenceArtifact: implementation.testEvidence,
-              definitionOfDoneArtifact: specification.definitionOfDone,
-              digests: workflow.digests,
-            }),
-            reviewOutputSchema,
-            executionOwner,
-            handleSealer,
-          );
-          reviewBody = await parseArtifact(
-            dependencies,
-            workflow,
-            finalReview.review,
-            { stepId: 'review-after-fix', artifactId: 'review' },
-            reviewArtifactSchema,
-          );
-          if (
-            finalReview.decision !== 'approved' ||
-            reviewBody.decision !== 'approved'
-          ) {
-            throw new WorkflowPermanentError(
-              'final review after fix must be approved',
-            );
-          }
-        }
         let sealedChanges;
         try {
           sealedChanges = {
@@ -2413,7 +2366,6 @@ export function createDurableFeatureWorkflow(
           definitionOfDone: asJson(dodBody),
           changeSet: asJson(changeSet),
           testEvidence: asJson(testEvidence),
-          review: asJson(reviewBody),
           trustedCommandObservation,
         });
         if (!verification.passed) {
@@ -2436,6 +2388,53 @@ export function createDurableFeatureWorkflow(
           throw new WorkflowPermanentError(
             'trusted verifier evidence artifact binding is invalid',
           );
+        // Review, when the project declares it, runs after the gate and never
+        // holds it. The acceptance tests have already passed; what a reviewer
+        // finds now is a note for the operator who merges, and the run page
+        // shows it. A run is not failed for a reviewer's opinion -- the
+        // 2026-09-02 run that motivated this was blocked by a claim about
+        // `??` that was true of `||` -- nor for a review session that dies.
+        // Cancellation is the one thing that still stops the run here.
+        if (dependencies.roles.review !== undefined) {
+          try {
+            const review = await runAgentStep(
+              dependencies,
+              workflow,
+              deadlineMs,
+              'review',
+              'review',
+              asJson({
+                version: 'review-request-v1',
+                changeSetDigest: implementation.changeSet.digest,
+                testEvidenceDigest: implementation.testEvidence.digest,
+                definitionOfDoneDigest: specification.definitionOfDone.digest,
+                changeSetArtifact: implementation.changeSet,
+                testEvidenceArtifact: implementation.testEvidence,
+                definitionOfDoneArtifact: specification.definitionOfDone,
+                verificationDigest: verification.evidenceDigest,
+                digests: workflow.digests,
+              }),
+              reviewOutputSchema,
+              executionOwner,
+              handleSealer,
+            );
+            await parseArtifact(
+              dependencies,
+              workflow,
+              review.review,
+              { stepId: 'review', artifactId: 'review' },
+              reviewArtifactSchema,
+            );
+          } catch (error) {
+            if (
+              error instanceof WorkflowPermanentError &&
+              error.message === 'run_cancelled'
+            )
+              throw error;
+            await recordAdvisoryReviewFailure(dependencies, workflow, error);
+            await assertContinuable(dependencies, workflow, deadlineMs);
+          }
+        }
         await assertContinuable(dependencies, workflow, deadlineMs);
         const publicationRequest =
           await dependencies.publicationAuthority.authorize({

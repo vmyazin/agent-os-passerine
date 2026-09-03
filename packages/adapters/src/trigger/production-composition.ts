@@ -21,7 +21,11 @@ import {
 } from '../github/service.js';
 import { createLocalGitPublisher } from '../local-git/index.js';
 import type { FeatureWorkflowTaskHandler } from './task.js';
-import type { FeatureRole, FeatureWorkflowRoles } from './types.js';
+import type {
+  FeatureRole,
+  FeatureRoleDefinition,
+  FeatureWorkflowRoles,
+} from './types.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -29,12 +33,15 @@ let initialized: Promise<FeatureWorkflowTaskHandler> | undefined;
 
 const githubPublicationTargets = new Map<string, PublicationTarget>();
 
-const FEATURE_ROLES: readonly FeatureRole[] = [
+const REQUIRED_FEATURE_ROLES: readonly FeatureRole[] = [
   'specification',
-  'planning',
   'implementation',
-  'review',
   'verification',
+];
+const OPTIONAL_FEATURE_ROLES: readonly FeatureRole[] = ['planning', 'review'];
+const FEATURE_ROLES: readonly FeatureRole[] = [
+  ...REQUIRED_FEATURE_ROLES,
+  ...OPTIONAL_FEATURE_ROLES,
 ];
 
 export function resolveFeatureRolesFromSnapshot(
@@ -49,10 +56,14 @@ export function resolveFeatureRolesFromSnapshot(
   if (pipeline === undefined)
     throw new Error('stored config has no feature pipeline');
   const resolved = Object.fromEntries(
-    FEATURE_ROLES.map((role) => {
+    FEATURE_ROLES.flatMap((role) => {
       const step = pipeline.steps.find((candidate) => candidate.id === role);
-      if (step === undefined)
+      if (step === undefined) {
+        // An optional role a project did not declare is simply absent; a
+        // required one is a configuration error named by role.
+        if (OPTIONAL_FEATURE_ROLES.includes(role)) return [];
         throw new Error(`feature pipeline has no ${role} step`);
+      }
       const agent = config.agents[step.agent]!;
       const environmentId = step.environment ?? agent.environment;
       if (environmentId === undefined)
@@ -104,70 +115,76 @@ export function resolveFeatureRolesFromSnapshot(
       )
         throw new Error('verification registry host allowlist is invalid');
       return [
-        role,
-        {
-          agent: {
-            id: step.agent,
-            model: model.model,
-            // Which upstream API serves `model`. The process runtime keys its
-            // transport registry on this, so a config can route one role to
-            // Anthropic and another to Moonshot in the same run.
-            modelProvider: model.provider,
-            instructions: agent.prompt,
-            // Managed Agents rejects sessions whose file resources cannot be
-            // read, and every workflow session mounts the source bundle. The
-            // config invariant stays Bash-only for verification; the resolved
-            // runtime toolset additionally enables the read tool.
-            tools:
-              role === 'verification'
-                ? [...new Set([...agent.tools, 'read'])]
-                : [...agent.tools],
-            mcps:
-              role === 'verification'
-                ? []
-                : options === undefined
-                  ? [...agent.mcps]
-                  : [options.artifactMcpUrl],
-          },
-          environment: {
-            id: environmentId,
-            runtime: environment.runtime,
-            image: environment.image,
-            variables:
-              role === 'verification' ? {} : { ...environment.variables },
-            networking: {
-              type: 'limited' as const,
-              allowedHosts: [
-                ...new Set([
-                  ...(environment.networking?.type === 'limited'
-                    ? environment.networking.allowedHosts
-                    : []),
-                  ...(artifactHost === undefined || role === 'verification'
-                    ? []
-                    : [artifactHost]),
-                  ...(role === 'verification' ? verificationRegistryHosts : []),
-                ]),
-              ],
-              allowMcpServers: options !== undefined && role !== 'verification',
-              allowPackageManagers:
+        [
+          role,
+          {
+            agent: {
+              id: step.agent,
+              model: model.model,
+              // Which upstream API serves `model`. The process runtime keys its
+              // transport registry on this, so a config can route one role to
+              // Anthropic and another to Moonshot in the same run.
+              modelProvider: model.provider,
+              instructions: agent.prompt,
+              // Managed Agents rejects sessions whose file resources cannot be
+              // read, and every workflow session mounts the source bundle. The
+              // config invariant stays Bash-only for verification; the resolved
+              // runtime toolset additionally enables the read tool.
+              tools:
                 role === 'verification'
-                  ? false
-                  : environment.networking?.type === 'limited'
-                    ? environment.networking.allowPackageManagers
-                    : false,
+                  ? [...new Set([...agent.tools, 'read'])]
+                  : [...agent.tools],
+              mcps:
+                role === 'verification'
+                  ? []
+                  : options === undefined
+                    ? [...agent.mcps]
+                    : [options.artifactMcpUrl],
             },
-            ...(environment.packages === undefined || role === 'verification'
-              ? {}
-              : { packages: environment.packages }),
+            environment: {
+              id: environmentId,
+              runtime: environment.runtime,
+              image: environment.image,
+              variables:
+                role === 'verification' ? {} : { ...environment.variables },
+              networking: {
+                type: 'limited' as const,
+                allowedHosts: [
+                  ...new Set([
+                    ...(environment.networking?.type === 'limited'
+                      ? environment.networking.allowedHosts
+                      : []),
+                    ...(artifactHost === undefined || role === 'verification'
+                      ? []
+                      : [artifactHost]),
+                    ...(role === 'verification'
+                      ? verificationRegistryHosts
+                      : []),
+                  ]),
+                ],
+                allowMcpServers:
+                  options !== undefined && role !== 'verification',
+                allowPackageManagers:
+                  role === 'verification'
+                    ? false
+                    : environment.networking?.type === 'limited'
+                      ? environment.networking.allowPackageManagers
+                      : false,
+              },
+              ...(environment.packages === undefined || role === 'verification'
+                ? {}
+                : { packages: environment.packages }),
+            },
+            maxReservationMicrodollars: 700_000,
           },
-          maxReservationMicrodollars: 700_000,
-        },
+        ],
       ];
-    }),
+    }) as unknown as readonly [string, FeatureRoleDefinition][],
   ) as unknown as FeatureWorkflowRoles;
+  const present = FEATURE_ROLES.filter((role) => resolved[role] !== undefined);
   if (
-    new Set(FEATURE_ROLES.map((role) => resolved[role].environment.id)).size !==
-    FEATURE_ROLES.length
+    new Set(present.map((role) => resolved[role]!.environment.id)).size !==
+    present.length
   )
     throw new Error(
       'feature roles must use separate least-privilege environments',

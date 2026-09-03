@@ -959,10 +959,12 @@ export async function createProductionFeatureWorkflowFromEnv(
           // artifactMcp.resolveCredential hooks can materialize them.
           // Managed-routed roles keep calling the managed preparer exactly
           // as before -- byte-identical.
-          const runtimeKey = resolveRuntimeKey(
-            config,
-            roleDefinitions[request.role].agent,
-          );
+          const roleDefinition = roleDefinitions[request.role];
+          if (roleDefinition === undefined)
+            throw new Error(
+              `feature role '${request.role}' is not declared by this project`,
+            );
+          const runtimeKey = resolveRuntimeKey(config, roleDefinition.agent);
           const stageOrUpload = async (input: {
             readonly mcpUrl?: string;
             readonly bearerToken?: string;

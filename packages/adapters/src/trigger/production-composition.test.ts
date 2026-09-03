@@ -715,3 +715,75 @@ describe('exactLocalTrustedCommand', () => {
     expect(command).toContain(`'test'"'"'; rm -rf /'`);
   });
 });
+
+describe('optional feature roles', () => {
+  function pipeline(stepIds: readonly string[]): ConfigSnapshot {
+    const config = loadAgentOsConfig(`
+version: 1
+project: { name: test }
+models: { standard: { provider: anthropic, model: sonnet } }
+agents:
+  specification: { model: standard, environment: specification, mcps: [artifacts] }
+  planning: { model: standard, environment: planning, mcps: [artifacts] }
+  implementation: { model: standard, environment: implementation, mcps: [artifacts] }
+  review: { model: standard, environment: review, mcps: [artifacts] }
+  verification: { model: standard, environment: verification, tools: [bash] }
+environments:
+  specification: { runtime: managed, mcps: [artifacts] }
+  planning: { runtime: managed, mcps: [artifacts] }
+  implementation: { runtime: managed, mcps: [artifacts] }
+  review: { runtime: managed, mcps: [artifacts] }
+  verification: { runtime: managed }
+pipelines:
+  feature:
+    steps:
+${stepIds.map((id) => `      - { id: ${id}, agent: ${id} }`).join('\n')}
+policies: {}
+budgets: { workflowMicrodollars: 2000000, dailyMicrodollars: 5000000, concurrency: 1 }
+goals: { maxSteps: 3, maxRetries: 1, timeoutMs: 3600000 }
+runtime: { provider: managed }
+`);
+    return { config } as unknown as ConfigSnapshot;
+  }
+
+  it('resolves a pipeline that declares only the three required steps', () => {
+    const resolved = resolveFeatureRolesFromSnapshot(
+      pipeline(['specification', 'implementation', 'verification']),
+      ROLE_OPTIONS,
+    );
+    expect(Object.keys(resolved).sort()).toEqual([
+      'implementation',
+      'specification',
+      'verification',
+    ]);
+    expect(resolved.planning).toBeUndefined();
+    expect(resolved.review).toBeUndefined();
+  });
+
+  it('still resolves all five when a project declares them', () => {
+    const resolved = resolveFeatureRolesFromSnapshot(
+      pipeline([
+        'specification',
+        'planning',
+        'implementation',
+        'review',
+        'verification',
+      ]),
+      ROLE_OPTIONS,
+    );
+    expect(resolved.planning?.agent.id).toBe('planning');
+    expect(resolved.review?.agent.id).toBe('review');
+  });
+
+  it.each(['specification', 'implementation', 'verification'])(
+    'refuses a pipeline without the %s step',
+    (missing) => {
+      const steps = ['specification', 'implementation', 'verification'].filter(
+        (id) => id !== missing,
+      );
+      expect(() =>
+        resolveFeatureRolesFromSnapshot(pipeline(steps), ROLE_OPTIONS),
+      ).toThrow(`feature pipeline has no ${missing} step`);
+    },
+  );
+});

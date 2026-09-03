@@ -296,6 +296,19 @@ function isTerminal(status: KimiSessionStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
+/**
+ * A start whose input is the workflow's `trusted-verification-request-v1`.
+ * Trusted code observes the command after start(); no model turn is needed.
+ */
+function isTrustedVerificationRequest(input: unknown): boolean {
+  return (
+    typeof input === 'object' &&
+    input !== null &&
+    (input as { version?: unknown }).version ===
+      'trusted-verification-request-v1'
+  );
+}
+
 class KimiRuntimeProviderImpl implements RuntimeProvider {
   readonly #transport: KimiTransport | undefined;
   readonly #transports: ReadonlyMap<string, KimiTransport>;
@@ -475,6 +488,29 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
     const executor = buildExecutor(session, this.#artifactMcp);
 
     this.#sessions.set(sessionId, session);
+    if (isTrustedVerificationRequest(request.input)) {
+      // The workflow's verification step observes the trusted command itself
+      // through observeCommand(); the only thing it needs from this start is
+      // a materialized sandbox. Running a model here would contribute
+      // nothing to the outcome and only spend tokens and minutes on every
+      // run, so the session is born terminal-and-successful with an empty
+      // result and zero usage, and the agent loop never starts. The managed
+      // provider is untouched: there the sandbox *is* the container the
+      // command runs in, so its session cannot be skipped the same way.
+      session.status = 'submitted';
+      session.result = {};
+      session.loopPromise = Promise.resolve({
+        status: 'submitted',
+        result: {},
+        usage: { inputTokens: 0, outputTokens: 0 },
+        turns: 0,
+      });
+      this.#emit(session, 'message', {
+        detail:
+          'Trusted verification: no model session; the command is observed directly.',
+      });
+      return handle;
+    }
     session.loopPromise = runKimiAgentLoop({
       transport,
       model: agent.model,

@@ -23,26 +23,32 @@ session leases.
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
    The inbox shows the acceptance test file bodies.
-4. Planning, implementation/testing, review, and trusted verification use
-   distinct agents, environments, and runtime sessions. Each role receives the
-   exact source bundle (at most one MiB for the current POC runtime transport)
-   plus verified upstream artifacts as read-only mounted
-   files. Its Artifact MCP capability can write only to that role's logical
-   step scope. A requested fix gets one fresh
-   implementation session followed by a fresh final-review session; a final
-   `changes_requested` decision cannot publish.
+4. Implementation receives the specification and Definition of Done directly.
+   A project may declare a `planning` step; when it does, planning runs first
+   and the plan is handed to implementation as well. Four real runs on
+   2026-09-02 showed the implementer re-deriving the plan from the
+   specification, so the default configurations no longer declare it.
 5. After implementation, trusted code seals the acceptance test files onto the
    change set (`sealed-changes`). Verification materializes the sealed set and
-   runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'` in a
-   separate, secretless Managed sandbox with only source/change inputs and Bash.
-   An implementer change under `test/acceptance/` is a permanent error. It can
-   reach only server-configured package registry hosts; lifecycle scripts are
-   disabled. The provider-observed exact install/test sequence and result are
-   bound into a signed, bounded report.
+   runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'`
+   in a separate, secretless sandbox with only source/change inputs and Bash.
+   An implementer change under `test/acceptance/` is a permanent error. The
+   provider-observed exact install/test sequence and result are bound into a
+   signed, bounded report. On the process runtime this step starts no model
+   session: the sandbox is materialized and the command observed directly.
 6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
-   protected-path policy. A trusted publication authority—not an agent—creates
-   the publisher input. The GitHub App publisher revalidates the stale base and
-   creates only a draft PR.
+   protected-path policy. This is the gate.
+7. A project may declare a `review` step. When it does, review runs here,
+   after the gate, and never blocks: its findings are shown on the run page
+   for the operator who merges. A review that requests changes, or a review
+   session that fails or cannot be admitted under the budget, is recorded on
+   its step and the run publishes anyway. Until 2026-09-03 review ran before
+   verification and a `changes_requested` re-review failed the run; the run
+   that motivated the change was blocked by a finding that was true of `||`
+   and false of `??`, on code the acceptance tests then passed.
+8. A trusted publication authority -- not an agent -- creates the publisher
+   input. The GitHub App publisher revalidates the stale base and creates only
+   a draft PR.
 
 No runtime request contains GitHub App, branch-push, merge, or publication
 credentials. Agent outputs are bounded JSON results containing artifact
@@ -302,10 +308,10 @@ Trigger worker. The control plane uses the same Neon repository and
 handle-sealing key for cancellation reconciliation. Missing secrets fail only
 when execution needs the component, never silently during Trigger discovery.
 
-Production feature configuration must contain exact `specification`,
-`planning`, `implementation`, `review`, and `verification` step IDs, each with
-a separate limited-network environment. The first four may use only the
-`artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
+Production feature configuration must contain `specification`,
+`implementation`, and `verification` step IDs, and may declare `planning` and
+`review`; each declared role needs a separate limited-network environment.
+Every role but verification may use only the `artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
 variables, or YAML-selected network/package capabilities. Trusted server
 configuration supplies its exact package-registry host allowlist. Managed
 Agents' broad package-manager registry bypass remains disabled; `pnpm` reaches

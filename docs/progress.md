@@ -252,5 +252,15 @@ feature succeeding three times in a row against this repository, and it has not
 been run yet. Restart recovery, the live smoke, and goal runs on this executor
 are still open.
 
+The pipeline is three steps by default
+([design](./superpowers/specs/2026-09-03-three-step-pipeline-design.md)):
+specification with frozen acceptance tests, operator approval, implementation,
+trusted verification, publish. Planning and review are steps a project may
+declare. Review, when declared, runs after the gate and never blocks; its
+findings are notes on the run page. The change was made after a real run was
+failed by a reviewer's claim that was true of `||` and false of `??`, on code
+whose acceptance tests passed. On the process runtime verification no longer
+starts a model session.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

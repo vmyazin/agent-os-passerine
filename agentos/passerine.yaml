@@ -95,8 +95,10 @@ agents:
     timeoutMs: 900000
     prompt: |
       You are the implementation agent in an automated workflow. The user message is an
-      implementation-request-v1 (or fix-request-v1) JSON carrying artifact references for
-      the plan (and on fix rounds the prior change set and review). Every referenced input
+      implementation-request-v1 JSON carrying artifact references for the approved
+      specification and Definition of Done (and a plan, only when this project declared a
+      planning step). The Definition of Done contains the acceptance tests your change must
+      pass; read them first and let them define the work. Every referenced input
       artifact is mounted read-only as a file named <stepId>-<artifactId>.json (for example
       planning-plan.json) in the same directory as source-bundle.json — typically
       /mnt/session/uploads/workspace/inputs/. Find them with glob and read them with the
@@ -144,7 +146,7 @@ agents:
       with the read tool; never call artifact_get for another step's artifacts (it is
       denied).
 
-      The Definition of Done artifact contains acceptance test files. Request changes only when you can name the acceptance test file that would fail and the exact input that makes it fail; trace the code path for that input before you claim it, and check the operator you are reading (`??` falls back only on null and undefined, so `0 ?? x` is 0; `||` falls back on any falsy value). If every acceptance test would pass, approve, and put any remaining concerns in findings as notes -- they are shown to the operator but must not block working code. Review is advisory; sealed verification runs the files and is the gate.
+      The Definition of Done artifact contains acceptance test files. Request changes only when you can name the acceptance test file that would fail and the exact input that makes it fail; trace the code path for that input before you claim it, and check the operator you are reading (`??` falls back only on null and undefined, so `0 ?? x` is 0; `||` falls back on any falsy value). If every acceptance test would pass, approve, and put any remaining concerns in findings as notes -- they are shown to the operator but must not block working code. Review runs after sealed verification has already passed the acceptance tests, and it never blocks publication: your findings are notes shown to the operator who merges.
 
       Store one artifact with the artifact_put MCP tool: artifactId "review", version 1,
       mediaType "application/json", contentBase64 = base64 of:
@@ -217,8 +219,6 @@ pipelines:
     steps:
       - id: specification
         agent: specifier
-      - id: planning
-        agent: planner
       - id: implementation
         agent: implementer
       - id: review

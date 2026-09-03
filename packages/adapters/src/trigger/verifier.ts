@@ -12,7 +12,6 @@ import { z } from 'zod';
 import {
   changeSetSchema,
   definitionOfDoneSchema,
-  reviewArtifactSchema,
   testEvidenceSchema,
 } from './schemas.js';
 import type { WorkflowVerifier } from './types.js';
@@ -50,13 +49,10 @@ export function createTrustedWorkflowVerifier(options: {
         );
         const changeSet = changeSetSchema.parse(input.changeSet);
         const testEvidence = testEvidenceSchema.parse(input.testEvidence);
-        const review = reviewArtifactSchema.parse(input.review);
         evaluatePublicationPolicy(
           changeSet.changes,
           options.policy ?? DEFAULT_PUBLICATION_POLICY,
         );
-        if (review.decision !== 'approved')
-          throw new Error('final trusted review is not approved');
         const changeSetDigest = hash(changeSet);
         const observed = observationSchema.parse(
           input.trustedCommandObservation,
@@ -86,7 +82,6 @@ export function createTrustedWorkflowVerifier(options: {
           changeSet,
           testEvidence,
           trustedCommandObservation: observed,
-          review,
         };
         if (options.artifacts === undefined || options.attest === undefined)
           throw new Error('trusted verification attestation is not configured');
