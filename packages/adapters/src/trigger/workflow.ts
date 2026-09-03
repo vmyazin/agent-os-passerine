@@ -700,6 +700,12 @@ const RUNTIME_ERROR_NOTES = new Map<string, string>([
 ]);
 
 const MAX_PROGRESS_SAMPLES_PER_NOTE = 3;
+/**
+ * How long the feed may stay silent before it says the model was thinking.
+ * Short enough to explain a stall, long enough that ordinary turnaround
+ * between one action and the next does not narrate itself.
+ */
+const MIN_REPORTED_THINKING_MS = 10_000;
 /** Distinct notes are bounded, but keep one attempt's feed readable anyway. */
 const MAX_PROGRESS_NOTES_PER_ATTEMPT = 60;
 const MAX_TRACKED_TOOL_CALLS = 64;
@@ -798,21 +804,56 @@ const MAX_TOOL_ERROR_CHARS = 200;
  * a sandboxed command printed, never an instruction.
  */
 function runtimeToolResultText(payload: unknown): string | undefined {
-  const detail = payloadField(payload, 'detail');
-  if (typeof detail !== 'string' || detail.length === 0) return undefined;
-  let text = detail;
-  try {
-    const parsed: unknown = JSON.parse(detail);
-    const content = payloadField(parsed, 'content');
-    if (typeof content === 'string') text = content;
-  } catch {
-    // Not JSON: the provider sent the text plainly.
-  }
+  const text = runtimeToolResultRaw(payload);
+  if (text === undefined) return undefined;
   const cleaned = sanitizeForNote(text);
   if (cleaned.length === 0) return undefined;
   return cleaned.length > MAX_TOOL_ERROR_CHARS
     ? `${cleaned.slice(0, MAX_TOOL_ERROR_CHARS)}...`
     : cleaned;
+}
+
+/** What a tool printed, as the provider sent it. */
+function runtimeToolResultRaw(payload: unknown): string | undefined {
+  const detail = payloadField(payload, 'detail');
+  if (typeof detail !== 'string' || detail.length === 0) return undefined;
+  try {
+    const content = payloadField(JSON.parse(detail), 'content');
+    if (typeof content === 'string') return content;
+  } catch {
+    // Not JSON: the provider sent the text plainly.
+  }
+  return detail;
+}
+
+/**
+ * How much a tool printed, without printing any of it.
+ *
+ * A successful result is the model's working material, not the operator's, so
+ * it stays out of the feed -- but "bash finished", ten times, says only that
+ * something happened. A line count says the command did something, and says
+ * it without rendering a single provider-authored character.
+ */
+function runtimeToolResultLines(payload: unknown): number | undefined {
+  const text = runtimeToolResultRaw(payload);
+  if (text === undefined) return undefined;
+  const trimmed = text.replace(/\s+$/, '');
+  return trimmed.length === 0 ? undefined : trimmed.split('\n').length;
+}
+
+/** How long something took, at the precision a reader can act on. */
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.round(milliseconds / 1_000);
+  if (milliseconds < 10_000) return `${(milliseconds / 1_000).toFixed(1)}s`;
+  if (seconds < 60) return `${String(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    const rest = seconds % 60;
+    return rest === 0
+      ? `${String(minutes)}m`
+      : `${String(minutes)}m ${String(rest)}s`;
+  }
+  return `${String(Math.floor(minutes / 60))}h ${String(minutes % 60)}m`;
 }
 
 function runtimeToolUseId(payload: unknown): string | undefined {
@@ -837,6 +878,19 @@ interface RuntimeProgressNote {
    * message still contains it, so a reader of the raw event loses nothing.
    */
   readonly code?: string;
+  /**
+   * Identifies a distinct moment -- this call, this result -- rather than a
+   * kind of moment. A note that has one is never collapsed into a repeat and
+   * is recorded under this id, so replaying the same event twice appends once.
+   */
+  readonly key?: string;
+}
+
+/** Names the model in the operator's feed, when it is known and plausible. */
+function modelLabel(model: string | undefined): string {
+  return model === undefined || model.length === 0 || model.length > 64
+    ? 'Model'
+    : `Model (${model})`;
 }
 
 /**
@@ -849,12 +903,12 @@ function withModelName(
   model: string | undefined,
 ): RuntimeProgressNote | undefined {
   if (note === undefined) return undefined;
-  if (model === undefined || model.length === 0 || model.length > 64)
-    return note;
+  const label = modelLabel(model);
+  if (label === 'Model') return note;
   if (!note.message.startsWith('Model')) return note;
   return {
     ...note,
-    message: `Model (${model})${note.message.slice('Model'.length)}`,
+    message: `${label}${note.message.slice('Model'.length)}`,
   };
 }
 
@@ -939,20 +993,28 @@ function runtimeMessageText(payload: unknown): string | undefined {
   return undefined;
 }
 
+/** A call the model made, remembered so its result can be named and timed. */
+interface TrackedToolCall {
+  readonly name: string;
+  readonly startedAt: number;
+}
+
 function runtimeProgress(
   event: RuntimeEvent,
-  toolCalls: ReadonlyMap<string, string>,
+  toolCalls: ReadonlyMap<string, TrackedToolCall>,
 ): RuntimeProgressNote | undefined {
   const note = (
     phase: StepProgressPhase,
     message: string,
     variant = '',
     code?: string,
+    key?: string,
   ): RuntimeProgressNote => ({
     phase,
     message,
     variant,
     ...(code === undefined ? {} : { code }),
+    ...(key === undefined ? {} : { key }),
   });
   switch (event.type) {
     case 'message': {
@@ -982,11 +1044,13 @@ function runtimeProgress(
       // that something is happening; the command says what.
       const subject = runtimeToolCallSubject(event.payload, tool);
       const about = subject === undefined ? '' : `: ${subject}`;
+      const callId = runtimeToolUseId(event.payload);
       return note(
         'tool',
         `Model is using ${tool}${via}${about}`,
         tool,
         subject,
+        callId === undefined ? undefined : `tool-call:${callId}`,
       );
     }
     case 'tool_result': {
@@ -994,23 +1058,51 @@ function runtimeProgress(
       const linked = runtimeToolUseId(event.payload);
       const tool =
         runtimeToolName(event.payload, 'name') ??
-        (linked === undefined ? undefined : toolCalls.get(linked));
+        (linked === undefined ? undefined : toolCalls.get(linked)?.name);
       // What the tool said, on failure only. A successful result is the
       // model's business; a failed one is the operator's, and "bash reported
       // an error" without the error is the same dead end as a bare exit code.
       const reason = failed ? runtimeToolResultText(event.payload) : undefined;
       const because = reason === undefined ? '' : `: ${reason}`;
+      // How long the call ran, from the call this result answers. A command
+      // that took three minutes and one that took none read identically
+      // otherwise, and the slow one is the one worth knowing about.
+      const started =
+        linked === undefined ? undefined : toolCalls.get(linked)?.startedAt;
+      const elapsed =
+        started === undefined
+          ? undefined
+          : event.occurredAt.getTime() - started;
+      const took =
+        elapsed === undefined || elapsed < 100
+          ? ''
+          : ` ${failed ? 'after' : 'in'} ${formatElapsed(elapsed)}`;
+      // Shape, never content: enough to tell a command that produced output
+      // from one that produced none.
+      const lines = failed ? undefined : runtimeToolResultLines(event.payload);
+      const shape =
+        lines === undefined
+          ? ''
+          : ` · ${String(lines)} line${lines === 1 ? '' : 's'}`;
+      const key = linked === undefined ? undefined : `tool-result:${linked}`;
       if (tool === undefined)
         return note(
           'tool',
-          failed ? `A tool reported an error${because}` : 'Tool finished',
+          failed
+            ? `A tool reported an error${took}${because}`
+            : `Tool finished${took}${shape}`,
           failed ? 'failed' : '',
+          undefined,
+          key,
         );
       return note(
         'tool',
-        failed ? `${tool} reported an error${because}` : `${tool} finished`,
+        failed
+          ? `${tool} reported an error${took}${because}`
+          : `${tool} finished${took}${shape}`,
         failed ? `${tool}:failed` : tool,
         reason,
+        key,
       );
     }
     case 'input_acknowledged':
@@ -1054,7 +1146,11 @@ async function consumeEvents(
   let count = 0;
   let notes = 0;
   const progressCounts = new Map<string, number>();
-  const toolCalls = new Map<string, string>();
+  const toolCalls = new Map<string, TrackedToolCall>();
+  const recordedKeys = new Set<string>();
+  // When the feed last said anything. A stretch of silence is the model
+  // generating; measuring from the last note is what the operator sees.
+  let lastNoteAt: number | undefined;
   for await (const event of dependencies.runtime.events(handle)) {
     const run = await dependencies.repository.getRun(
       persistenceId('run', runId),
@@ -1081,11 +1177,20 @@ async function consumeEvents(
     }
     if (event.type === 'tool_call' && toolCalls.size < MAX_TRACKED_TOOL_CALLS) {
       // Result events carry the id of the call they answer but not its name,
-      // so remember the mapping to name the tool that just finished.
+      // so remember the mapping to name the tool that just finished, and when
+      // it started so the result can say how long it took. A provider that
+      // restates a call keeps the first start: that is when the work began.
       const toolUseId = runtimeToolUseId(event.payload);
       const toolName = runtimeToolName(event.payload, 'name');
-      if (toolUseId !== undefined && toolName !== undefined)
-        toolCalls.set(toolUseId, toolName);
+      if (
+        toolUseId !== undefined &&
+        toolName !== undefined &&
+        !toolCalls.has(toolUseId)
+      )
+        toolCalls.set(toolUseId, {
+          name: toolName,
+          startedAt: event.occurredAt.getTime(),
+        });
     }
     const progress = withModelName(
       runtimeProgress(event, toolCalls),
@@ -1095,17 +1200,44 @@ async function consumeEvents(
       const variantKey = `${event.type}:${progress.variant}`;
       const occurrence = (progressCounts.get(variantKey) ?? 0) + 1;
       progressCounts.set(variantKey, occurrence);
-      // Provider streams can emit thousands of repetitive message/tool
-      // updates. Sampling each distinct note -- so every tool the model
-      // reaches for is named at least once -- preserves the operational story
-      // without letting progress crowd newer run events out of the page read.
-      if (occurrence <= MAX_PROGRESS_SAMPLES_PER_NOTE) {
+      // Provider streams can emit thousands of repetitive status updates, so
+      // a kind of note is sampled. A note that identifies a distinct moment
+      // is not a repeat and is never collapsed: sampling the fourth command
+      // away left a working run looking stopped, which is the failure this
+      // feed exists to rule out. The per-attempt ceiling bounds both.
+      const key = progress.key;
+      const repeat = key !== undefined && recordedKeys.has(key);
+      if (
+        !repeat &&
+        (key !== undefined || occurrence <= MAX_PROGRESS_SAMPLES_PER_NOTE)
+      ) {
+        const at = event.occurredAt.getTime();
+        // Silence before an action is the model thinking. Saying so, with how
+        // long it lasted, turns a three-minute hole in the feed into the one
+        // line that explains it.
+        const silence = lastNoteAt === undefined ? 0 : at - lastNoteAt;
+        if (silence >= MIN_REPORTED_THINKING_MS) {
+          notes += 1;
+          await recordStepProgress(
+            dependencies,
+            runId,
+            step,
+            `runtime:thinking:${event.id}`,
+            'working',
+            `${modelLabel(step.model)} thought for ${formatElapsed(silence)}`,
+            event.occurredAt.toISOString(),
+          );
+        }
+        if (key !== undefined) recordedKeys.add(key);
         notes += 1;
+        lastNoteAt = at;
         await recordStepProgress(
           dependencies,
           runId,
           step,
-          `runtime:${variantKey}:${String(occurrence)}`,
+          key === undefined
+            ? `runtime:${variantKey}:${String(occurrence)}`
+            : `runtime:${key}`,
           progress.phase,
           progress.message,
           event.occurredAt.toISOString(),

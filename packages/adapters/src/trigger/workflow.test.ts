@@ -1231,11 +1231,12 @@ describe('durable feature workflow', () => {
         'Model (sonnet) provider rate limited the session',
       ]),
     );
-    // Repetition of one tool is sampled, but never at the cost of hiding the
-    // tools the model reached for afterwards.
+    // Four distinct calls are four things the model did, so all four show.
+    // Sampling collapses kinds of note, never the actions themselves: hiding
+    // the fourth command is what made a working run look stopped.
     expect(
       messages.filter((message) => message === 'Model (sonnet) is using glob'),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     // A tool name that is really a sentence is provider-controlled text, so
     // it must never reach the operator's activity feed.
     expect(JSON.stringify(messages)).not.toMatch(
@@ -3144,7 +3145,7 @@ describe('tool error notes', () => {
     ).toBe(true);
   });
 
-  it('leaves a successful tool result alone', async () => {
+  it('reports the shape of a successful result, never its content', async () => {
     const messages = await runWith(async function* () {
       yield {
         id: 'ok-bash',
@@ -3158,8 +3159,103 @@ describe('tool error notes', () => {
       };
       yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
     });
-    expect(messages).toContain('bash finished');
+    // Enough to tell a command that did something from one that did not,
+    // without rendering a character the model chose.
+    expect(messages).toContain('bash finished · 1 line');
     expect(messages.join(' ')).not.toContain('lots of output');
+  });
+
+  /** A moment this far after the fixture clock, as the runtime reports it. */
+  const later = (milliseconds: number) =>
+    new Date(new Date(now).getTime() + milliseconds);
+
+  it('times a tool call and says how long it ran', async () => {
+    const messages = await runWith(async function* () {
+      yield {
+        id: 'slow-call',
+        type: 'tool_call',
+        occurredAt: new Date(now),
+        payload: { name: 'bash', toolUseId: 'slow-1' },
+      };
+      yield {
+        id: 'slow-result',
+        type: 'tool_result',
+        occurredAt: later(92_000),
+        payload: {
+          toolUseId: 'slow-1',
+          detail: JSON.stringify({ content: 'a\nb\nc' }),
+        },
+      };
+      yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
+    });
+    // A command that took a minute and a half and one that took none read
+    // identically without this, and the slow one is worth knowing about.
+    expect(messages).toContain('bash finished in 1m 32s · 3 lines');
+  });
+
+  it('names a silent stretch as the model thinking, and for how long', async () => {
+    const messages = await runWith(async function* () {
+      yield {
+        id: 'first',
+        type: 'tool_call',
+        occurredAt: new Date(now),
+        payload: { name: 'bash', toolUseId: 'first-1' },
+      };
+      yield {
+        id: 'second',
+        type: 'tool_call',
+        occurredAt: later(190_000),
+        payload: { name: 'bash', toolUseId: 'second-1' },
+      };
+      yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
+    });
+    // Three minutes of nothing reads as a frozen run; this is the one line
+    // that says the run was working the whole time.
+    expect(messages).toContain('Model (sonnet) thought for 3m 10s');
+  });
+
+  it('says nothing about a gap short enough to be ordinary turnaround', async () => {
+    const messages = await runWith(async function* () {
+      yield {
+        id: 'first',
+        type: 'tool_call',
+        occurredAt: new Date(now),
+        payload: { name: 'bash', toolUseId: 'first-1' },
+      };
+      yield {
+        id: 'second',
+        type: 'tool_call',
+        occurredAt: later(4_000),
+        payload: { name: 'bash', toolUseId: 'second-1' },
+      };
+      yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
+    });
+    expect(messages.join(' ')).not.toContain('thought for');
+  });
+
+  it('notes a restated call once, however often the provider repeats it', async () => {
+    const messages = await runWith(async function* () {
+      for (let index = 0; index < 8; index += 1)
+        yield {
+          id: `restated-${String(index)}`,
+          type: 'tool_call',
+          occurredAt: new Date(now),
+          payload: { name: 'bash', toolUseId: 'same-1', command: 'ls' },
+        };
+      yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
+    });
+    // Streaming updates restate one call; that is one action, not eight. The
+    // stream replays for every step, so the count to match is the number of
+    // steps that ran -- one note each, not eight.
+    const steps = messages.filter(
+      (message) => message === 'Preparing workspace',
+    ).length;
+    expect(steps).toBeGreaterThan(0);
+    expect(
+      messages.filter((message) =>
+        message.startsWith('Model (sonnet) is using bash'),
+      ),
+    ).toHaveLength(steps);
   });
 
   it('bounds the reason and flattens anything that would forge a note', async () => {
