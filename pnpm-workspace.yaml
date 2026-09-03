@@ -7,5 +7,5 @@ allowBuilds:
   esbuild: true
 
 minimumReleaseAgeExclude:
-  - '@trigger.dev/core@4.5.12'
-  - '@trigger.dev/sdk@4.5.12'
+  - '@trigger.dev/core@4.5.12 || 4.5.16'
+  - '@trigger.dev/sdk@4.5.12 || 4.5.16'
