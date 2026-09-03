@@ -51,12 +51,7 @@ import {
   composePublicationTarget,
   resolveFeatureRolesFromSnapshot,
 } from './production-composition.js';
-import type { FeatureWorkflowTaskHandler } from './task.js';
 import { createFeatureWorkflowTaskHandler } from './task-handler.js';
-import {
-  createTriggerApprovalWaiter,
-  type TriggerApprovalWaiter,
-} from './trigger-adapter.js';
 import {
   budgetLimitsFromConfig,
   createDeploymentDailyUsageMicrodollars,
@@ -66,6 +61,9 @@ import {
 import type {
   FeatureWorkflowInput,
   FeatureWorkflowRoles,
+  FeatureWorkflowTaskHandler,
+  GoalWorkflowTaskHandler,
+  TriggerApprovalWaiter,
   WorkflowPublicationAuthority,
 } from './types.js';
 import { createTrustedWorkflowVerifier } from './verifier.js';
@@ -443,6 +441,21 @@ export interface LocalDirectWorkflowProfile {
 
 export type FeatureWorkflowProfile =
   { readonly kind: 'trigger' } | LocalDirectWorkflowProfile;
+
+/**
+ * The approval waiter every composition must supply. A check rather than a
+ * default: the wake signal is the one place a wrong implementation looks
+ * exactly like a run that simply never resumes.
+ */
+function requireApprovalWaiter(
+  waiter: TriggerApprovalWaiter | undefined,
+): TriggerApprovalWaiter {
+  if (waiter === undefined)
+    throw new Error(
+      'a feature workflow composition must supply an approval waiter',
+    );
+  return waiter;
+}
 
 const TRIGGER_PROFILE: FeatureWorkflowProfile = { kind: 'trigger' };
 
@@ -1038,7 +1051,9 @@ export async function createProductionFeatureWorkflowFromEnv(
         checkpoints,
         artifacts,
         runtime: workflowRuntime,
-        approval: local?.approval ?? createTriggerApprovalWaiter(),
+        // Supplied by the profile: there is one executor, and its waiter
+        // polls the approval row rather than parking on a remote waitpoint.
+        approval: requireApprovalWaiter(local?.approval),
         roles: roleDefinitions,
         runtimeAccess,
         clock: () => new Date().toISOString(),
@@ -1090,7 +1105,7 @@ export async function createProductionFeatureWorkflowFromEnv(
 
 export async function createProductionGoalWorkflowFromEnv(
   environment: Environment,
-): Promise<import('./goal-task.js').GoalWorkflowTaskHandler> {
+): Promise<GoalWorkflowTaskHandler> {
   const repository = createNeonDomainRepositoryFromEnv(environment);
   const artifacts = createR2ArtifactStore({
     accountId: required(environment, 'CLOUDFLARE_R2_ACCOUNT_ID'),

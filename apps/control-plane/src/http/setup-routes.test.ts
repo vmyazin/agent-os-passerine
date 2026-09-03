@@ -10,7 +10,10 @@ import {
   GET as getLocalRepositoryDisallowed,
   POST as createLocalRepository,
 } from '../../app/api/setup/local-repository/route';
-import { setupReadiness, projectSetupReadinessFromYaml } from '../application/setup-readiness';
+import {
+  setupReadiness,
+  projectSetupReadinessFromYaml,
+} from '../application/setup-readiness';
 import { resetControlPlaneServiceForTests } from '../application/runtime';
 import { resetRepositoryForTests } from '../persistence/repository-factory';
 
@@ -23,15 +26,12 @@ import { resetRepositoryForTests } from '../persistence/repository-factory';
 const GREEN_NON_GITHUB_LOCAL_ENV = {
   DATABASE_URL: 'postgresql://user:pass@host/db',
   AGENTOS_REPOSITORY: 'neon',
-  TRIGGER_SECRET_KEY: 'trigger-secret',
-  TRIGGER_PROJECT_REF: 'proj_ref',
   ANTHROPIC_API_KEY: 'anthropic-key',
-  CLOUDFLARE_R2_ACCOUNT_ID: 'account',
-  CLOUDFLARE_R2_ARTIFACT_BUCKET: 'bucket',
-  CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID: 'access-key',
-  CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY: 'secret-key',
-  AGENTOS_ARTIFACT_MCP_URL: 'https://mcp.example',
-  ARTIFACT_MCP_ALLOWED_ORIGINS: 'https://control.example',
+  // Runs execute in this process, so its state directory and workspaces root
+  // are what "green" means now; R2 and a public MCP URL are not read.
+  AGENTOS_LOCAL_STATE_DIR: '/var/agentos/state',
+  AGENTOS_LOCAL_WORKSPACES_ROOT: '/workspaces/experiments',
+  AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON: '["registry.npmjs.org"]',
   ARTIFACT_CAPABILITY_KEYS_JSON: '{"k1":"v1"}',
   AGENTOS_RUNTIME_OWNERSHIP_SECRET: 'ownership-secret',
   AGENTOS_RUNTIME_HANDLE_KEY: 'handle-key',
@@ -85,9 +85,9 @@ describe('setup readiness model', () => {
   it('treats blank values as absent', () => {
     const readiness = setupReadiness({ DATABASE_URL: '   ' });
     const database = readiness.groups.find((group) => group.id === 'database');
-    expect(database?.items.find((entry) => entry.key === 'DATABASE_URL')?.ready).toBe(
-      false,
-    );
+    expect(
+      database?.items.find((entry) => entry.key === 'DATABASE_URL')?.ready,
+    ).toBe(false);
   });
 
   it('omits repositories for malformed bindings', () => {
@@ -186,8 +186,12 @@ runtime: { provider: local }
     const local = readiness.groups.find((entry) => entry.id === 'local');
     expect(local?.ready).toBe(false);
     expect(readiness.readyForLocal).toBe(false);
-    // Overall readiness still excludes the local/github groups.
-    expect(readiness.ready).toBe(true);
+    // The workspaces root is no longer only a capability. Runs execute in
+    // this process and ingest from a local repository, so without it the
+    // deployment cannot run anything at all, and overall readiness says so.
+    expect(readiness.ready).toBe(false);
+    const executor = readiness.groups.find((entry) => entry.id === 'executor');
+    expect(executor?.ready).toBe(false);
   });
 });
 
@@ -280,8 +284,9 @@ describe('setup API routes', () => {
       request('/api/setup/repository-head?projectId=project-unknown'),
     );
     expect(response.status).toBe(404);
-    expect(((await response.json()) as { error: { code: string } }).error.code)
-      .toBe('project_not_found');
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe('project_not_found');
   });
 
   describe('local-repository route', () => {

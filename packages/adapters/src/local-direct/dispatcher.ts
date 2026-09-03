@@ -9,7 +9,7 @@ import {
   type WorkflowRun,
 } from '@agentos/core';
 
-import type { TriggerWorkflowDispatcher } from '../trigger/trigger-adapter.js';
+import type { TriggerWorkflowDispatcher } from '../trigger/types.js';
 import {
   FeatureWorkflowTaskTransientError,
   type WorkflowCheckpointStore,

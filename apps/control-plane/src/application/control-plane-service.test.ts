@@ -1092,9 +1092,8 @@ runtime: { provider: local }
       });
     }
 
-    const projection = await createService(repository).getRun(
-      'run-progress-order',
-    );
+    const projection =
+      await createService(repository).getRun('run-progress-order');
 
     expect(projection.steps[0]?.progress.map((entry) => entry.message)).toEqual(
       ['Model is working', 'Waiting on response'],

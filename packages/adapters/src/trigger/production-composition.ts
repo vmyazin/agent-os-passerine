@@ -20,11 +20,11 @@ import {
   type TrustedPublicationPolicyResolver,
 } from '../github/service.js';
 import { createLocalGitPublisher } from '../local-git/index.js';
-import type { FeatureWorkflowTaskHandler } from './task.js';
 import type {
   FeatureRole,
   FeatureRoleDefinition,
   FeatureWorkflowRoles,
+  FeatureWorkflowTaskHandler,
 } from './types.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;

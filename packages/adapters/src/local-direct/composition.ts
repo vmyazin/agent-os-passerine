@@ -11,7 +11,7 @@ import { createArtifactMcpHandler } from '../artifacts/mcp.js';
 import { createDomainArtifactCapabilityQuotaStore } from '../artifacts/quota.js';
 import { createNeonDomainRepositoryFromEnv } from '../persistence/neon-repository.js';
 import { createProductionFeatureWorkflowFromEnv } from '../trigger/production-handler.js';
-import type { FeatureWorkflowTaskHandler } from '../trigger/task.js';
+import type { FeatureWorkflowTaskHandler } from '../trigger/types.js';
 import { createLocalApprovalWaiter } from './approval-waiter.js';
 
 type Environment = Readonly<Record<string, string | undefined>>;

@@ -1,5 +1,4 @@
-export const INBOX_ATTENTION_CHANGED_EVENT =
-  'agentos:inbox-attention-changed';
+export const INBOX_ATTENTION_CHANGED_EVENT = 'agentos:inbox-attention-changed';
 
 export interface InboxAttentionChangedDetail {
   readonly advanceSelection: boolean;
@@ -86,8 +85,9 @@ export function publishInboxAttentionChanged(
 
 export function subscribeToInboxAttentionChanged(
   listener: (detail: InboxAttentionChangedDetail | undefined) => void,
-  target: EventTarget | undefined =
-    typeof window === 'undefined' ? undefined : window,
+  target: EventTarget | undefined = typeof window === 'undefined'
+    ? undefined
+    : window,
 ): () => void {
   if (target === undefined) return () => {};
   const handler = (event: Event) =>
@@ -95,7 +95,8 @@ export function subscribeToInboxAttentionChanged(
       (event as CustomEvent<InboxAttentionChangedDetail | undefined>).detail,
     );
   target.addEventListener(INBOX_ATTENTION_CHANGED_EVENT, handler);
-  return () => target.removeEventListener(INBOX_ATTENTION_CHANGED_EVENT, handler);
+  return () =>
+    target.removeEventListener(INBOX_ATTENTION_CHANGED_EVENT, handler);
 }
 
 export function subscribeToInboxAttentionCount(
@@ -108,17 +109,21 @@ export function subscribeToInboxAttentionCount(
   const documentTarget =
     options.documentTarget ??
     (typeof document === 'undefined' ? undefined : document);
-  if (windowTarget === undefined || documentTarget === undefined) return () => {};
+  if (windowTarget === undefined || documentTarget === undefined)
+    return () => {};
 
   const isVisible =
     options.isVisible ??
-    (() => typeof document !== 'undefined' && document.visibilityState === 'visible');
+    (() =>
+      typeof document !== 'undefined' &&
+      document.visibilityState === 'visible');
   const fetchCount = options.fetchCount ?? fetchInboxAttentionCount;
   const setIntervalFn =
     options.setIntervalFn ??
     ((callback: () => void, delay: number) => setInterval(callback, delay));
   const clearIntervalFn =
-    options.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as number));
+    options.clearIntervalFn ??
+    ((handle: unknown) => clearInterval(handle as number));
 
   let activeController: AbortController | undefined;
   let disposed = false;

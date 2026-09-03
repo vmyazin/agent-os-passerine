@@ -1,6 +1,6 @@
 import { persistenceId, type DomainRepository } from '@agentos/core';
 
-import type { TriggerApprovalWaiter } from '../trigger/trigger-adapter.js';
+import type { TriggerApprovalWaiter } from '../trigger/types.js';
 
 export interface LocalApprovalWaiterOptions {
   readonly repository: DomainRepository;

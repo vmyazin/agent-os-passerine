@@ -49,20 +49,20 @@ publishers, `managed-agents/**`, `github/**`, `local-git/**`, `drizzle/**`,
 
 ## Tasks
 
-- [ ] **1. Move the ports.** Types into `types.ts`; update importers so the
+- [x] **1. Move the ports.** Types into `types.ts`; update importers so the
       three SDK files have no remaining dependents. Verify: `pnpm typecheck`
-- [ ] **2. Delete the SDK files and config.** The three modules, their tests,
+- [x] **2. Delete the SDK files and config.** The three modules, their tests,
       `trigger.config.ts`, the smoke script. Verify: `pnpm typecheck && pnpm --filter @agentos/adapters exec vitest run`
-- [ ] **3. Local status vocabulary.** Dispatcher returns `EXECUTING`/
+- [x] **3. Local status vocabulary.** Dispatcher returns `EXECUTING`/
       `COMPLETED`/`FAILED`/`LOST`; outbox recognises `LOST`/`FAILED`;
       diagnostics drop Trigger-only branches. Verify:
       `pnpm --filter @agentos/adapters exec vitest run src/trigger/outbox.test.ts src/local-direct/`
-- [ ] **4. One executor in the control plane.** Delete the Trigger branch,
+- [x] **4. One executor in the control plane.** Delete the Trigger branch,
       `executorFromEnv`, the readiness `dispatch` group, the notice variant.
       Verify: `pnpm --filter @agentos/control-plane exec vitest run`
-- [ ] **5. Dependencies and environment.** Remove the two devDependencies and
+- [x] **5. Dependencies and environment.** Remove the two devDependencies and
       three scripts; strip `TRIGGER_*` from `.env.example`. Verify:
       `pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint`
-- [ ] **6. Docs.** Runbook, progress, README, and the local-direct spec's
+- [x] **6. Docs.** Runbook, progress, README, and the local-direct spec's
       executor section. Verify: `pnpm format:check` on changed files
 - [ ] **7. Live gate.** One feature run end to end on the fixture project.

@@ -37,7 +37,12 @@ describe('control-plane UI components', () => {
       expect(markup).toContain('class="status-spinner"');
     }
 
-    for (const status of ['waiting', 'succeeded', 'failed', 'cancelled'] as const) {
+    for (const status of [
+      'waiting',
+      'succeeded',
+      'failed',
+      'cancelled',
+    ] as const) {
       const markup = renderToStaticMarkup(
         createElement(RunStatusBadge, { status }),
       );

@@ -7,8 +7,6 @@ import {
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
-  createKimiLocalAccessStore,
-  createKimiRuntimeProviderFromEnv,
   createFilesystemArtifactStorage,
   createGitHubProjectSourceReader,
   createLocalApprovalWaiter,
@@ -17,24 +15,17 @@ import {
   createLocalSourceSnapshotIngestor,
   inspectLocalProjectSource,
   listLocalProjectCommits,
-  createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
-  createTriggerSdkBoundary,
   createRepositoryRuntimeHandleVault,
   createRoutingRuntimeProvider,
-  createRuntimeStartRecoveryResolver,
   createR2ArtifactStore,
-  createTrustedSourceSnapshotIngestor,
   createTrustedRepositoryHeadResolver,
-  createTriggerApprovalWaiter,
-  createTriggerWorkflowDispatcher,
   githubOwnerNameFromUrl,
   githubRepositoryBindingKey,
   parseGitHubRepositoryAllowlist,
   recoverLocalDirectRuns,
   runGit,
   selectGitHubRepositoryFromUrl,
-  kimiFromEnv,
   type TrustedSourceSnapshotIngestor,
   type GitHubProjectSourceReader,
 } from '@agentos/adapters';
@@ -186,14 +177,6 @@ function requiredRuntime(name: string): string {
   return value;
 }
 
-function parsedRuntimeJson<T>(name: string): T {
-  try {
-    return JSON.parse(requiredRuntime(name)) as T;
-  } catch {
-    throw new Error(`${name} must contain valid JSON`);
-  }
-}
-
 /**
  * Distinguishes "the trusted GitHub reader is misconfigured or unset" from
  * every other failure mode a repository-head resolution can hit, so the
@@ -326,27 +309,6 @@ export function repositoryHeadResolverFromEnv(): {
   };
 }
 
-function verificationRegistryHosts(): readonly string[] {
-  const hosts = parsedRuntimeJson<unknown>(
-    'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',
-  );
-  if (
-    !Array.isArray(hosts) ||
-    hosts.length < 1 ||
-    hosts.length > 4 ||
-    hosts.some(
-      (host) =>
-        typeof host !== 'string' ||
-        host.length > 253 ||
-        !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host),
-    )
-  )
-    throw new Error(
-      'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON must contain 1-4 exact registry hosts',
-    );
-  return hosts;
-}
-
 // The routing facade's handle-id prefix for kimi-owned handles
 // (createRoutingRuntimeProvider's HANDLE_DELIMITER is a single space).
 const KIMI_HANDLE_PREFIX = 'kimi ';
@@ -406,101 +368,6 @@ export function composeCancellationRuntime(input: {
     start: (request) => managed.start(request),
     reconcileStart: async (request) => managed.reconcileStart?.(request),
   };
-}
-
-async function buildCancellationRuntime(): Promise<RuntimeProvider> {
-  const ownershipSecret = requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET');
-  const managed = await createManagedAgentsRuntimeProvider({
-    apiKey: requiredRuntime('ANTHROPIC_API_KEY'),
-    ownershipSecret,
-  });
-  // The control plane's KimiLocalAccessStore is a fresh, separate
-  // in-process instance from whichever Trigger worker actually staged a
-  // given resource, so wireAccessCleanup: false keeps this side's
-  // cleanupAccess a no-op -- real discard only ever happens worker-side,
-  // where the resource was staged (see createKimiRuntimeProviderFromEnv).
-  const kimiProvider = createKimiRuntimeProviderFromEnv(process.env, {
-    ownershipSecret,
-    artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
-    store: createKimiLocalAccessStore(),
-    wireAccessCleanup: false,
-  });
-  return composeCancellationRuntime({ managed, kimi: kimiProvider });
-}
-
-function cancellationRuntime(): RuntimeProvider {
-  let provider: Promise<RuntimeProvider> | undefined;
-  const get = () => (provider ??= buildCancellationRuntime());
-  // Re-checked per call (cheap, pure) rather than cached at construction
-  // time, so this always reflects the environment as it is right now.
-  const kimiConfigured = () => kimiFromEnv(process.env) !== undefined;
-  return {
-    syncAgent: async (value) => (await get()).syncAgent(value),
-    syncEnvironment: async (value) => (await get()).syncEnvironment(value),
-    start: async (value) => (await get()).start(value),
-    reconcileStart: async (value) => (await get()).reconcileStart?.(value),
-    async *events(handle) {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      yield* (await get()).events(handle);
-    },
-    send: async (handle, value) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).send(handle, value);
-    },
-    resume: async (handle, value) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).resume(handle, value);
-    },
-    cancel: async (handle, reason) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).cancel(handle, reason);
-    },
-    collectOutput: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      return (await get()).collectOutput(handle);
-    },
-    usage: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      return (await get()).usage(handle);
-    },
-    cleanup: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).cleanup(handle);
-    },
-    cleanupAccess: async (input) => {
-      const runtime = await get();
-      if (runtime.cleanupAccess === undefined)
-        throw new Error('runtime access cleanup is unavailable');
-      await runtime.cleanupAccess(input);
-    },
-  };
-}
-
-/**
- * Which executor claims this deployment's runs.
- *
- * Exactly one executor may be active, because both claim a run by writing the
- * same outbox effects: two of them would race for the same start and the same
- * runtime session. `AGENTOS_EXECUTOR` states the choice; when it is unset the
- * answer is the historical one -- Trigger if a secret key is present, no
- * dispatcher at all otherwise.
- */
-export function executorFromEnv(): 'trigger' | 'local-direct' | undefined {
-  const selected = process.env.AGENTOS_EXECUTOR?.trim() ?? '';
-  const triggerConfigured =
-    (process.env.TRIGGER_SECRET_KEY?.trim() ?? '') !== '';
-  if (selected === '') return triggerConfigured ? 'trigger' : undefined;
-  if (selected === 'trigger') return 'trigger';
-  if (selected === 'local-direct') {
-    if (triggerConfigured)
-      throw new Error(
-        'AGENTOS_EXECUTOR=local-direct cannot be combined with TRIGGER_SECRET_KEY: only one executor may be active, otherwise both would claim the same run',
-      );
-    return 'local-direct';
-  }
-  throw new Error(
-    `AGENTOS_EXECUTOR must be "trigger" or "local-direct" (received "${selected}")`,
-  );
 }
 
 /**
@@ -799,237 +666,33 @@ function localDirectDispatchFromEnv() {
   return outbox;
 }
 
+/**
+ * The workflow dispatcher, when this deployment is configured to run work.
+ *
+ * There is one executor: the run executes inside this process. Trigger.dev
+ * was removed on 2026-09-03 (see
+ * docs/superpowers/specs/2026-09-03-remove-trigger-design.md); Postgres was
+ * always where durability lived, so nothing here changed but the scheduler.
+ */
 export function workflowDispatchFromEnv() {
-  const executor = executorFromEnv();
-  if (executor === undefined) return undefined;
-  if (executor === 'local-direct') return localDirectDispatchFromEnv();
-  const triggerSecret = process.env.TRIGGER_SECRET_KEY?.trim() || undefined;
-  const databaseUrl = process.env.DATABASE_URL?.trim() || undefined;
-  if (triggerSecret === undefined) return undefined;
-  if (databaseUrl === undefined) {
-    throw new Error(
-      'DATABASE_URL is required when TRIGGER_SECRET_KEY enables workflow dispatch',
-    );
-  }
-  const repository = repositoryFromEnv();
-  // A deployment validates its trusted reader configuration eagerly, at
-  // this exact point, whenever there is any indication it might actually
-  // need a GitHub reader: either it has not opted into local experiments at
-  // all (no AGENTOS_LOCAL_WORKSPACES_ROOT -- the classic, pre-local-
-  // experiments deployment shape), or it HAS opted in but has also started
-  // configuring a reader App (GITHUB_READER_APP_ID set) -- a
-  // GitHub-and-local deployment should discover a broken reader (e.g.
-  // reusing the publisher App identity) at construction time, not mid-
-  // dispatch the first time a GitHub-bound run needs it. Only a genuinely
-  // local-only deployment -- local workspaces configured AND no reader App
-  // id set at all -- defers reader construction into the GitHub ingestor's
-  // lazy branch further down, since that deployment may never need a
-  // GitHub reader and must not be required to configure one.
-  const eagerReader =
-    localWorkspacesRootFromEnv() === undefined ||
-    (process.env.GITHUB_READER_APP_ID?.trim() ?? '') !== ''
-      ? trustedReaderConfiguration()
-      : undefined;
-  const artifacts = createR2ArtifactStore({
-    accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
-    bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
-    accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
-    secretAccessKey: requiredRuntime(
-      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
-    ),
-    manifest: createDomainArtifactManifestStore(repository),
-  });
-
-  /**
-   * Loads the run + its (unique) config snapshot and validates the
-   * SHA-binding invariant every source-ingestion path depends on. Shared by
-   * both the GitHub and local resolveBinding closures below so the
-   * binding-integrity checks (SHA regex, snapshot repositorySha equality)
-   * live in exactly one place.
-   */
-  const resolveSourceSnapshotRun = async (runId: string) => {
-    const run = await repository.getRun(persistenceId('run', runId));
-    if (
-      run === undefined ||
-      (run.pipeline !== 'feature' && run.pipeline !== 'goal')
-    )
-      throw new Error('source snapshot workflow run does not exist');
-    const snapshots = await repository.listConfigSnapshots(run.id, {
-      limit: 2,
-    });
-    if (snapshots.length !== 1)
-      throw new Error('source snapshot config binding is unavailable');
-    const config = parseAgentOsConfig(snapshots[0]!.config);
-    const provenance = run.input as {
-      provenance?: { repositorySha?: unknown };
-    };
-    const repositorySha = provenance.provenance?.repositorySha;
-    if (
-      typeof repositorySha !== 'string' ||
-      !/^[0-9a-f]{40}$/.test(repositorySha) ||
-      repositorySha !== snapshots[0]!.repositorySha
-    )
-      throw new Error('source snapshot repository SHA binding is invalid');
-    // A chained run's source is its base run's published commit, not the
-    // configuration revision's. `provenance.repositorySha` stays the config
-    // binding and is checked above; the chain only redirects which commit is
-    // ingested and which branch it is based on -- exactly what the dispatch
-    // side already assumes (`chain.baseCommitSha ?? provenance.repositorySha`
-    // in the task handler). Without this the ingestor writes a bundle pinned
-    // to the config revision, dispatch asks for the chained commit, and the
-    // binding check fails every chained run permanently.
-    const chain = (
-      run.input as {
-        chain?: { baseBranch?: unknown; baseCommitSha?: unknown };
-      }
-    ).chain;
-    const chainedSha =
-      typeof chain?.baseCommitSha === 'string' &&
-      /^[0-9a-f]{40}$/.test(chain.baseCommitSha)
-        ? chain.baseCommitSha
-        : undefined;
-    const chainedBranch =
-      typeof chain?.baseBranch === 'string' && chain.baseBranch.length > 0
-        ? chain.baseBranch
-        : undefined;
-    return {
-      run,
-      config,
-      repositorySha,
-      sourceSha: chainedSha ?? repositorySha,
-      ...(chainedBranch === undefined ? {} : { chainedBranch }),
-    };
-  };
-
-  // Built lazily, one ingestor per allowlisted repository: the GitHub
-  // ingestor needs the trusted reader env (GITHUB_READER_*), which a
-  // local-only deployment must not be required to set.
-  const githubIngestors = new Map<string, TrustedSourceSnapshotIngestor>();
-  const getGithubIngestor = (
-    repository: GitHubPublicationRepository,
-  ): TrustedSourceSnapshotIngestor => {
-    const cacheKey = githubRepositoryBindingKey(repository);
-    const cached = githubIngestors.get(cacheKey);
-    if (cached !== undefined) return cached;
-    const reader = eagerReader ?? trustedReaderConfiguration();
-    const ingestor = createTrustedSourceSnapshotIngestor({
-      githubApp: { ...reader.githubApp },
-      artifacts,
-      resolveBinding: async (runId) => {
-        const resolved = await resolveSourceSnapshotRun(runId);
-        if (resolved.config.project.repository === undefined)
-          throw new Error('source snapshot binding is not a GitHub run');
-        const selected = selectGitHubRepositoryFromUrl(
-          resolved.config.project.repository,
-          reader.readerRepositories,
-        );
-        if (githubRepositoryBindingKey(selected) !== cacheKey)
-          throw new Error('source snapshot repository binding mismatch');
-        return {
-          projectId: resolved.run.projectId,
-          runId: resolved.run.id,
-          repositorySha: resolved.sourceSha,
-          baseBranch:
-            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
-          repository: selected,
-        };
-      },
-    });
-    githubIngestors.set(cacheKey, ingestor);
-    return ingestor;
-  };
-
-  let localIngestor: TrustedSourceSnapshotIngestor | undefined;
-  const getLocalIngestor = (): TrustedSourceSnapshotIngestor =>
-    (localIngestor ??= createLocalSourceSnapshotIngestor({
-      artifacts,
-      workspacesRoot:
-        localWorkspacesRootFromEnv() ??
-        (() => {
-          throw new Error(
-            'AGENTOS_LOCAL_WORKSPACES_ROOT is required to ingest local experiment source snapshots',
-          );
-        })(),
-      resolveBinding: async (runId) => {
-        const resolved = await resolveSourceSnapshotRun(runId);
-        const localPath = resolved.config.project.localPath;
-        if (localPath === undefined)
-          throw new Error(
-            'source snapshot binding is not a local experiment run',
-          );
-        return {
-          projectId: resolved.run.projectId,
-          runId: resolved.run.id,
-          localPath,
-          baseBranch:
-            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
-          repositorySha: resolved.sourceSha,
-        };
-      },
-    }));
-
-  const sourceSnapshot: TrustedSourceSnapshotIngestor = {
-    async ensure(runId) {
-      const resolved = await resolveSourceSnapshotRun(runId);
-      if (resolved.config.project.localPath !== undefined)
-        return getLocalIngestor().ensure(runId);
-      if (resolved.config.project.repository === undefined)
-        throw new Error('source snapshot binding requires a repository URL');
-      const reader = eagerReader ?? trustedReaderConfiguration();
-      const selected = selectGitHubRepositoryFromUrl(
-        resolved.config.project.repository,
-        reader.readerRepositories,
-      );
-      return getGithubIngestor(selected).ensure(runId);
-    },
-  };
-  let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;
-  const runtimeHandles = () =>
-    (vault ??= createRepositoryRuntimeHandleVault({
-      repository,
-      sealer: createAesWorkflowHandleSealer(
-        Buffer.from(requiredRuntime('AGENTOS_RUNTIME_HANDLE_KEY'), 'base64url'),
-      ),
-    }));
-  const checkpoints = createNeonWorkflowCheckpointStore(process.env);
-  return createDurableTriggerOutbox({
-    checkpoints,
-    trigger: createTriggerWorkflowDispatcher(),
-    approval: createTriggerApprovalWaiter(),
-    clock: () => new Date().toISOString(),
-    runtime: cancellationRuntime(),
-    repository,
-    runtimeHandles: {
-      store: (input) => runtimeHandles().store(input),
-      load: (externalId, runId): Promise<RuntimeHandle> =>
-        runtimeHandles().load(externalId, runId),
-      markCancelled: (externalId, at) =>
-        runtimeHandles().markCancelled(externalId, at),
-      markCleaned: (externalId, at) =>
-        runtimeHandles().markCleaned(externalId, at),
-    },
-    runtimeStartRecovery: createRuntimeStartRecoveryResolver({
-      repository,
-      checkpoints,
-      artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
-      verificationRegistryHosts: verificationRegistryHosts(),
-    }),
-    sourceSnapshot,
-  });
+  if ((process.env.DATABASE_URL?.trim() ?? '') === '') return undefined;
+  // Validated before any run is accepted, whenever a reader App is being
+  // configured: reader and publisher are deliberately separate GitHub Apps,
+  // and reusing one identity for both is a mistake that otherwise surfaces
+  // mid-dispatch on the first GitHub-bound run. A deployment that configures
+  // no reader is not asked for one -- the executor that assumed every
+  // deployment was GitHub-bound is gone, the requirement is not.
+  if ((process.env.GITHUB_READER_APP_ID?.trim() ?? '') !== '')
+    trustedReaderConfiguration();
+  return localDirectDispatchFromEnv();
 }
 
-/**
- * Approval summaries read spec/DoD artifact bodies; without R2 env the inbox
- * degrades to bare approvals instead of failing. The seed route writes
- * through this same store so a seeded approval renders the way a real one
- * does.
- */
 export function approvalArtifactStoreFromEnv() {
   // Follow the executor. The local one keeps artifact bodies on disk, and
   // without this the inbox degrades to bare approvals -- which means the
   // operator approves a Definition of Done without seeing the acceptance
   // tests it froze, defeating the point of that gate.
-  if (executorFromEnv() === 'local-direct') {
+  {
     const stateDirectory = process.env.AGENTOS_LOCAL_STATE_DIR?.trim();
     if (!stateDirectory) return undefined;
     return createFilesystemArtifactStorage({
@@ -1076,17 +739,10 @@ export function workflowCheckpointsFromEnv() {
  * worker that will never arrive". Gated on the same key that enables
  * dispatch, and silent when it cannot answer.
  */
-export async function externalRunStateFromEnv(
+export function externalRunStateFromEnv(
   externalRef: string,
-): Promise<{ readonly status: string; readonly error?: string } | undefined> {
-  const local = localExecutionState(externalRef);
-  if (local !== undefined) return local;
-  if ((process.env.TRIGGER_SECRET_KEY?.trim() ?? '') === '') return undefined;
-  try {
-    return await createTriggerSdkBoundary().retrieveRun(externalRef);
-  } catch {
-    return undefined;
-  }
+): { readonly status: string; readonly error?: string } | undefined {
+  return localExecutionState(externalRef);
 }
 
 export function controlPlaneService(): ControlPlaneService {

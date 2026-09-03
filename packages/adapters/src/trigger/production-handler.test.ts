@@ -216,10 +216,6 @@ describe('production feature workflow composition', () => {
   });
 
   it('keeps the deployable task bound to the in-repo concrete composition', async () => {
-    const taskSource = await readFile(
-      resolve(process.cwd(), 'src/trigger/task.ts'),
-      'utf8',
-    );
     const compositionSource = await readFile(
       resolve(process.cwd(), 'src/trigger/production-composition.ts'),
       'utf8',
@@ -228,7 +224,7 @@ describe('production feature workflow composition', () => {
       resolve(process.cwd(), 'src/trigger/production-handler.ts'),
       'utf8',
     );
-    expect(taskSource).toContain(
+    expect(compositionSource).toContain(
       'createLazyProductionFeatureWorkflowTaskHandler',
     );
     expect(compositionSource).toContain("import('./production-handler.js')");

@@ -289,7 +289,12 @@ describe('workflow outbox reconciliation', () => {
     const projectId = persistenceId('project', 'p1');
     const runId = persistenceId('run', 'r1');
     const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2 hours ago
-    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createProject({
+      id: projectId,
+      name: 'P',
+      createdAt,
+      updatedAt: createdAt,
+    });
     await repository.createRun({
       id: runId,
       projectId,
@@ -314,7 +319,9 @@ describe('workflow outbox reconciliation', () => {
 
     await reconcileWorkflowOutbox(repository, outbox, () => now);
 
-    await expect(repository.getRun(runId)).resolves.toMatchObject({ status: 'waiting' });
+    await expect(repository.getRun(runId)).resolves.toMatchObject({
+      status: 'waiting',
+    });
   });
 
   it('fails a feature run waiting on an expired spec/dod approval', async () => {
@@ -322,7 +329,12 @@ describe('workflow outbox reconciliation', () => {
     const projectId = persistenceId('project', 'p1');
     const runId = persistenceId('run', 'r1');
     const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z');
-    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createProject({
+      id: projectId,
+      name: 'P',
+      createdAt,
+      updatedAt: createdAt,
+    });
     await repository.createRun({
       id: runId,
       projectId,
@@ -363,7 +375,12 @@ describe('workflow outbox reconciliation', () => {
     const repository = new InMemoryDomainRepository();
     const projectId = persistenceId('project', 'p1');
     const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2h ago
-    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createProject({
+      id: projectId,
+      name: 'P',
+      createdAt,
+      updatedAt: createdAt,
+    });
 
     // 1. Consumed recently (10m ago) -> still running
     const run1Id = persistenceId('run', 'r1');
@@ -393,7 +410,9 @@ describe('workflow outbox reconciliation', () => {
     };
 
     await reconcileWorkflowOutbox(repository, outbox, () => now);
-    await expect(repository.getRun(run1Id)).resolves.toMatchObject({ status: 'running' });
+    await expect(repository.getRun(run1Id)).resolves.toMatchObject({
+      status: 'running',
+    });
 
     // 2. Consumed long ago (61m ago) -> deadline exceeded
     const run2Id = persistenceId('run', 'r2');
@@ -430,7 +449,12 @@ describe('workflow outbox reconciliation', () => {
     const parentRunId = persistenceId('run', 'parent');
     const childRunId = deterministicGoalChildRunId(parentRunId, 1);
     const createdAt = isoTimestamp('2026-08-17T10:00:00.000Z'); // 2h ago
-    await repository.createProject({ id: projectId, name: 'P', createdAt, updatedAt: createdAt });
+    await repository.createProject({
+      id: projectId,
+      name: 'P',
+      createdAt,
+      updatedAt: createdAt,
+    });
     await repository.createRun({
       id: parentRunId,
       projectId,
@@ -463,14 +487,21 @@ describe('workflow outbox reconciliation', () => {
 
     // Parent is 2h old, but has a live child -> parent stays running
     await reconcileWorkflowOutbox(repository, outbox, () => now);
-    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({ status: 'running' });
+    await expect(repository.getRun(parentRunId)).resolves.toMatchObject({
+      status: 'running',
+    });
 
     // Child completes -> parent now subject to its own deadline
-    await repository.transitionRun(childRunId, ['waiting'], {
-      status: 'succeeded',
-      completedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
-      updatedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
-    }, 0);
+    await repository.transitionRun(
+      childRunId,
+      ['waiting'],
+      {
+        status: 'succeeded',
+        completedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
+        updatedAt: isoTimestamp('2026-08-17T10:59:00.000Z'),
+      },
+      0,
+    );
 
     await reconcileWorkflowOutbox(repository, outbox, () => now);
     await expect(repository.getRun(parentRunId)).resolves.toMatchObject({

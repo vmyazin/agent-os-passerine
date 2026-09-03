@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import type {
   ArtifactMetadata,
   ArtifactStore,
@@ -479,4 +481,88 @@ export interface DurableFeatureWorkflowDependencies {
     readonly triggerRunId?: string;
   };
   readonly handleSealer?: WorkflowHandleSealer;
+}
+
+// --- executor ports -----------------------------------------------------
+//
+// These described a Trigger.dev deployment until 2026-09-03. They are ports,
+// not bindings: the workflow engine never imported the SDK, and the executor
+// behind them is now the in-process one. Names are unchanged for this change
+// so the removal stays reviewable; renaming them is its own follow-up (see
+// docs/superpowers/specs/2026-09-03-remove-trigger-design.md).
+
+export const featureTaskPayloadSchema = z
+  .object({
+    version: z.literal('feature-task-payload-v1'),
+    runId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+  })
+  .strict();
+
+export type FeatureTaskPayload = z.infer<typeof featureTaskPayloadSchema>;
+
+export const goalTaskPayloadSchema = z
+  .object({
+    version: z.literal('goal-task-payload-v1'),
+    runId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+  })
+  .strict();
+
+export type GoalTaskPayload = z.infer<typeof goalTaskPayloadSchema>;
+
+/**
+ * How an execution identifies itself to the workflow. `triggerRunId` is the
+ * executor's own reference for this attempt; the workflow only ever uses it
+ * to build the owner string that fences its side effects.
+ */
+export interface WorkflowExecutionContext {
+  readonly taskVersion: string;
+  readonly deploymentVersion: string;
+  readonly triggerRunId?: string;
+}
+
+export interface FeatureWorkflowTaskHandler {
+  run(
+    payload: FeatureTaskPayload,
+    execution?: WorkflowExecutionContext,
+  ): Promise<unknown>;
+}
+
+export interface GoalWorkflowTaskHandler {
+  run(
+    payload: GoalTaskPayload,
+    execution?: WorkflowExecutionContext,
+  ): Promise<unknown>;
+}
+
+/**
+ * What the outbox hands a run to. `retrieve` is read-only and best effort: an
+ * unknown reference answers `undefined` rather than throwing, because it
+ * exists to explain a page and must never be why one fails to render.
+ */
+export interface TriggerWorkflowDispatcher {
+  startFeature(
+    runId: string,
+    projectId: string,
+    attempt?: 0 | 1,
+    resumeGeneration?: number,
+  ): Promise<{ readonly externalRunRef: string }>;
+  startGoal(
+    runId: string,
+    projectId: string,
+    attempt?: 0 | 1,
+    resumeGeneration?: number,
+  ): Promise<{ readonly externalRunRef: string }>;
+  retrieve(
+    externalRunRef: string,
+  ): Promise<{ readonly status: string; readonly error?: string } | undefined>;
+  cancel(externalRunRef: string): Promise<void>;
+}
+
+/**
+ * The approval gate's wake signal. It reports only that something changed;
+ * the decision itself is always re-read from Postgres, so a waiter cannot
+ * approve anything.
+ */
+export interface TriggerApprovalWaiter extends WorkflowApprovalWaiter {
+  wake(id: string): Promise<void>;
 }

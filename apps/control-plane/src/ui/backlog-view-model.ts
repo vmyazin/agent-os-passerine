@@ -28,7 +28,8 @@ function itemState(
   waitingRunIds: ReadonlySet<string>,
 ): { readonly state: string; readonly emphasis: BacklogItemView['emphasis'] } {
   if (item.status === 'succeeded') return { state: 'done', emphasis: 'done' };
-  if (item.status === 'failed') return { state: 'failed', emphasis: 'attention' };
+  if (item.status === 'failed')
+    return { state: 'failed', emphasis: 'attention' };
   if (item.status === 'skipped') return { state: 'skipped', emphasis: 'idle' };
   if (item.status === 'running') {
     if (item.runId !== undefined && waitingRunIds.has(item.runId))
@@ -47,8 +48,7 @@ function pausedCopy(
   reason: string | undefined,
   publishedBranch: string | undefined,
 ): { readonly sentence: string; readonly action?: string } {
-  if (reason === undefined)
-    return { sentence: 'You paused this backlog.' };
+  if (reason === undefined) return { sentence: 'You paused this backlog.' };
   switch (reason) {
     case 'chain_too_deep':
       return {

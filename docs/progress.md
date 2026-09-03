@@ -265,5 +265,15 @@ on the three-step configuration and succeeded in twelve minutes for eleven cents
 verification at zero tokens, and its server answered `/health` through the run
 page's preview.
 
+Trigger.dev is gone
+([design](./superpowers/specs/2026-09-03-remove-trigger-design.md)). Three
+files imported its SDK; the workflow engine never did, the waitpoint was
+documented as "only a wake signal", and Postgres was already authoritative for
+every durable fact. Removing it left one execution path and cost no guarantee.
+What it takes away is unattended execution, scale-out, and a long approval
+that survives closing the app -- all three already absent from the local
+executor, now the only option. Suites after removal: core 229, adapters 745,
+control plane 320, CLI 101.
+
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

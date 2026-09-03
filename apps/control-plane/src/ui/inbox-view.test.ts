@@ -168,9 +168,7 @@ describe('inbox view model', () => {
       'approval:approval_release',
       'question:inbox_window',
     ]);
-    expect(history.map((item) => item.key)).toEqual([
-      'approval:approval_done',
-    ]);
+    expect(history.map((item) => item.key)).toEqual(['approval:approval_done']);
     expect(attention.length + history.length).toBe(items.length);
   });
 
@@ -243,9 +241,7 @@ describe('inbox view model', () => {
     expect(formatRelativeTime(now, '2026-08-17T11:59:40.000Z')).toBe(
       'just now',
     );
-    expect(formatRelativeTime(now, '2026-08-17T11:36:00.000Z')).toBe(
-      '24m ago',
-    );
+    expect(formatRelativeTime(now, '2026-08-17T11:36:00.000Z')).toBe('24m ago');
     expect(formatRelativeTime(now, '2026-08-17T07:00:00.000Z')).toBe('5h ago');
     expect(formatRelativeTime(now, '2026-08-14T12:00:00.000Z')).toBe('3d ago');
     expect(formatRelativeTime(now, '2026-08-01T12:00:00.000Z')).toBe('Aug 1');

@@ -180,12 +180,6 @@ model/rate configuration digest when available and otherwise charges the full
 reservation before releasing the fence, so a killed worker cannot silently
 erase paid usage or admit a second paid session.
 
-Trigger retries the version-locked task at most once. Invalid inputs,
-unregistered composition, and unclassified handler failures use Trigger's
-`AbortTaskRunError`; only the stable `FeatureWorkflowTaskTransientError`
-explicitly opts a bootstrap failure into that retry. Agent session retries are
-likewise restricted to the runner's classified transient errors.
-
 The control plane uses pending runs, atomic approval events, and atomic
 `run.cancelled` events as durable outbox intents. The authenticated internal
 route `/api/internal/workflows/reconcile` redelivers them. Trigger and waitpoint
@@ -219,40 +213,37 @@ cancellation therefore cannot silently release uncharged capacity. Usage
 records persist ordinary input/output, cache reads, distinct 5-minute and
 1-hour cache-creation buckets, runtime, and the pricing algorithm/config
 version. Integer-safe ceiling prices every bucket; undifferentiated legacy
-cache creation is conservatively charged at the 1-hour rate. Trigger
-queue concurrency is defense in depth; it is not the budget or concurrency
-authority.
+cache creation is conservatively charged at the 1-hour rate. Budget admission is the concurrency authority.
 
-## Executors
+## The executor
 
-The workflow engine imports nothing from Trigger.dev. `createDurableFeatureWorkflow`
-takes ports, and only one of them -- the approval waiter -- is Trigger-shaped.
-Two executors therefore drive the same engine, selected by `AGENTOS_EXECUTOR`:
+A run executes inside the control-plane process. Trigger.dev coordinated runs
+until 2026-09-03 and was removed
+([design](../superpowers/specs/2026-09-03-remove-trigger-design.md)): the
+workflow engine never imported its SDK, the waitpoint was only a wake signal,
+and Postgres was already authoritative for runs, steps, approvals, effects,
+leases and budgets. What Trigger scheduled, an in-process dispatcher now
+schedules.
 
-- **`trigger`** (default when `TRIGGER_SECRET_KEY` is set): the deployed shape.
-  Trigger.dev coordination, Managed Agents sessions, R2 artifacts, an artifact
-  MCP served over public HTTPS.
-- **`local-direct`**: everything in the control-plane process. Sessions run in
-  the process sandbox against the model API directly, artifacts are files under
-  `AGENTOS_LOCAL_STATE_DIR`, the artifact MCP is a function call, and approvals
-  wake by polling the approval row. Local projects only; a GitHub-bound project
-  is refused by name.
+Sessions run in the process sandbox against the model API directly, artifacts
+are files under `AGENTOS_LOCAL_STATE_DIR`, the artifact MCP is a function
+call, and approvals wake by polling the approval row. Local projects only: a
+GitHub-bound project is refused by name, because the pairing of the GitHub
+reader and publisher with this executor has never been exercised.
 
-Setting both is a boot error: two executors could claim one run.
+Three consequences, all of them the price of having no worker:
 
-This is one composition with a `profile` parameter, not two compositions. What
-decides whether a change is safe -- role isolation, budget admission, the
-sealed acceptance tests, the signed trusted-test-report, the publication
-authority -- is the same code on both paths, so it cannot drift. What differs
-is only how work is scheduled and where bytes live.
+- A run does not outlive the control plane. Close it mid-run and recovery
+  re-dispatches that run on the next start, replaying finished steps and
+  re-running the interrupted one, so one step is paid for twice.
+- One process, one machine. There is no scale-out.
+- A long approval needs the app running, or the run is recovered and replays
+  to the approval when it returns.
 
-Two consequences worth stating plainly. Verification may run on the process
-runtime because the local profile supplies a workdir-relative trusted command;
-the container-absolute one (`exactTrustedCommand`) still may not, because
-`rm -rf /workspace/repo` outside a container is a real directory on the host.
-And a local session does not survive a process restart: the dispatcher answers
-`COULD_NOT_FIND_EXECUTOR` for an execution it no longer holds, which is what
-the existing recovery paths already understand.
+What did not change is everything that decides whether a change is safe: role
+isolation, budget admission, the sealed acceptance tests, the signed
+trusted-test-report and the publication authority. None of them were the
+scheduler's.
 
 ## Previewing what a run delivered
 
@@ -296,9 +287,6 @@ Set `TEST_DATABASE_URL` to include the PostgreSQL checkpoint/admission contract
 in `pnpm test:integration`. Normal CI uses fake Trigger, runtime, artifact, and
 publisher boundaries and makes no paid model or cloud calls.
 
-For Trigger.dev local development, set `TRIGGER_PROJECT_REF`,
-`TRIGGER_SECRET_KEY`, and `DATABASE_URL`, then run `pnpm trigger:dev`. The task
-registers a lazy, fail-closed production handler at module load.
 `createProductionFeatureWorkflowFromEnv` wires Neon domain/checkpoint stores,
 R2 plus its durable manifest, Managed Agents, scoped Artifact MCP vaults, the
 isolated command-observation verifier, publication authorization, and the

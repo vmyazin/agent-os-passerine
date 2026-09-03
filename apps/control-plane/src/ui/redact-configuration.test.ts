@@ -14,7 +14,10 @@ describe('redactConfigurationForDisplay', () => {
         environments: {
           default: {
             runtime: 'process',
-            variables: { API_TOKEN: 'sk-live-super-secret', REGION: 'us-east-1' },
+            variables: {
+              API_TOKEN: 'sk-live-super-secret',
+              REGION: 'us-east-1',
+            },
           },
           other: { runtime: 'process', variables: {} },
         },

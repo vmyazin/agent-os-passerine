@@ -15,6 +15,8 @@ import {
 import {
   FEATURE_WORKFLOW_DEFAULTS,
   type RuntimeHandleVault,
+  type TriggerApprovalWaiter,
+  type TriggerWorkflowDispatcher,
   type WorkflowCheckpointStore,
   type WorkflowEffect,
 } from './types.js';
@@ -22,10 +24,6 @@ import {
   budgetLimitsForRun,
   createProjectDailyUsageMicrodollars,
 } from './workflow-budget.js';
-import type {
-  TriggerApprovalWaiter,
-  TriggerWorkflowDispatcher,
-} from './trigger-adapter.js';
 
 export const RUNTIME_START_VISIBILITY_DELAY_MS = 30_000;
 
