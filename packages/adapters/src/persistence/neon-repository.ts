@@ -11,6 +11,7 @@ import {
   assertValidProjectSourceImportRequest,
 } from '@agentos/core';
 import type {
+  AppSettings,
   Approval,
   ApprovalId,
   ApprovalListFilter,
@@ -119,6 +120,7 @@ import {
   mapGoalProgressRow,
   mapInboxMessageRow,
   mapProjectRow,
+  mapAppSettingsRow,
   mapUserPreferencesRow,
   mapProjectSourceRow,
   mapStepRunRow,
@@ -126,6 +128,7 @@ import {
   mapWebhookReceiptRow,
   mapWorkflowRunRow,
   projectSelection,
+  appSettingsSelection,
   userPreferencesSelection,
   projectSourceSelection,
   stepRunSelection,
@@ -148,6 +151,8 @@ import {
   goalProgress,
   inboxMessages,
   projects,
+  APP_SETTINGS_ID,
+  appSettings,
   userPreferences,
   projectSources,
   stepRuns,
@@ -418,6 +423,31 @@ export class NeonDomainRepository implements DomainRepository {
         .returning(userPreferencesSelection),
       'User preferences',
       mapUserPreferencesRow,
+    );
+  }
+
+  async getAppSettings(): Promise<AppSettings | undefined> {
+    const [row] = await this.database
+      .select(appSettingsSelection)
+      .from(appSettings)
+      .where(eq(appSettings.id, APP_SETTINGS_ID))
+      .limit(1);
+    return row === undefined ? undefined : mapAppSettingsRow(row);
+  }
+
+  async upsertAppSettings(settings: AppSettings): Promise<AppSettings> {
+    const runModelId = settings.runModelId ?? null;
+    return mappedOne(
+      await this.database
+        .insert(appSettings)
+        .values({ id: APP_SETTINGS_ID, runModelId, ...settings })
+        .onConflictDoUpdate({
+          target: appSettings.id,
+          set: { runModelId, updatedAt: settings.updatedAt },
+        })
+        .returning(appSettingsSelection),
+      'App settings',
+      mapAppSettingsRow,
     );
   }
 

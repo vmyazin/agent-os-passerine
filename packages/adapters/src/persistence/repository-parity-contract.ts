@@ -61,6 +61,33 @@ export function repositoryParityContract(
   createRepository: RepositoryFactory,
 ): void {
   describe(`${implementation} PostgreSQL parity contract`, () => {
+    it('keeps one set of app settings, replaced in place', async () => {
+      const repository = await createRepository();
+      const first = isoTimestamp('2026-08-17T07:00:00.000Z');
+      const second = isoTimestamp('2026-08-17T08:00:00.000Z');
+
+      expect(await repository.getAppSettings()).toBeUndefined();
+      await repository.upsertAppSettings({
+        runModelId: 'kimi/kimi-k2.7-code',
+        updatedAt: first,
+      });
+      await repository.upsertAppSettings({
+        runModelId: 'anthropic/claude-sonnet-4-6',
+        updatedAt: second,
+      });
+
+      // A second write replaces the first: a setting that decides how every
+      // run executes must have exactly one answer.
+      expect(await repository.getAppSettings()).toEqual({
+        runModelId: 'anthropic/claude-sonnet-4-6',
+        updatedAt: second,
+      });
+
+      // Clearing the choice leaves the row, without a model.
+      await repository.upsertAppSettings({ updatedAt: second });
+      expect(await repository.getAppSettings()).toEqual({ updatedAt: second });
+    });
+
     it('keeps durable preferences isolated by operator login', async () => {
       const repository = await createRepository();
       const first = isoTimestamp('2026-08-17T07:00:00.000Z');

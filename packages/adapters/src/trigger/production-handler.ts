@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  MODEL_PROVIDERS,
   calculateUsageCost,
   canonicalPublicationManifestDigest,
   canonicalPublicationPolicyDigest,
@@ -30,6 +31,7 @@ import { createFilesystemArtifactStorage } from '../artifacts/filesystem.js';
 import { createDomainArtifactManifestStore } from '../artifacts/manifest.js';
 import { createR2ArtifactStore } from '../artifacts/r2.js';
 import type { TrustedPublicationPolicyResolver } from '../github/service.js';
+import { withGlobalRunModel } from './global-model.js';
 import { createKimiLocalAccessStore } from '../kimi/access.js';
 import {
   createKimiRuntimeProviderFromEnv,
@@ -471,23 +473,24 @@ const TRIGGER_PROFILE: FeatureWorkflowProfile = { kind: 'trigger' };
 function modelProviderTransports(
   environment: Environment,
 ): Record<string, KimiTransport> {
+  // Built from the same catalog the operator picks a model from, so a
+  // provider is credentialed and selectable by one description of it.
   const transports: Record<string, KimiTransport> = {};
-  const anthropicKey = environment.ANTHROPIC_API_KEY?.trim();
-  if (anthropicKey)
-    transports.anthropic = createKimiHttpTransport({
-      apiKey: anthropicKey,
-      baseUrl:
-        environment.ANTHROPIC_BASE_URL?.trim() || 'https://api.anthropic.com',
+  for (const provider of MODEL_PROVIDERS) {
+    const apiKey = environment[provider.apiKeyEnv]?.trim();
+    if (!apiKey) continue;
+    const baseUrl =
+      environment[provider.baseUrlEnv]?.trim() || provider.defaultBaseUrl;
+    transports[provider.id] = createKimiHttpTransport({
+      apiKey,
+      ...(baseUrl === undefined ? {} : { baseUrl }),
     });
-  const kimi = kimiFromEnv(environment);
-  if (kimi !== undefined)
-    transports.kimi = createKimiHttpTransport({
-      apiKey: kimi.apiKey,
-      ...(kimi.baseUrl === undefined ? {} : { baseUrl: kimi.baseUrl }),
-    });
+  }
   if (Object.keys(transports).length === 0)
     throw new Error(
-      'the local-direct executor needs at least one model key: set ANTHROPIC_API_KEY or KIMI_API_KEY',
+      `the local-direct executor needs at least one model key: set ${MODEL_PROVIDERS.map(
+        (provider) => provider.apiKeyEnv,
+      ).join(' or ')}`,
     );
   return transports;
 }
@@ -734,7 +737,14 @@ export async function createProductionFeatureWorkflowFromEnv(
           artifactKey: loaded.metadata.key,
         }))(await loadSource(projectId, runId, repositorySha)),
     },
-    workflowForSnapshot: async (snapshot: ConfigSnapshot, execution) => {
+    workflowForSnapshot: async (storedSnapshot: ConfigSnapshot, execution) => {
+      // The globally selected model, applied to the snapshot rather than to
+      // either reader of it, so the parsed config and the role definitions
+      // below cannot disagree about which model this run uses.
+      const snapshot = withGlobalRunModel(
+        storedSnapshot,
+        (await repository.getAppSettings())?.runModelId,
+      );
       const config = parseAgentOsConfig(snapshot.config);
       // Per-snapshot selection between the GitHub-backed and local-git
       // publication paths (see composePublicationTarget). Neither branch

@@ -1,4 +1,5 @@
 import type {
+  AppSettings,
   Approval,
   ArtifactRecord,
   Backlog,
@@ -38,6 +39,7 @@ import {
   usageRecords,
   webhookReceipts,
   workflowRuns,
+  appSettings,
   userPreferences,
   backlogs,
   backlogItems,
@@ -81,6 +83,7 @@ function present(column: PgColumn, alias: string) {
 
 export const projectSelection = getTableColumns(projects);
 export const userPreferencesSelection = getTableColumns(userPreferences);
+export const appSettingsSelection = getTableColumns(appSettings);
 export const projectSourceSelection = getTableColumns(projectSources);
 export const configRevisionSelection = getTableColumns(configRevisions);
 export const configSnapshotSelection = getTableColumns(configSnapshots);
@@ -125,6 +128,13 @@ export const mapBacklogItemRow = (row: SqlRow): BacklogItem => mapRow(row);
 export const mapProjectRow = (row: SqlRow): Project => mapRow(row);
 export const mapUserPreferencesRow = (row: SqlRow): UserPreferences =>
   mapRow(row);
+/** The singleton id is a storage detail; callers only ever see the settings. */
+export const mapAppSettingsRow = (row: SqlRow): AppSettings => ({
+  ...(typeof row.runModelId === 'string' && row.runModelId.length > 0
+    ? { runModelId: row.runModelId }
+    : {}),
+  updatedAt: row.updatedAt as AppSettings['updatedAt'],
+});
 export const mapProjectSourceRow = (row: SqlRow): ProjectSource => {
   const common = {
     projectId: row.projectId as ProjectSource['projectId'],

@@ -22,6 +22,10 @@ const ids = (kind: string, key: string) =>
 const createService = (
   repository: InMemoryDomainRepository,
   artifacts?: ControlPlaneService['artifacts'],
+  environment: Readonly<Record<string, string | undefined>> = {
+    ANTHROPIC_API_KEY: 'anthropic-key',
+    KIMI_API_KEY: 'kimi-key',
+  },
 ) =>
   new ControlPlaneService(
     repository,
@@ -32,6 +36,9 @@ const createService = (
     goalCommands,
     [],
     artifacts,
+    undefined,
+    undefined,
+    environment,
   );
 
 const feature = {
@@ -1041,6 +1048,74 @@ runtime: { provider: local }
     });
     expect(projection.timeline).toEqual([]);
     expect(JSON.stringify(projection)).not.toContain('must never escape');
+  });
+
+  it('offers the model catalog and remembers the chosen one', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+
+    const before = await service.getRunModelSettings();
+    // No choice yet: each project's own configuration decides, which is how
+    // runs behaved before this setting existed.
+    expect(before.selectedId).toBeUndefined();
+    expect(before.options.length).toBeGreaterThan(0);
+
+    await service.updateRunModel('kimi/kimi-k2.7-code');
+
+    const after = await service.getRunModelSettings();
+    expect(after.selectedId).toBe('kimi/kimi-k2.7-code');
+    expect(after.updatedAt).toBeDefined();
+  });
+
+  it('clears the choice so each project decides again', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+    await service.updateRunModel('kimi/kimi-k2.7-code');
+
+    await service.updateRunModel(undefined);
+
+    expect((await service.getRunModelSettings()).selectedId).toBeUndefined();
+  });
+
+  it('refuses a model whose provider has no key on this deployment', async () => {
+    const repository = new InMemoryDomainRepository();
+    // Selecting it would compose and then fail at the first request, with
+    // the reason a long way from the choice.
+    const service = createService(repository, undefined, {
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    });
+
+    await expect(
+      service.updateRunModel('kimi/kimi-k2.7-code'),
+    ).rejects.toMatchObject({ code: 'run_model_unavailable', status: 422 });
+    expect((await service.getRunModelSettings()).selectedId).toBeUndefined();
+  });
+
+  it('marks a model unavailable rather than hiding it', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository, undefined, {
+      ANTHROPIC_API_KEY: 'anthropic-key',
+    });
+
+    const { options } = await service.getRunModelSettings();
+
+    // Hiding it would make a missing key look like a missing feature.
+    expect(options.find((option) => option.provider === 'kimi')).toMatchObject({
+      available: false,
+    });
+    expect(
+      options.find((option) => option.provider === 'anthropic'),
+    ).toMatchObject({ available: true });
+  });
+
+  it('refuses a model that is not in the catalog', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository);
+
+    await expect(service.updateRunModel('openai/gpt-9')).rejects.toMatchObject({
+      code: 'unknown_run_model',
+      status: 422,
+    });
   });
 
   it('shows a run past the first page of its events', async () => {

@@ -8,6 +8,7 @@ import { ConfigurationEditor } from '../../src/ui/configuration-editor';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
 import { redactConfigurationForDisplay } from '../../src/ui/redact-configuration';
+import { RunModelSelector } from '../../src/ui/run-model-selector';
 import { TimeZoneSelector } from '../../src/ui/time-zone-selector';
 
 export const dynamic = 'force-dynamic';
@@ -24,6 +25,7 @@ export default async function ConfigurationPage({
   const currentTimeZone =
     (await service.getUserPreferences(session.login))?.timeZone ??
     DEFAULT_TIME_ZONE;
+  const runModel = await service.getRunModelSettings();
   const selectorProjectId =
     requestedProjectId ?? (projects.length === 1 ? projects[0]!.id : undefined);
 
@@ -67,6 +69,12 @@ export default async function ConfigurationPage({
         description="Canonical metadata for the selected project's applied configuration."
         title="Configuration"
         titleId="configuration-title"
+      />
+      <RunModelSelector
+        options={runModel.options}
+        {...(runModel.selectedId === undefined
+          ? {}
+          : { selectedId: runModel.selectedId })}
       />
       <TimeZoneSelector
         currentTimeZone={currentTimeZone}

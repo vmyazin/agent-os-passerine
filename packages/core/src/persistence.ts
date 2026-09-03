@@ -166,6 +166,25 @@ export interface UserPreferences {
   readonly updatedAt: IsoTimestamp;
 }
 
+/**
+ * Settings that belong to the installation rather than to a project or an
+ * operator, stored as a single row.
+ *
+ * A run has no session behind it -- it may be chained from another run, or
+ * created through the API -- so a setting that decides how every run executes
+ * cannot be user-scoped. One row, read at composition, is what makes the
+ * choice resolvable from anywhere.
+ */
+export interface AppSettings {
+  /**
+   * The catalog id of the model every feature role runs on. Absent means the
+   * project's own configuration decides, which is how runs worked before this
+   * setting existed.
+   */
+  readonly runModelId?: string;
+  readonly updatedAt: IsoTimestamp;
+}
+
 export interface PersistenceDigests {
   readonly configDigest: string;
   readonly modelDigest: string;
@@ -479,6 +498,8 @@ export interface GoalProgress {
 export interface DomainRepository {
   getUserPreferences(login: string): Promise<UserPreferences | undefined>;
   upsertUserPreferences(preferences: UserPreferences): Promise<UserPreferences>;
+  getAppSettings(): Promise<AppSettings | undefined>;
+  upsertAppSettings(settings: AppSettings): Promise<AppSettings>;
 
   createProject(project: Project): Promise<Project>;
   getProject(id: ProjectId): Promise<Project | undefined>;

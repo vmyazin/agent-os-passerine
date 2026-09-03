@@ -10,6 +10,7 @@ import {
   isoTimestampEpochMicroseconds,
 } from '@agentos/core';
 import type {
+  AppSettings,
   Approval,
   ApprovalId,
   Backlog,
@@ -257,6 +258,8 @@ function immutableArtifactMatches(
 
 export class InMemoryDomainRepository implements DomainRepository {
   readonly #userPreferences = new Map<string, UserPreferences>();
+  // One installation, one row; there is nothing to key it by.
+  #appSettings: AppSettings | undefined;
   readonly #projects = new Map<string, Project>();
   readonly #projectSources = new Map<string, ProjectSource>();
   readonly #projectSourceKeys = new Map<string, string>();
@@ -328,6 +331,20 @@ export class InMemoryDomainRepository implements DomainRepository {
     assertPersistenceTimestamps(preferences);
     this.#userPreferences.set(preferences.login, copy(preferences));
     return copy(preferences);
+  }
+
+  async getAppSettings(): Promise<AppSettings | undefined> {
+    return this.#appSettings === undefined
+      ? undefined
+      : copy(this.#appSettings);
+  }
+
+  async upsertAppSettings(settings: AppSettings): Promise<AppSettings> {
+    if (settings.runModelId !== undefined && settings.runModelId.trim() === '')
+      throw new TypeError('app settings runModelId must not be blank');
+    assertPersistenceTimestamps(settings);
+    this.#appSettings = copy(settings);
+    return copy(settings);
   }
 
   async createProject(project: Project): Promise<Project> {

@@ -113,6 +113,32 @@ export const userPreferences = pgTable(
   ],
 );
 
+/** The only id `app_settings` accepts; see the table's singleton check. */
+export const APP_SETTINGS_ID = 'global';
+
+/**
+ * Installation-wide settings, as exactly one row.
+ *
+ * The primary key is pinned to a single value so a second row cannot exist:
+ * a setting that decides how every run executes must have one answer, and a
+ * duplicate row would make which answer wins depend on read order.
+ */
+export const appSettings = pgTable(
+  'app_settings',
+  {
+    id: text('id').primaryKey(),
+    runModelId: text('run_model_id'),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    check('app_settings_singleton', sql`${table.id} = 'global'`),
+    check(
+      'app_settings_bounded_text',
+      sql`${table.runModelId} is null or length(${table.runModelId}) between 1 and 255`,
+    ),
+  ],
+);
+
 export const projects = pgTable(
   'projects',
   {

@@ -40,6 +40,10 @@ import type {
   UserPreferences,
 } from '@agentos/core';
 import {
+  SELECTABLE_MODELS,
+  configuredModelProviders,
+  findModelProvider,
+  findSelectableModel,
   canonicalConfigHash,
   canonicalConfigJson,
   canonicalJsonValue,
@@ -215,6 +219,24 @@ export interface ConfigurationProjection {
 export interface UserPreferencesProjection {
   readonly timeZone: string;
   readonly updatedAt: IsoTimestamp;
+}
+
+/** One model an operator may select, and whether this deployment can run it. */
+export interface RunModelOption {
+  readonly id: string;
+  readonly label: string;
+  readonly provider: string;
+  readonly providerLabel: string;
+  readonly model: string;
+  /** False when the provider's API key is absent: selectable, but not runnable. */
+  readonly available: boolean;
+}
+
+export interface RunModelSettingsProjection {
+  /** Absent means each project's own configuration decides. */
+  readonly selectedId?: string;
+  readonly options: readonly RunModelOption[];
+  readonly updatedAt?: IsoTimestamp;
 }
 
 const VALUE_SECRET_PATTERNS: readonly [RegExp, string][] = [
@@ -1060,6 +1082,14 @@ export class ControlPlaneService {
     },
     private readonly projectSources?: ProjectSourceGateway,
     private readonly runResumption?: RunResumptionStore,
+    /**
+     * Read only to tell which model providers this deployment holds a key
+     * for. Nothing here reads a secret's value; presence is the whole
+     * question.
+     */
+    private readonly environment: Readonly<
+      Record<string, string | undefined>
+    > = process.env,
   ) {}
 
   private requireProjectSources(): ProjectSourceGateway {
@@ -1102,6 +1132,67 @@ export class ControlPlaneService {
     };
     const saved = await this.repository.upsertUserPreferences(preferences);
     return { timeZone: saved.timeZone, updatedAt: saved.updatedAt };
+  }
+
+  /**
+   * The model every run uses, with the catalog to choose from.
+   *
+   * Availability is read from the environment rather than stored, so a key
+   * added or removed since the choice was made is reflected immediately.
+   */
+  async getRunModelSettings(): Promise<RunModelSettingsProjection> {
+    const settings = await this.repository.getAppSettings();
+    const configured = configuredModelProviders(this.environment);
+    const options = SELECTABLE_MODELS.map((entry) => ({
+      id: entry.id,
+      label: entry.label,
+      provider: entry.providerId,
+      providerLabel:
+        findModelProvider(entry.providerId)?.label ?? entry.providerId,
+      model: entry.model,
+      available: configured.has(entry.providerId),
+    }));
+    return {
+      ...(settings?.runModelId === undefined
+        ? {}
+        : { selectedId: settings.runModelId }),
+      options,
+      ...(settings?.updatedAt === undefined
+        ? {}
+        : { updatedAt: settings.updatedAt }),
+    };
+  }
+
+  /**
+   * Selects the model for every future run, or clears the selection so each
+   * project's own configuration decides again.
+   *
+   * A model whose provider has no key is refused: it would compose and then
+   * fail at the first request, with the reason a long way from the choice.
+   */
+  async updateRunModel(
+    modelId: string | undefined,
+  ): Promise<RunModelSettingsProjection> {
+    if (modelId !== undefined) {
+      const model = findSelectableModel(modelId);
+      if (model === undefined)
+        throw new ServiceError(
+          'unknown_run_model',
+          "that model is not in this build's catalog",
+          422,
+        );
+      if (!configuredModelProviders(this.environment).has(model.providerId))
+        throw new ServiceError(
+          'run_model_unavailable',
+          `${findModelProvider(model.providerId)?.label ?? model.providerId} has no API key configured on this deployment`,
+          422,
+        );
+    }
+    await this.repository.upsertAppSettings({
+      ...(modelId === undefined ? {} : { runModelId: modelId }),
+      updatedAt: this.clock(),
+    });
+    return this.getRunModelSettings();
   }
 
   private projectSourceFailure(error: unknown): never {

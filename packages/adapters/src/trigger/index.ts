@@ -1,4 +1,5 @@
 export * from './checkpoint-store.js';
+export * from './global-model.js';
 export * from './handle-sealer.js';
 export * from './runtime-handle-vault.js';
 export * from './runtime-start-recovery.js';
