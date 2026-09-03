@@ -2,7 +2,16 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { CircleCheckIcon, GitBranchIcon } from './icons';
+import {
+  ActivityIcon,
+  CircleCheckIcon,
+  CirclePlusIcon,
+  FileTextIcon,
+  FolderGit2Icon,
+  GitBranchIcon,
+  InboxIcon,
+  LayoutDashboardIcon,
+} from './icons';
 
 describe('vendored Lucide icons', () => {
   it('is hidden from assistive technology unless it is given a name', () => {
@@ -42,5 +51,26 @@ describe('vendored Lucide icons', () => {
     );
     expect(markup).toContain('width="16"');
     expect(markup).toContain('icon icon-circle-check status-icon');
+  });
+});
+
+describe('the icon set covers every destination and action in use', () => {
+  it('exports one icon per navigation destination', () => {
+    // A missing export is a build error, so this only guards the intent:
+    // every rail destination has a glyph, and no two share one.
+    const nav = [
+      LayoutDashboardIcon,
+      FolderGit2Icon,
+      ActivityIcon,
+      InboxIcon,
+      FileTextIcon,
+      CirclePlusIcon,
+    ];
+    expect(new Set(nav).size).toBe(nav.length);
+    for (const Glyph of nav) {
+      const markup = renderToStaticMarkup(createElement(Glyph, {}));
+      expect(markup).toContain('stroke="currentColor"');
+      expect(markup).toContain('aria-hidden="true"');
+    }
   });
 });

@@ -12,15 +12,31 @@ import {
   activeRunPresentation,
   subscribeToActiveRunCount,
 } from './active-run-count-client';
+import {
+  ActivityIcon,
+  CirclePlusIcon,
+  FileTextIcon,
+  FolderGit2Icon,
+  InboxIcon,
+  LayoutDashboardIcon,
+} from './icons';
 import { subscribeToProjectCount } from './project-count-signal';
 
+// A glyph per destination, so the rail is navigable by shape once the
+// operator knows it. The label stays and remains the accessible name; the
+// icon is decorative, as it repeats a word that is already visible.
 const NAV_ITEMS = [
-  { href: '/', label: 'Overview' },
-  { href: '/projects', label: 'Projects', countKey: 'projects' as const },
-  { href: '/runs', label: 'Runs' },
-  { href: '/inbox', label: 'Inbox' },
-  { href: '/configuration', label: 'Configuration' },
-  { href: '/setup', label: 'Setup' },
+  { href: '/', label: 'Overview', icon: LayoutDashboardIcon },
+  {
+    href: '/projects',
+    label: 'Projects',
+    icon: FolderGit2Icon,
+    countKey: 'projects' as const,
+  },
+  { href: '/runs', label: 'Runs', icon: ActivityIcon },
+  { href: '/inbox', label: 'Inbox', icon: InboxIcon },
+  { href: '/configuration', label: 'Configuration', icon: FileTextIcon },
+  { href: '/setup', label: 'Setup', icon: CirclePlusIcon },
 ] as const;
 
 function isNavItemActive(pathname: string, href: string): boolean {
@@ -59,7 +75,7 @@ export function AppRailNav({
   return (
     <nav aria-label="Primary navigation">
       {NAV_ITEMS.map((item) => {
-        const { href, label } = item;
+        const { href, label, icon: NavIcon } = item;
         const isActive = isNavItemActive(pathname, href);
         const inboxPresentation =
           href === '/inbox'
@@ -90,6 +106,7 @@ export function AppRailNav({
             href={href}
           >
             <span className="rail-nav-label">
+              <NavIcon className="rail-nav-icon" />
               <span className="rail-nav-label-text">{label}</span>
               {runPresentation === undefined ? null : (
                 <span

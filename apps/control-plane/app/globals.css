@@ -191,6 +191,14 @@ a:focus-visible {
   gap: 0.38rem;
 }
 
+/* Slightly larger than the label text so the shape reads at a glance, and
+   flex: none so a long destination name never squashes it. */
+.rail-nav-icon {
+  flex: none;
+  width: 1.05em;
+  height: 1.05em;
+}
+
 .rail-nav-label-text {
   min-width: 0;
   overflow: hidden;
