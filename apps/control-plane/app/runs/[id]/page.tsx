@@ -102,6 +102,15 @@ export default async function RunPage({
           <RunStatusBadge status={run.status} />
           <RunLiveRefresh live={explanation.live} timeZone={timeZone} />
         </div>
+        {run.input?.description === undefined ? null : (
+          <details className="run-request">
+            <summary>The request</summary>
+            {/* Verbatim, and pre-wrapped: this is what the operator typed,
+                and a description whose line breaks separate requirements
+                reads as one paragraph without them. */}
+            <p className="run-request-text">{run.input.description}</p>
+          </details>
+        )}
         <p className="run-status-explanation">
           {explanation.summary}
           {explanation.next === undefined ? null : (
