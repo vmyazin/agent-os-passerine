@@ -715,6 +715,35 @@ function runtimeToolName(payload: unknown, key: string): string | undefined {
     : undefined;
 }
 
+/** Ceiling on tool-error text carried into a progress note. */
+const MAX_TOOL_ERROR_CHARS = 200;
+
+/**
+ * Why a tool call failed, as the tool reported it.
+ *
+ * Providers wrap the result in `detail`, usually as JSON carrying `content`;
+ * a provider that sends the text directly is read as-is. Sanitized and
+ * bounded like every other rendered value, and treated as data: this is what
+ * a sandboxed command printed, never an instruction.
+ */
+function runtimeToolResultText(payload: unknown): string | undefined {
+  const detail = payloadField(payload, 'detail');
+  if (typeof detail !== 'string' || detail.length === 0) return undefined;
+  let text = detail;
+  try {
+    const parsed: unknown = JSON.parse(detail);
+    const content = payloadField(parsed, 'content');
+    if (typeof content === 'string') text = content;
+  } catch {
+    // Not JSON: the provider sent the text plainly.
+  }
+  const cleaned = sanitizeForNote(text);
+  if (cleaned.length === 0) return undefined;
+  return cleaned.length > MAX_TOOL_ERROR_CHARS
+    ? `${cleaned.slice(0, MAX_TOOL_ERROR_CHARS)}...`
+    : cleaned;
+}
+
 function runtimeToolUseId(payload: unknown): string | undefined {
   const value = payloadField(payload, 'toolUseId');
   return typeof value === 'string' && value.length > 0 && value.length <= 128
@@ -879,15 +908,20 @@ function runtimeProgress(
       const tool =
         runtimeToolName(event.payload, 'name') ??
         (linked === undefined ? undefined : toolCalls.get(linked));
+      // What the tool said, on failure only. A successful result is the
+      // model's business; a failed one is the operator's, and "bash reported
+      // an error" without the error is the same dead end as a bare exit code.
+      const reason = failed ? runtimeToolResultText(event.payload) : undefined;
+      const because = reason === undefined ? '' : `: ${reason}`;
       if (tool === undefined)
         return note(
           'tool',
-          failed ? 'A tool reported an error' : 'Tool finished',
+          failed ? `A tool reported an error${because}` : 'Tool finished',
           failed ? 'failed' : '',
         );
       return note(
         'tool',
-        failed ? `${tool} reported an error` : `${tool} finished`,
+        failed ? `${tool} reported an error${because}` : `${tool} finished`,
         failed ? `${tool}:failed` : tool,
       );
     }
