@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
   assertContainedRepository,
@@ -7,29 +7,25 @@ import {
   createDurableTriggerOutbox,
   createDomainArtifactManifestStore,
   createAesWorkflowHandleSealer,
-  createKimiLocalAccessStore,
-  createKimiRuntimeProviderFromEnv,
+  createFilesystemArtifactStorage,
   createGitHubProjectSourceReader,
+  createLocalApprovalWaiter,
+  createLocalDirectDispatcher,
+  createLocalDirectFeatureWorkflowFromEnv,
   createLocalSourceSnapshotIngestor,
   inspectLocalProjectSource,
   listLocalProjectCommits,
-  createManagedAgentsRuntimeProvider,
   createNeonWorkflowCheckpointStore,
-  createTriggerSdkBoundary,
   createRepositoryRuntimeHandleVault,
   createRoutingRuntimeProvider,
-  createRuntimeStartRecoveryResolver,
   createR2ArtifactStore,
-  createTrustedSourceSnapshotIngestor,
   createTrustedRepositoryHeadResolver,
-  createTriggerApprovalWaiter,
-  createTriggerWorkflowDispatcher,
   githubOwnerNameFromUrl,
   githubRepositoryBindingKey,
   parseGitHubRepositoryAllowlist,
+  recoverLocalDirectRuns,
   runGit,
   selectGitHubRepositoryFromUrl,
-  kimiFromEnv,
   type TrustedSourceSnapshotIngestor,
   type GitHubProjectSourceReader,
 } from '@agentos/adapters';
@@ -158,7 +154,8 @@ function deploymentRegistryHostsFromEnv(): readonly string[] {
   }
   if (!Array.isArray(parsed)) return [];
   return parsed.filter(
-    (host): host is string => typeof host === 'string' && host.trim().length > 0,
+    (host): host is string =>
+      typeof host === 'string' && host.trim().length > 0,
   );
 }
 
@@ -178,14 +175,6 @@ function requiredRuntime(name: string): string {
   if (value === undefined || value.trim() === '')
     throw new Error(`${name} is required to control an active runtime session`);
   return value;
-}
-
-function parsedRuntimeJson<T>(name: string): T {
-  try {
-    return JSON.parse(requiredRuntime(name)) as T;
-  } catch {
-    throw new Error(`${name} must contain valid JSON`);
-  }
 }
 
 /**
@@ -250,7 +239,9 @@ export function repositoryHeadResolverFromEnv(): {
 } {
   let github:
     | {
-        readonly resolver: ReturnType<typeof createTrustedRepositoryHeadResolver>;
+        readonly resolver: ReturnType<
+          typeof createTrustedRepositoryHeadResolver
+        >;
         readonly readerRepositories: readonly GitHubPublicationRepository[];
       }
     | undefined;
@@ -318,27 +309,6 @@ export function repositoryHeadResolverFromEnv(): {
   };
 }
 
-function verificationRegistryHosts(): readonly string[] {
-  const hosts = parsedRuntimeJson<unknown>(
-    'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON',
-  );
-  if (
-    !Array.isArray(hosts) ||
-    hosts.length < 1 ||
-    hosts.length > 4 ||
-    hosts.some(
-      (host) =>
-        typeof host !== 'string' ||
-        host.length > 253 ||
-        !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host),
-    )
-  )
-    throw new Error(
-      'AGENTOS_VERIFICATION_REGISTRY_HOSTS_JSON must contain 1-4 exact registry hosts',
-    );
-  return hosts;
-}
-
 // The routing facade's handle-id prefix for kimi-owned handles
 // (createRoutingRuntimeProvider's HANDLE_DELIMITER is a single space).
 const KIMI_HANDLE_PREFIX = 'kimi ';
@@ -400,119 +370,135 @@ export function composeCancellationRuntime(input: {
   };
 }
 
-async function buildCancellationRuntime(): Promise<RuntimeProvider> {
-  const ownershipSecret = requiredRuntime('AGENTOS_RUNTIME_OWNERSHIP_SECRET');
-  const managed = await createManagedAgentsRuntimeProvider({
-    apiKey: requiredRuntime('ANTHROPIC_API_KEY'),
-    ownershipSecret,
-  });
-  // The control plane's KimiLocalAccessStore is a fresh, separate
-  // in-process instance from whichever Trigger worker actually staged a
-  // given resource, so wireAccessCleanup: false keeps this side's
-  // cleanupAccess a no-op -- real discard only ever happens worker-side,
-  // where the resource was staged (see createKimiRuntimeProviderFromEnv).
-  const kimiProvider = createKimiRuntimeProviderFromEnv(process.env, {
-    ownershipSecret,
-    artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
-    store: createKimiLocalAccessStore(),
-    wireAccessCleanup: false,
-  });
-  return composeCancellationRuntime({ managed, kimi: kimiProvider });
-}
+/**
+ * The composed local feature workflow. Named from the factory rather than
+ * imported: the task module that declares the interface also registers the
+ * Trigger task, and this process must not load it.
+ */
+type LocalDirectFeatureWorkflow = Awaited<
+  ReturnType<typeof createLocalDirectFeatureWorkflowFromEnv>
+>;
 
-function cancellationRuntime(): RuntimeProvider {
-  let provider: Promise<RuntimeProvider> | undefined;
-  const get = () => (provider ??= buildCancellationRuntime());
-  // Re-checked per call (cheap, pure) rather than cached at construction
-  // time, so this always reflects the environment as it is right now.
-  const kimiConfigured = () => kimiFromEnv(process.env) !== undefined;
-  return {
-    syncAgent: async (value) => (await get()).syncAgent(value),
-    syncEnvironment: async (value) => (await get()).syncEnvironment(value),
-    start: async (value) => (await get()).start(value),
-    reconcileStart: async (value) => (await get()).reconcileStart?.(value),
-    async *events(handle) {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      yield* (await get()).events(handle);
-    },
-    send: async (handle, value) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).send(handle, value);
-    },
-    resume: async (handle, value) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).resume(handle, value);
-    },
-    cancel: async (handle, reason) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).cancel(handle, reason);
-    },
-    collectOutput: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      return (await get()).collectOutput(handle);
-    },
-    usage: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      return (await get()).usage(handle);
-    },
-    cleanup: async (handle) => {
-      assertKimiHandleSupported(handle, kimiConfigured());
-      await (await get()).cleanup(handle);
-    },
-    cleanupAccess: async (input) => {
-      const runtime = await get();
-      if (runtime.cleanupAccess === undefined)
-        throw new Error('runtime access cleanup is unavailable');
-      await runtime.cleanupAccess(input);
-    },
-  };
-}
-
-export function workflowDispatchFromEnv() {
-  const triggerSecret = process.env.TRIGGER_SECRET_KEY?.trim() || undefined;
-  const databaseUrl = process.env.DATABASE_URL?.trim() || undefined;
-  if (triggerSecret === undefined) return undefined;
-  if (databaseUrl === undefined) {
+/**
+ * The same durable outbox the Trigger branch builds, wired to pieces that all
+ * live in this process: a filesystem artifact store, the local source
+ * ingestor, the database-polling approval waiter, and a dispatcher that calls
+ * the feature workflow directly. Postgres stays authoritative; only the
+ * coordination and execution edges move.
+ */
+/**
+ * The cancellation runtime for the local executor.
+ *
+ * The cloud one (`cancellationRuntime`) exists because a Managed Agents
+ * session outlives the worker that started it: a different process has to be
+ * able to reach in and stop it, which is why it needs credentials and an
+ * artifact MCP URL. Neither statement is true here. A local session is an
+ * object in this process, owned by the composition's own provider, and the
+ * dispatcher's abort -- delivered through `trigger.cancel(externalRunRef)` in
+ * the same cancellation flow -- is what actually stops it.
+ *
+ * So these are deliberate no-ops rather than an oversight, and they are not a
+ * silent success: a session this process cannot see is a session that is
+ * already gone, because it could only ever have lived here. Every method the
+ * cancellation path does not use throws instead of pretending, so a future
+ * caller finds out rather than getting a plausible answer.
+ */
+export function localCancellationRuntime(): RuntimeProvider {
+  const unsupported = (method: string) => (): never => {
     throw new Error(
-      'DATABASE_URL is required when TRIGGER_SECRET_KEY enables workflow dispatch',
+      `the local-direct executor's cancellation runtime does not implement ${method}: local sessions are owned by the process that started them`,
     );
-  }
-  const repository = repositoryFromEnv();
-  // A deployment validates its trusted reader configuration eagerly, at
-  // this exact point, whenever there is any indication it might actually
-  // need a GitHub reader: either it has not opted into local experiments at
-  // all (no AGENTOS_LOCAL_WORKSPACES_ROOT -- the classic, pre-local-
-  // experiments deployment shape), or it HAS opted in but has also started
-  // configuring a reader App (GITHUB_READER_APP_ID set) -- a
-  // GitHub-and-local deployment should discover a broken reader (e.g.
-  // reusing the publisher App identity) at construction time, not mid-
-  // dispatch the first time a GitHub-bound run needs it. Only a genuinely
-  // local-only deployment -- local workspaces configured AND no reader App
-  // id set at all -- defers reader construction into the GitHub ingestor's
-  // lazy branch further down, since that deployment may never need a
-  // GitHub reader and must not be required to configure one.
-  const eagerReader =
-    localWorkspacesRootFromEnv() === undefined ||
-    (process.env.GITHUB_READER_APP_ID?.trim() ?? '') !== ''
-      ? trustedReaderConfiguration()
-      : undefined;
-  const artifacts = createR2ArtifactStore({
-    accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
-    bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
-    accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
-    secretAccessKey: requiredRuntime(
-      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
-    ),
-    manifest: createDomainArtifactManifestStore(repository),
-  });
+  };
+  return {
+    syncAgent: async () => undefined,
+    syncEnvironment: async () => undefined,
+    start: unsupported('start'),
+    events: unsupported('events'),
+    send: unsupported('send'),
+    resume: unsupported('resume'),
+    collectOutput: unsupported('collectOutput'),
+    usage: unsupported('usage'),
+    // Nothing remote holds this session, and nothing outlives the process.
+    cancel: async () => undefined,
+    cleanup: async () => undefined,
+    cleanupAccess: async () => undefined,
+  } as unknown as RuntimeProvider;
+}
 
-  /**
-   * Loads the run + its (unique) config snapshot and validates the
-   * SHA-binding invariant every source-ingestion path depends on. Shared by
-   * both the GitHub and local resolveBinding closures below so the
-   * binding-integrity checks (SHA regex, snapshot repositorySha equality)
-   * live in exactly one place.
-   */
+/**
+ * Restart recovery is a once-per-process sweep, not a per-dispatch one. The
+ * flag lives at module scope because `localDirectDispatchFromEnv` may be
+ * called more than once in a process (tests, a re-read of the environment),
+ * and a second sweep would race the first for the same runs.
+ */
+// On globalThis, like the dispatcher: under `next dev` this module is
+// evaluated once per module graph, so a module-scoped flag resets on every
+// re-evaluation and the sweep runs again -- which is how a run under way got
+// resumed five times in four minutes, paying for the same step each time.
+const RECOVERY_SLOT = Symbol.for('agentos.localDirectRecoveryStarted');
+function recoveryStarted(): { current?: boolean } {
+  const holder = globalThis as unknown as Record<
+    symbol,
+    { current?: boolean } | undefined
+  >;
+  return (holder[RECOVERY_SLOT] ??= {});
+}
+
+// The one local dispatcher this process has, so the run page can ask it what
+// became of a run it handed over. Before this, that record lived only in the
+// dispatcher's memory and the page told the operator to go look in Trigger.
+// Held on globalThis rather than in module scope: under `next dev` the page
+// and the API routes are separate module graphs, each with its own copy of
+// this module's state, and the page would otherwise ask a dispatcher that
+// never started anything. One process, one dispatcher, one place to keep it.
+const DISPATCHER_SLOT = Symbol.for('agentos.localDirectDispatcher');
+type LocalDispatcher = ReturnType<typeof createLocalDirectDispatcher>;
+function localDispatcherSlot(): { current?: LocalDispatcher } {
+  const holder = globalThis as unknown as Record<
+    symbol,
+    { current?: LocalDispatcher }
+  >;
+  return (holder[DISPATCHER_SLOT] ??= {});
+}
+
+export const LOCAL_DIRECT_REF_PREFIX = 'local-direct:';
+
+/**
+ * What this process knows about a local execution. `LOST` means the reference
+ * is local but this process has no record of it, which is what a restart
+ * after the handoff looks like: the outbox recorded a successful start, the
+ * process that would have run it is gone, and nothing will retry on its own.
+ */
+export function localExecutionState(
+  externalRef: string,
+): { readonly status: string; readonly error?: string } | undefined {
+  if (!externalRef.startsWith(LOCAL_DIRECT_REF_PREFIX)) return undefined;
+  const snapshot = localDispatcherSlot().current?.inspect(externalRef);
+  if (snapshot === undefined) return { status: 'LOST' };
+  switch (snapshot.status) {
+    case 'executing':
+      return { status: 'EXECUTING' };
+    case 'completed':
+      return { status: 'COMPLETED' };
+    case 'failed':
+      return {
+        status: 'FAILED',
+        ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+      };
+  }
+}
+
+function localDirectDispatchFromEnv() {
+  const repository = repositoryFromEnv();
+  const checkpoints = createNeonWorkflowCheckpointStore(process.env);
+  const stateDirectory = requiredRuntime('AGENTOS_LOCAL_STATE_DIR');
+  // The very same root the local composition uses, so the ingestor writing a
+  // source snapshot here and the workflow reading it there are one store.
+  const artifacts = createFilesystemArtifactStorage({
+    root: join(stateDirectory, 'artifacts'),
+    manifest: createDomainArtifactManifestStore(repository),
+  }).store;
+
   const resolveSourceSnapshotRun = async (runId: string) => {
     const run = await repository.getRun(persistenceId('run', runId));
     if (
@@ -536,44 +522,35 @@ export function workflowDispatchFromEnv() {
       repositorySha !== snapshots[0]!.repositorySha
     )
       throw new Error('source snapshot repository SHA binding is invalid');
-    return { run, config, repositorySha };
-  };
-
-  // Built lazily, one ingestor per allowlisted repository: the GitHub
-  // ingestor needs the trusted reader env (GITHUB_READER_*), which a
-  // local-only deployment must not be required to set.
-  const githubIngestors = new Map<string, TrustedSourceSnapshotIngestor>();
-  const getGithubIngestor = (
-    repository: GitHubPublicationRepository,
-  ): TrustedSourceSnapshotIngestor => {
-    const cacheKey = githubRepositoryBindingKey(repository);
-    const cached = githubIngestors.get(cacheKey);
-    if (cached !== undefined) return cached;
-    const reader = eagerReader ?? trustedReaderConfiguration();
-    const ingestor = createTrustedSourceSnapshotIngestor({
-      githubApp: { ...reader.githubApp },
-      artifacts,
-      resolveBinding: async (runId) => {
-        const resolved = await resolveSourceSnapshotRun(runId);
-        if (resolved.config.project.repository === undefined)
-          throw new Error('source snapshot binding is not a GitHub run');
-        const selected = selectGitHubRepositoryFromUrl(
-          resolved.config.project.repository,
-          reader.readerRepositories,
-        );
-        if (githubRepositoryBindingKey(selected) !== cacheKey)
-          throw new Error('source snapshot repository binding mismatch');
-        return {
-          projectId: resolved.run.projectId,
-          runId: resolved.run.id,
-          repositorySha: resolved.repositorySha,
-          baseBranch: resolved.config.project.defaultBranch,
-          repository: selected,
-        };
-      },
-    });
-    githubIngestors.set(cacheKey, ingestor);
-    return ingestor;
+    // A chained run's source is its base run's published commit, not the
+    // configuration revision's. `provenance.repositorySha` stays the config
+    // binding and is checked above; the chain only redirects which commit is
+    // ingested and which branch it is based on -- exactly what the dispatch
+    // side already assumes (`chain.baseCommitSha ?? provenance.repositorySha`
+    // in the task handler). Without this the ingestor writes a bundle pinned
+    // to the config revision, dispatch asks for the chained commit, and the
+    // binding check fails every chained run permanently.
+    const chain = (
+      run.input as {
+        chain?: { baseBranch?: unknown; baseCommitSha?: unknown };
+      }
+    ).chain;
+    const chainedSha =
+      typeof chain?.baseCommitSha === 'string' &&
+      /^[0-9a-f]{40}$/.test(chain.baseCommitSha)
+        ? chain.baseCommitSha
+        : undefined;
+    const chainedBranch =
+      typeof chain?.baseBranch === 'string' && chain.baseBranch.length > 0
+        ? chain.baseBranch
+        : undefined;
+    return {
+      run,
+      config,
+      repositorySha,
+      sourceSha: chainedSha ?? repositorySha,
+      ...(chainedBranch === undefined ? {} : { chainedBranch }),
+    };
   };
 
   let localIngestor: TrustedSourceSnapshotIngestor | undefined;
@@ -598,8 +575,9 @@ export function workflowDispatchFromEnv() {
           projectId: resolved.run.projectId,
           runId: resolved.run.id,
           localPath,
-          baseBranch: resolved.config.project.defaultBranch,
-          repositorySha: resolved.repositorySha,
+          baseBranch:
+            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
+          repositorySha: resolved.sourceSha,
         };
       },
     }));
@@ -607,18 +585,14 @@ export function workflowDispatchFromEnv() {
   const sourceSnapshot: TrustedSourceSnapshotIngestor = {
     async ensure(runId) {
       const resolved = await resolveSourceSnapshotRun(runId);
-      if (resolved.config.project.localPath !== undefined)
-        return getLocalIngestor().ensure(runId);
-      if (resolved.config.project.repository === undefined)
-        throw new Error('source snapshot binding requires a repository URL');
-      const reader = eagerReader ?? trustedReaderConfiguration();
-      const selected = selectGitHubRepositoryFromUrl(
-        resolved.config.project.repository,
-        reader.readerRepositories,
-      );
-      return getGithubIngestor(selected).ensure(runId);
+      if (resolved.config.project.localPath === undefined)
+        throw new Error(
+          'the local-direct executor runs local projects only; this run has no project.localPath in its config, so use the Trigger executor for it',
+        );
+      return getLocalIngestor().ensure(runId);
     },
   };
+
   let vault: ReturnType<typeof createRepositoryRuntimeHandleVault> | undefined;
   const runtimeHandles = () =>
     (vault ??= createRepositoryRuntimeHandleVault({
@@ -627,13 +601,34 @@ export function workflowDispatchFromEnv() {
         Buffer.from(requiredRuntime('AGENTOS_RUNTIME_HANDLE_KEY'), 'base64url'),
       ),
     }));
-  const checkpoints = createNeonWorkflowCheckpointStore(process.env);
-  return createDurableTriggerOutbox({
+
+  // Composed on first dispatch, not here: an unconfigured environment should
+  // report the local executor's missing variables by name from the
+  // composition, rather than failing the whole control plane at import time.
+  let composed: Promise<LocalDirectFeatureWorkflow> | undefined;
+  const handlerOnce = () =>
+    (composed ??= createLocalDirectFeatureWorkflowFromEnv(process.env));
+
+  const localDispatcher = createLocalDirectDispatcher({
+    handler: {
+      // The dispatcher builds the very payload and execution context the
+      // Trigger task builds (`feature-task-payload-v1`); the structural
+      // `unknown` on its side only keeps the Trigger types out of a process
+      // that has left Trigger behind.
+      run: async (payload, execution) =>
+        (await handlerOnce()).run(
+          payload as Parameters<LocalDirectFeatureWorkflow['run']>[0],
+          execution as Parameters<LocalDirectFeatureWorkflow['run']>[1],
+        ),
+    },
+  });
+  localDispatcherSlot().current = localDispatcher;
+  const outbox = createDurableTriggerOutbox({
     checkpoints,
-    trigger: createTriggerWorkflowDispatcher(),
-    approval: createTriggerApprovalWaiter(),
+    trigger: localDispatcher,
+    approval: createLocalApprovalWaiter({ repository }),
     clock: () => new Date().toISOString(),
-    runtime: cancellationRuntime(),
+    runtime: localCancellationRuntime(),
     repository,
     runtimeHandles: {
       store: (input) => runtimeHandles().store(input),
@@ -644,23 +639,79 @@ export function workflowDispatchFromEnv() {
       markCleaned: (externalId, at) =>
         runtimeHandles().markCleaned(externalId, at),
     },
-    runtimeStartRecovery: createRuntimeStartRecoveryResolver({
-      repository,
-      checkpoints,
-      artifactMcpUrl: requiredRuntime('AGENTOS_ARTIFACT_MCP_URL'),
-      verificationRegistryHosts: verificationRegistryHosts(),
-    }),
+    // Deliberately absent. Start recovery exists to reconcile a cloud session
+    // whose start may or may not have landed while the process was away; a
+    // local session lives in this process and is recovered by resume instead.
     sourceSnapshot,
   });
+
+  // Fire-and-forget, and once per process. This sweep reopens the runs the
+  // *previous* process died holding -- nothing in this process is waiting on
+  // its answer, and the control plane must come up whether or not it works.
+  // Awaiting it would put a database round-trip per stranded run in front of
+  // boot; letting it throw would take the app down over runs that are already
+  // stuck. A sweep that fails leaves those runs exactly as it found them, and
+  // the next restart tries again.
+  if (recoveryStarted().current !== true) {
+    recoveryStarted().current = true;
+    void recoverLocalDirectRuns({
+      repository,
+      checkpoints,
+      isRunActive: (runId) => localDispatcher.isRunActive(runId),
+      dispatch: async ({ runId, pipeline, resumeGeneration }) => {
+        if (pipeline !== 'feature' && pipeline !== 'goal')
+          throw new Error(`run ${runId} has no dispatchable pipeline`);
+        await outbox.requestStart({
+          // The same key the operator-driven resume mints, so a resume and a
+          // recovery of one run at one generation are one dispatch.
+          idempotencyKey: `workflow-start:${runId}:resume:${String(resumeGeneration)}`,
+          runId,
+          pipeline,
+          resumeGeneration,
+        });
+      },
+    }).catch((error: unknown) => {
+      console.error('local-direct restart recovery failed', error);
+    });
+  }
+
+  return outbox;
 }
 
 /**
- * Approval summaries read spec/DoD artifact bodies; without R2 env the inbox
- * degrades to bare approvals instead of failing. The seed route writes
- * through this same store so a seeded approval renders the way a real one
- * does.
+ * The workflow dispatcher, when this deployment is configured to run work.
+ *
+ * There is one executor: the run executes inside this process. Trigger.dev
+ * was removed on 2026-09-03 (see
+ * docs/superpowers/specs/2026-09-03-remove-trigger-design.md); Postgres was
+ * always where durability lived, so nothing here changed but the scheduler.
  */
+export function workflowDispatchFromEnv() {
+  if ((process.env.DATABASE_URL?.trim() ?? '') === '') return undefined;
+  // Validated before any run is accepted, whenever a reader App is being
+  // configured: reader and publisher are deliberately separate GitHub Apps,
+  // and reusing one identity for both is a mistake that otherwise surfaces
+  // mid-dispatch on the first GitHub-bound run. A deployment that configures
+  // no reader is not asked for one -- the executor that assumed every
+  // deployment was GitHub-bound is gone, the requirement is not.
+  if ((process.env.GITHUB_READER_APP_ID?.trim() ?? '') !== '')
+    trustedReaderConfiguration();
+  return localDirectDispatchFromEnv();
+}
+
 export function approvalArtifactStoreFromEnv() {
+  // Follow the executor. The local one keeps artifact bodies on disk, and
+  // without this the inbox degrades to bare approvals -- which means the
+  // operator approves a Definition of Done without seeing the acceptance
+  // tests it froze, defeating the point of that gate.
+  {
+    const stateDirectory = process.env.AGENTOS_LOCAL_STATE_DIR?.trim();
+    if (!stateDirectory) return undefined;
+    return createFilesystemArtifactStorage({
+      root: join(stateDirectory, 'artifacts'),
+      manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
+    }).store;
+  }
   const configured =
     (process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() ?? '') !== '' &&
     (process.env.CLOUDFLARE_R2_ARTIFACT_BUCKET?.trim() ?? '') !== '' &&
@@ -671,7 +722,9 @@ export function approvalArtifactStoreFromEnv() {
     accountId: requiredRuntime('CLOUDFLARE_R2_ACCOUNT_ID'),
     bucket: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_BUCKET'),
     accessKeyId: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_ACCESS_KEY_ID'),
-    secretAccessKey: requiredRuntime('CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY'),
+    secretAccessKey: requiredRuntime(
+      'CLOUDFLARE_R2_ARTIFACT_SECRET_ACCESS_KEY',
+    ),
     manifest: createDomainArtifactManifestStore(repositoryFromEnv()),
   });
 }
@@ -698,16 +751,10 @@ export function workflowCheckpointsFromEnv() {
  * worker that will never arrive". Gated on the same key that enables
  * dispatch, and silent when it cannot answer.
  */
-export async function externalRunStateFromEnv(externalRef: string): Promise<
-  | { readonly status: string; readonly error?: string }
-  | undefined
-> {
-  if ((process.env.TRIGGER_SECRET_KEY?.trim() ?? '') === '') return undefined;
-  try {
-    return await createTriggerSdkBoundary().retrieveRun(externalRef);
-  } catch {
-    return undefined;
-  }
+export function externalRunStateFromEnv(
+  externalRef: string,
+): { readonly status: string; readonly error?: string } | undefined {
+  return localExecutionState(externalRef);
 }
 
 export function controlPlaneService(): ControlPlaneService {
@@ -723,9 +770,8 @@ export function controlPlaneService(): ControlPlaneService {
         : (() => {
             const resolver = repositoryHeadResolverFromEnv();
             return {
-              resolve: async (
-                config: ReturnType<typeof parseAgentOsConfig>,
-              ) => (await resolver.resolve(config)).repositorySha,
+              resolve: async (config: ReturnType<typeof parseAgentOsConfig>) =>
+                (await resolver.resolve(config)).repositorySha,
             };
           })();
     const approvalArtifacts = approvalArtifactStoreFromEnv();
@@ -739,6 +785,9 @@ export function controlPlaneService(): ControlPlaneService {
       deploymentRegistryHostsFromEnv(),
       approvalArtifacts,
       projectSourceGatewayFromEnv(),
+      // Resuming needs to clear the checkpoints that refuse a replay, so a
+      // deployment without a database simply cannot offer it.
+      workflowCheckpointsFromEnv(),
     );
   }
   return service;

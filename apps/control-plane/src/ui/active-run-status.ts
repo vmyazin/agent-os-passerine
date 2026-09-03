@@ -9,9 +9,7 @@ export const ACTIVE_RUN_STATUSES = [
   'running',
 ] as const satisfies readonly RunStatus[];
 
-const ACTIVE_RUN_STATUS_SET: ReadonlySet<string> = new Set(
-  ACTIVE_RUN_STATUSES,
-);
+const ACTIVE_RUN_STATUS_SET: ReadonlySet<string> = new Set(ACTIVE_RUN_STATUSES);
 
 export function isRunActive(status: string): boolean {
   return ACTIVE_RUN_STATUS_SET.has(status);

@@ -265,7 +265,8 @@ export async function reconcileWorkflowOutbox(
       }
       const active = ['pending', 'running', 'waiting'].includes(run.status);
       const nowMs = Date.parse(now);
-      let failCode: 'workflow_deadline_exceeded' | 'approval_expired' | undefined;
+      let failCode:
+        'workflow_deadline_exceeded' | 'approval_expired' | undefined;
 
       if (active && (run.pipeline === 'feature' || run.pipeline === 'goal')) {
         if (run.status === 'waiting') {

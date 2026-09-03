@@ -37,7 +37,12 @@ describe('control-plane UI components', () => {
       expect(markup).toContain('class="status-spinner"');
     }
 
-    for (const status of ['waiting', 'succeeded', 'failed', 'cancelled'] as const) {
+    for (const status of [
+      'waiting',
+      'succeeded',
+      'failed',
+      'cancelled',
+    ] as const) {
       const markup = renderToStaticMarkup(
         createElement(RunStatusBadge, { status }),
       );
@@ -113,5 +118,40 @@ describe('control-plane UI components', () => {
     expect(markup).toContain('Attempt 1');
     expect(markup).toContain('19:00:00 UTC');
     expect(markup).toContain('aria-label="specification activity"');
+  });
+});
+
+describe('RunStepTimeline running rail', () => {
+  const step = (status: string) => ({
+    id: `run-1:specification:1`,
+    stepKey: 'specification',
+    attempt: 1,
+    status,
+    progress: [
+      {
+        eventId: 'e1',
+        phase: 'tool',
+        message: 'read finished',
+        occurredAt: '2026-09-03T00:00:00.000Z',
+      },
+    ],
+  });
+
+  it('marks only the running step, so one thing on the page moves', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [step('succeeded'), step('running'), step('failed')],
+      } as never),
+    );
+    expect(markup.match(/run-step-item-running/g)?.length ?? 0).toBe(1);
+  });
+
+  it('marks nothing when no step is running', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [step('succeeded'), step('failed')],
+      } as never),
+    );
+    expect(markup).not.toContain('run-step-item-running');
   });
 });

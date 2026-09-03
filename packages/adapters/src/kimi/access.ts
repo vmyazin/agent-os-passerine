@@ -70,15 +70,23 @@ export function createKimiLocalAccessStore(): KimiLocalAccessStore {
       const bytes = files.get(fileId);
       if (bytes === undefined) {
         // Generic on purpose: this is the one path a resolver error could
-        // otherwise echo a secret-bearing id back toward the model.
-        throw new Error('unknown kimi local file reference');
+        // otherwise echo a secret-bearing id back toward the model. The code
+        // tells the workflow what this is -- a reference staged by another
+        // process, gone with it, so no session was created and a fresh
+        // attempt (which stages fresh) is the correct response.
+        throw Object.assign(new Error('unknown kimi local file reference'), {
+          code: 'runtime_session_missing',
+        });
       }
       return bytes;
     },
     async resolveCredential(ref: string): Promise<string> {
       const token = credentials.get(ref);
       if (token === undefined) {
-        throw new Error('unknown kimi local credential reference');
+        throw Object.assign(
+          new Error('unknown kimi local credential reference'),
+          { code: 'runtime_session_missing' },
+        );
       }
       return token;
     },

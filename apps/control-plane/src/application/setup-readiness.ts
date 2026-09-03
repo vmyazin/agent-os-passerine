@@ -3,6 +3,7 @@ import { loadAgentOsConfig, type AgentOsConfig } from '@agentos/core';
 import {
   assertReaderPublisherRepositoryPairing,
   listGitHubRepositoryBindings,
+  missingLocalDirectVariables,
   parseGitHubRepositoryAllowlist,
   selectGitHubRepositoryFromUrl,
 } from '@agentos/adapters';
@@ -80,8 +81,28 @@ function githubAllowlistReady(environment: Environment): boolean {
 }
 
 /**
+ * The executor's own group. Its variables are not enumerated here:
+ * `missingLocalDirectVariables` is the single authority on what the local
+ * composition needs, and duplicating that list is how the two would drift.
+ */
+function executorGroup(environment: Environment): SetupReadinessGroup {
+  return group('executor', 'Workflow dispatch', [
+    ...missingLocalDirectVariables(environment).map((name) => ({
+      key: name,
+      label: 'Required to execute runs',
+      ready: false,
+      hint: `Runs cannot be composed without ${name}.`,
+    })),
+  ]);
+}
+
+/**
  * Deployment-wide readiness: database, dispatch, storage, GitHub Apps env,
  * local workspaces, and trust anchors. Never echoes secret values.
+ *
+ * Runs execute in this process, so R2 and a public artifact MCP URL are not
+ * requirements: reporting them would send an operator configuring services
+ * their runs never call.
  */
 export function deploymentSetupReadiness(
   environment: Environment,
@@ -190,8 +211,7 @@ export function deploymentSetupReadiness(
         key: 'github.repository_pairing',
         label: 'Reader/publisher pairing',
         ready: githubAllowlistReady(environment),
-        hint:
-          'Reader and publisher allowlists must list the same repositories.',
+        hint: 'Reader and publisher allowlists must list the same repositories.',
       },
     ]),
     group('local', 'Local workspaces (experiments)', [
@@ -255,12 +275,23 @@ export function deploymentSetupReadiness(
       ),
     ]),
   ];
+  // `dispatch`, `models`, `storage` and `artifactMcp` described variables the
+  // Trigger executor read. Runs execute in this process now, and every
+  // requirement -- the model key, whether Anthropic or Kimi, and the
+  // filesystem artifact root -- lives in the executor's own group.
+  const reported = [
+    ...groups.filter((entry) => entry.id === 'database'),
+    executorGroup(environment),
+    ...groups.filter((entry) =>
+      ['github', 'local', 'trust'].includes(entry.id),
+    ),
+  ];
   const repositories = listGitHubRepositoryBindings(
     environment.GITHUB_SELECTED_REPOSITORIES_JSON,
   );
-  const github = groups.find((entry) => entry.id === 'github');
-  const local = groups.find((entry) => entry.id === 'local');
-  const ready = groups
+  const github = reported.find((entry) => entry.id === 'github');
+  const local = reported.find((entry) => entry.id === 'local');
+  const ready = reported
     .filter((entry) => entry.id !== 'github' && entry.id !== 'local')
     .every((entry) => entry.ready);
   return {
@@ -268,7 +299,7 @@ export function deploymentSetupReadiness(
     readyForGitHub: ready && (github?.ready ?? false),
     readyForLocal: ready && (local?.ready ?? false),
     ...(repositories === undefined ? {} : { repositories }),
-    groups,
+    groups: reported,
   };
 }
 
@@ -327,14 +358,15 @@ export function projectSetupReadiness(
   }
   return {
     ready: allowlistReady,
-    ...(selectedRepository === undefined ? {} : { repository: selectedRepository }),
+    ...(selectedRepository === undefined
+      ? {}
+      : { repository: selectedRepository }),
     items: [
       {
         key: 'project.repository',
         label: 'GitHub repository allowlist',
         ready: allowlistReady,
-        hint:
-          'The configured repository URL must match an entry in the deployment allowlist.',
+        hint: 'The configured repository URL must match an entry in the deployment allowlist.',
       },
     ],
   };

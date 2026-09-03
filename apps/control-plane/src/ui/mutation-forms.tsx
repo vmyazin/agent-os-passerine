@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import type { InboxAttentionChangedDetail } from './inbox-count-client';
@@ -111,6 +111,306 @@ export function ApprovalActions({
  * configuration applied now -- usually the reason the operator is here.
  * Two-step, because it spends money.
  */
+/** $2.00, enough for several steps at observed per-step cost. */
+const DEFAULT_BUDGET_OVERRIDE_MICRODOLLARS = 2_000_000;
+
+/**
+ * Granting a run a one-time allowance past the budget that stopped it.
+ *
+ * Deliberately separate from resuming. Granting raises this run's caps and
+ * changes nothing else, so the operator authorises the spend and then decides
+ * to continue -- two decisions, because the first one is about money.
+ */
+export function OverrideRunBudgetAction({
+  runId,
+  microdollars = DEFAULT_BUDGET_OVERRIDE_MICRODOLLARS,
+}: {
+  readonly runId: string;
+  readonly microdollars?: number;
+}) {
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const amount = `$${(microdollars / 1_000_000).toFixed(2)}`;
+  const grant = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Granting…');
+    const response = await fetch(`/api/runs/${runId}/budget-override`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ microdollars }),
+    });
+    if (response.ok) {
+      setMessage(`Granted ${amount}. Resume the run to spend it.`);
+      setPending(false);
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    setMessage(
+      typeof body.error?.message === 'string'
+        ? `Could not grant it: ${body.error.message}.`
+        : 'Could not grant it.',
+    );
+    setPending(false);
+  };
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        <button
+          className="secondary"
+          disabled={pending}
+          onClick={() => void grant()}
+          type="button"
+        >
+          {pending ? 'Granting…' : `Allow ${amount} more`}
+        </button>
+      </div>
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
+/**
+ * Continuing a finished run from where it stopped, keeping the steps it
+ * already paid for. Single-step, unlike starting again: it spends only what
+ * the remaining steps cost, and the work it reuses was already bought.
+ */
+export function ResumeRunAction({
+  runId,
+  label = 'Resume',
+}: {
+  readonly runId: string;
+  /** "Retry" on a queued run the executor lost; "Resume" on a failed one. */
+  readonly label?: string;
+}) {
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+  const resume = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Resuming…');
+    const response = await fetch(`/api/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (response.ok) {
+      location.reload();
+      return;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    // A conflict means this page is describing a run that has already moved
+    // on -- someone resumed it in another tab, or a reconciler did. Showing
+    // the stale page with an error beside a button that cannot work is worse
+    // than showing what is actually true, so reload.
+    if (response.status === 409) {
+      setMessage('This run changed while you were looking at it; reloading…');
+      location.reload();
+      return;
+    }
+    setMessage(
+      typeof body.error?.message === 'string'
+        ? `Could not resume it: ${body.error.message}.`
+        : 'Could not resume it.',
+    );
+    setPending(false);
+  };
+  return (
+    <div className="action-stack">
+      <div className="button-row">
+        <button disabled={pending} onClick={() => void resume()} type="button">
+          {pending ? `${label}…` : label}
+        </button>
+      </div>
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
+/** What the preview endpoints report back about one run's checkout. */
+export interface RunPreviewView {
+  readonly status: 'running' | 'no_server';
+  readonly url?: string;
+  readonly script?: string;
+  readonly hint?: string;
+  readonly rootStatus?: number;
+}
+
+async function previewFailure(
+  response: Response,
+  prefix: string,
+): Promise<string> {
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: { message?: string };
+  };
+  return typeof body.error?.message === 'string' && body.error.message !== ''
+    ? `${prefix}: ${body.error.message}`
+    : `${prefix}.`;
+}
+
+/**
+ * Running the code a finished run delivered, on this machine, from the page
+ * that describes it. A diff says whether the change reads correctly; only a
+ * running copy says whether it works.
+ *
+ * Deliberately never reloads the page: starting a preview can take a minute,
+ * and throwing the operator's scroll position away at the end of it -- or
+ * worse, mid-install -- would be its own small betrayal. State moves in place.
+ */
+export function PreviewRunAction({
+  runId,
+  initialPreview,
+  suggestedPaths = [],
+}: {
+  readonly runId: string;
+  /** Seeds the rendered state; when absent the preview is fetched on mount. */
+  readonly initialPreview?: RunPreviewView | null;
+  /**
+   * Paths the feature request itself named. An API with no root route is the
+   * common case, and the request is the one place that says where to look.
+   */
+  readonly suggestedPaths?: readonly string[];
+}) {
+  // undefined: not yet known. null: no preview is running.
+  const [preview, setPreview] = useState<RunPreviewView | null | undefined>(
+    initialPreview,
+  );
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (initialPreview !== undefined) return;
+    let abandoned = false;
+    void (async () => {
+      const response = await fetch(`/api/runs/${runId}/preview`).catch(
+        () => undefined,
+      );
+      if (abandoned) return;
+      setPreview(
+        response !== undefined && response.ok
+          ? ((await response.json()) as RunPreviewView)
+          : null,
+      );
+    })();
+    return () => {
+      abandoned = true;
+    };
+  }, [initialPreview, runId]);
+
+  const start = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Starting it — the first run of a branch installs it first…');
+    const response = await fetch(`/api/runs/${runId}/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (response.ok) {
+      setPreview((await response.json()) as RunPreviewView);
+      setMessage('');
+    } else {
+      setMessage(await previewFailure(response, 'Could not start the preview'));
+    }
+    setPending(false);
+  };
+
+  const stop = async () => {
+    if (pending) return;
+    setPending(true);
+    setMessage('Stopping it…');
+    const response = await fetch(`/api/runs/${runId}/preview`, {
+      method: 'DELETE',
+    });
+    if (response.ok) {
+      setPreview(null);
+      setMessage('Preview stopped and its checkout removed.');
+    } else {
+      setMessage(await previewFailure(response, 'Could not stop the preview'));
+    }
+    setPending(false);
+  };
+
+  return (
+    <div className="action-stack">
+      {preview === undefined ? (
+        <p>Checking for a running preview…</p>
+      ) : preview === null ? (
+        <div className="button-row">
+          <button
+            className="secondary"
+            disabled={pending}
+            onClick={() => void start()}
+            type="button"
+          >
+            {pending ? 'Starting…' : 'Start preview'}
+          </button>
+        </div>
+      ) : (
+        <>
+          {preview.status === 'running' && preview.url !== undefined ? (
+            <p>
+              <a href={preview.url} rel="noreferrer" target="_blank">
+                {preview.url}
+              </a>
+              {preview.script === undefined ? null : (
+                <>
+                  {' — running '}
+                  <code>{preview.script}</code>
+                </>
+              )}
+            </p>
+          ) : null}
+          {preview.status === 'running' &&
+          preview.url !== undefined &&
+          (preview.rootStatus === 404 || suggestedPaths.length > 0) ? (
+            <p>
+              {preview.rootStatus === 404
+                ? 'It answers 404 at the root, so it serves specific paths. '
+                : null}
+              {suggestedPaths.length > 0 ? (
+                <>
+                  {'Paths the request named: '}
+                  {suggestedPaths.map((path, index) => (
+                    <span key={path}>
+                      {index > 0 ? ', ' : null}
+                      <a
+                        href={`${preview.url}${path}`}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        {path}
+                      </a>
+                    </span>
+                  ))}
+                </>
+              ) : null}
+            </p>
+          ) : (
+            <p>
+              {preview.hint ??
+                'The branch is checked out, but it declares nothing to serve.'}
+            </p>
+          )}
+          <div className="button-row">
+            <button
+              className="secondary"
+              disabled={pending}
+              onClick={() => void stop()}
+              type="button"
+            >
+              {pending ? 'Stopping…' : 'Stop'}
+            </button>
+          </div>
+        </>
+      )}
+      <p aria-live="polite">{message}</p>
+    </div>
+  );
+}
+
 export function RestartRunAction({ runId }: { readonly runId: string }) {
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
@@ -147,7 +447,11 @@ export function RestartRunAction({ runId }: { readonly runId: string }) {
       <div className="button-row">
         {confirming ? (
           <>
-            <button disabled={pending} onClick={() => void start()} type="button">
+            <button
+              disabled={pending}
+              onClick={() => void start()}
+              type="button"
+            >
               {pending ? 'Starting…' : 'Confirm, start again'}
             </button>
             <button

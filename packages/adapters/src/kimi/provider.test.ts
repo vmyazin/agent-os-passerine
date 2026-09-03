@@ -461,6 +461,31 @@ describe('createKimiRuntimeProvider', () => {
     await expect(provider.collectOutput(handle)).rejects.toBe(transportError);
   });
 
+  it('names an out-of-balance refusal with a runtime error code', async () => {
+    const { provider } = await makeProvider({
+      transport: {
+        async send() {
+          throw new KimiTransportError(
+            429,
+            JSON.stringify({
+              error: {
+                type: 'exceeded_current_quota_error',
+                message: 'account is suspended due to insufficient balance',
+              },
+            }),
+          );
+        },
+      },
+    });
+    const handle = await provider.start(baseRequest());
+    const events = await collectEvents(provider, handle);
+
+    const failure = events.find((event) => event.type === 'error');
+    // A quota refusal is a billing problem, not an anonymous session error:
+    // the code is what lets the operator's activity feed say so.
+    expect(failure?.payload).toMatchObject({ code: 'billing_error' });
+  });
+
   it('turn_limit resolution emits an error event and collectOutput rejects', async () => {
     const transport: KimiTransport = {
       async send() {
@@ -742,21 +767,23 @@ describe('createKimiRuntimeProvider', () => {
         usage: { inputTokens: 1, outputTokens: 1 },
       },
     ]);
-    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as { readonly id: string };
-      return new Response(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: body.id,
-          result: {
-            content: [{ type: 'text', text: 'ok' }],
-            structuredContent: { metadata },
-            isError: false,
-          },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    });
+    const fetchImpl = vi.fn(
+      async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { readonly id: string };
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              content: [{ type: 'text', text: 'ok' }],
+              structuredContent: { metadata },
+              isError: false,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    );
 
     const { provider } = await makeProvider({
       transport,
@@ -1227,5 +1254,308 @@ describe('createKimiRuntimeProvider', () => {
       transport: neverRespondingTransport(),
     });
     await expect(withoutHook.cleanupAccess!(input)).resolves.toBeUndefined();
+  });
+});
+
+describe('model-provider transports', () => {
+  const ANTHROPIC_AGENT: RuntimeAgent = {
+    ...AGENT,
+    id: 'agent-anthropic',
+    model: 'claude-sonnet-4-6',
+    modelProvider: 'anthropic',
+  };
+  const KIMI_AGENT: RuntimeAgent = {
+    ...AGENT,
+    id: 'agent-kimi',
+    model: 'kimi-k2.7-code',
+    modelProvider: 'kimi',
+  };
+
+  it('routes each agent to the transport its model provider names', async () => {
+    const anthropic = scriptedTransport([]);
+    const kimi = scriptedTransport([]);
+    const sandboxRoot = await newSandboxRoot();
+    const provider = createKimiRuntimeProvider({
+      ownershipSecret: OWNERSHIP_SECRET,
+      sandboxRoot,
+      transports: { anthropic: anthropic.transport, kimi: kimi.transport },
+    });
+    await provider.syncEnvironment(ENVIRONMENT);
+    await provider.syncAgent(ANTHROPIC_AGENT);
+    await provider.syncAgent(KIMI_AGENT);
+
+    await provider.start(baseRequest({ agentId: ANTHROPIC_AGENT.id }));
+    await vi.waitFor(() => expect(anthropic.calls.length).toBe(1));
+    expect(anthropic.calls[0]?.model).toBe('claude-sonnet-4-6');
+    expect(kimi.calls).toHaveLength(0);
+
+    await provider.start(
+      baseRequest({ agentId: KIMI_AGENT.id, stepId: 'step-2' }),
+    );
+    await vi.waitFor(() => expect(kimi.calls.length).toBe(1));
+    expect(kimi.calls[0]?.model).toBe('kimi-k2.7-code');
+  });
+
+  it('refuses an agent whose model provider has no transport, before starting a session', async () => {
+    const sandboxRoot = await newSandboxRoot();
+    const provider = createKimiRuntimeProvider({
+      ownershipSecret: OWNERSHIP_SECRET,
+      sandboxRoot,
+      transports: { kimi: neverRespondingTransport() },
+    });
+    await provider.syncEnvironment(ENVIRONMENT);
+    await provider.syncAgent(ANTHROPIC_AGENT);
+
+    await expect(
+      provider.start(baseRequest({ agentId: ANTHROPIC_AGENT.id })),
+    ).rejects.toThrow(
+      /no transport is configured for model provider 'anthropic'/,
+    );
+    // Nothing was staged: a misroute must not leave a workdir behind.
+    await expect(fs.readdir(sandboxRoot)).resolves.toEqual([]);
+  });
+
+  it('needs no apiKey when a transport registry is supplied', () => {
+    expect(() =>
+      createKimiRuntimeProvider({
+        ownershipSecret: OWNERSHIP_SECRET,
+        sandboxRoot: '/tmp/does-not-matter',
+        transports: { kimi: neverRespondingTransport() },
+      }),
+    ).not.toThrow();
+  });
+
+  it('still requires an apiKey when nothing else can serve a session', () => {
+    expect(() =>
+      createKimiRuntimeProvider({
+        ownershipSecret: OWNERSHIP_SECRET,
+        sandboxRoot: '/tmp/does-not-matter',
+        transports: {},
+      }),
+    ).toThrow(KimiRuntimeProviderError);
+  });
+
+  it('keeps the single-transport behaviour when no registry is given', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+    await provider.syncAgent({ ...AGENT, modelProvider: 'anything' });
+    await provider.start(baseRequest());
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+  });
+});
+
+describe('source bundle unpacking', () => {
+  it('materializes a source-bundle-v1 artifact as a real tree beside the JSON', async () => {
+    const bundle = JSON.stringify({
+      version: 'source-bundle-v1',
+      repositorySha: 'a'.repeat(40),
+      files: [
+        { path: 'src/index.ts', content: 'export const a = 1;\n' },
+        { path: 'README.md', content: '# hi\n' },
+      ],
+    });
+    const store = createKimiLocalAccessStore();
+    const staged = store.stage({
+      files: [
+        {
+          bytes: new TextEncoder().encode(bundle),
+          mountPath: '/workspace/inputs/source-bundle.json',
+        },
+      ],
+      credentials: [],
+    });
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: store.resolveFile,
+    });
+    const handle = await provider.start(
+      baseRequest({ resources: staged.resources }),
+    );
+
+    const workdir = path.join(sandboxRoot, handle.id);
+    await expect(
+      fs.readFile(path.join(workdir, 'repo/src/index.ts'), 'utf8'),
+    ).resolves.toBe('export const a = 1;\n');
+    await expect(
+      fs.readFile(path.join(workdir, 'repo/README.md'), 'utf8'),
+    ).resolves.toBe('# hi\n');
+    // The bundle itself stays mounted: provenance is unchanged.
+    await expect(
+      fs.readFile(path.join(workdir, 'inputs/source-bundle.json'), 'utf8'),
+    ).resolves.toBe(bundle);
+  });
+
+  it('ignores a mounted resource that is not a source bundle', async () => {
+    const store = createKimiLocalAccessStore();
+    const staged = store.stage({
+      files: [
+        {
+          bytes: new TextEncoder().encode('console.log(1)'),
+          mountPath: '/workspace/inputs/file-0.txt',
+        },
+        {
+          bytes: new TextEncoder().encode('{"version":"other-v1"}'),
+          mountPath: '/workspace/inputs/file-1.json',
+        },
+      ],
+      credentials: [],
+    });
+    const { provider, sandboxRoot } = await makeProvider({
+      transport: neverRespondingTransport(),
+      resolveFile: store.resolveFile,
+    });
+    const handle = await provider.start(
+      baseRequest({ resources: staged.resources }),
+    );
+    await expect(
+      fs.readdir(path.join(sandboxRoot, handle.id)),
+    ).resolves.not.toContain('repo');
+  });
+});
+
+describe('trusted verification requests', () => {
+  const verificationRequest = (): RuntimeStartRequest =>
+    baseRequest({
+      input: {
+        version: 'trusted-verification-request-v1',
+        exactCommand: 'echo verified',
+        instruction: 'run the command exactly as given',
+      },
+    });
+
+  it('starts without a model session: no transport call, empty output, zero usage, one message event', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(verificationRequest());
+    const events = await collectEvents(provider, handle);
+
+    expect(calls).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe('message');
+    expect(events[0]?.payload).toEqual({
+      detail:
+        'Trusted verification: no model session; the command is observed directly.',
+    });
+    await expect(provider.collectOutput(handle)).resolves.toEqual({
+      data: {},
+      artifacts: [],
+    });
+    const usage = await provider.usage(handle);
+    expect(usage.inputTokens).toBe(0);
+    expect(usage.outputTokens).toBe(0);
+    expect(usage.runtimeMs).toBeGreaterThanOrEqual(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('observeCommand runs the trusted command in the sandbox', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const { provider } = await makeProvider({ transport });
+    const handle = await provider.start(verificationRequest());
+
+    const observed = await provider.observeCommand!(handle, 'echo verified');
+
+    expect(observed.command).toBe('echo verified');
+    expect(observed.exitCode).toBe(0);
+    expect(Date.parse(observed.startedAt)).not.toBeNaN();
+    expect(Date.parse(observed.completedAt)).not.toBeNaN();
+    expect(runBashCalls).toHaveLength(1);
+    expect(runBashCalls[0]?.command).toBe('echo verified');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('a start that is not a verification request still runs the model loop', async () => {
+    const { transport, calls } = scriptedTransport([
+      {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'submit_result',
+            input: { done: true },
+          },
+        ],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 3, outputTokens: 1 },
+      },
+    ]);
+    const { provider } = await makeProvider({ transport });
+
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'other-v1', exactCommand: 'true' } }),
+    );
+    const events = await collectEvents(provider, handle);
+
+    expect(calls).toHaveLength(1);
+    expect(events.at(-1)?.type).toBe('terminated');
+    await expect(provider.collectOutput(handle)).resolves.toEqual({
+      data: { done: true },
+      artifacts: [],
+    });
+    await expect(provider.usage(handle)).resolves.toMatchObject({
+      inputTokens: 3,
+      outputTokens: 1,
+    });
+  });
+
+  it('cleanup destroys the workdir of a verification session', async () => {
+    const { transport } = scriptedTransport([]);
+    const { provider, sandboxRoot } = await makeProvider({ transport });
+    const handle = await provider.start(verificationRequest());
+    const workdir = path.join(sandboxRoot, handle.id);
+    await expect(fs.stat(workdir)).resolves.toBeDefined();
+
+    await provider.cleanup(handle);
+
+    await expect(fs.stat(workdir)).rejects.toThrow();
+    await expect(
+      provider.reconcileStart!(verificationRequest()),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('observed command output', () => {
+  it('carries the tail of what a failing trusted command printed', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(
+      handle,
+      'echo "not ok 1 - version endpoint"; echo "boom" >&2; exit 1',
+    );
+    expect(observed.exitCode).toBe(1);
+    // Both streams, so a runner that reports on stderr is not silent.
+    expect(observed.output).toContain('not ok 1 - version endpoint');
+    expect(observed.output).toContain('boom');
+  });
+
+  it('keeps the end of a long output, where a test runner puts its summary', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(
+      handle,
+      'for i in $(seq 1 2000); do echo "line $i of noise"; done; echo "FINAL SUMMARY"; exit 1',
+    );
+    expect(observed.output).toContain('FINAL SUMMARY');
+    expect(observed.output!.startsWith('...')).toBe(true);
+    expect(observed.output!.length).toBeLessThanOrEqual(4_100);
+  });
+
+  it('omits the field entirely when a command prints nothing', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(handle, 'exit 0');
+    expect(observed.output).toBeUndefined();
   });
 });

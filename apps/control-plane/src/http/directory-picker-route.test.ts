@@ -22,11 +22,7 @@ vi.mock('../local-system/directory-picker', () => ({
 }));
 
 import { POST } from '../../app/api/projects/import/select-directory/route';
-import {
-  authConfigFromEnv,
-  issueSession,
-  SESSION_COOKIE,
-} from '../auth/auth';
+import { authConfigFromEnv, issueSession, SESSION_COOKIE } from '../auth/auth';
 
 function browserRequest(
   overrides: { readonly origin?: string; readonly headers?: HeadersInit } = {},
@@ -56,10 +52,7 @@ describe('local directory picker API route', () => {
   beforeEach(() => {
     vi.stubEnv('NODE_ENV', 'development');
     vi.stubEnv('AGENTOS_PUBLIC_URL', 'http://localhost:3010');
-    vi.stubEnv(
-      'AGENTOS_SESSION_SECRET',
-      '0123456789abcdef0123456789abcdef',
-    );
+    vi.stubEnv('AGENTOS_SESSION_SECRET', '0123456789abcdef0123456789abcdef');
     vi.stubEnv('GITHUB_ALLOWED_LOGIN', 'operator');
     vi.stubEnv('AGENTOS_CLI_TOKEN', 'route-token');
     isLocalDirectoryPickerAvailable.mockReturnValue(true);

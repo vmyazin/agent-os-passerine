@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import type {
   ArtifactMetadata,
   ArtifactStore,
@@ -57,8 +59,20 @@ export interface FeatureRoleDefinition {
   readonly maxReservationMicrodollars?: number;
 }
 
+/** The roles a feature run needs: three always, two when the project asks. */
+export type RequiredFeatureRole =
+  'specification' | 'implementation' | 'verification';
+export type OptionalFeatureRole = 'planning' | 'review';
+
+/**
+ * A step is present when the project's feature pipeline declares it. Planning
+ * and review are optional: four real runs showed planning re-derived by the
+ * implementer and review vetoing code the acceptance tests then passed. A
+ * project that wants either keeps it by declaring the step.
+ */
 export type FeatureWorkflowRoles = Readonly<
-  Record<FeatureRole, FeatureRoleDefinition>
+  Record<RequiredFeatureRole, FeatureRoleDefinition> &
+    Partial<Record<OptionalFeatureRole, FeatureRoleDefinition>>
 >;
 
 export interface FeatureWorkflowInput {
@@ -196,7 +210,12 @@ export interface WorkflowVerifier {
     readonly definitionOfDone: JsonValue;
     readonly changeSet: JsonValue;
     readonly testEvidence: JsonValue;
-    readonly review: JsonValue;
+    /**
+     * Present only for callers that still pass one. Verification no longer
+     * reads it: review is advisory and runs after this gate, so a review
+     * cannot be a precondition of the check it is supposed to follow.
+     */
+    readonly review?: JsonValue;
     readonly trustedCommandObservation: TrustedCommandObservation;
   }): Promise<WorkflowVerificationResult>;
 }
@@ -212,6 +231,8 @@ export interface TrustedCommandObservation {
   readonly sourceSnapshotDigest: string;
   readonly changeSetDigest: string;
   readonly configDigest: string;
+  /** Diagnostic tail of what the command printed; never attested. */
+  readonly output?: string | undefined;
 }
 
 export interface WorkflowHandleSealer {
@@ -381,6 +402,20 @@ export interface WorkflowCheckpointStore {
     runId: string,
     now: string,
   ): Promise<readonly WorkflowBudgetReservation[]>;
+  /**
+   * Clears the checkpoints that would otherwise make a finished run refuse to
+   * continue, so an operator can resume it instead of paying to redo every
+   * step from the start.
+   *
+   * Succeeded effects are deliberately kept: they carry the approval that was
+   * already granted and the source snapshot that was already taken, and a
+   * succeeded step replays from its stored step run without ever reaching its
+   * effects. Only the unfinished ones -- including the dead-lettered effect
+   * whose whole purpose is to refuse a replay -- are released, together with
+   * the run's budget reservations and session lease, which a crash between
+   * settlement and cleanup can otherwise strand.
+   */
+  releaseRunForResume(runId: string): Promise<{ readonly released: number }>;
 }
 
 export interface DurableFeatureWorkflowDependencies {
@@ -399,6 +434,12 @@ export interface DurableFeatureWorkflowDependencies {
     }): Promise<{
       readonly resources: readonly RuntimeFileResource[];
       readonly credentialRefs: readonly string[];
+      /**
+       * True when the references live in this worker process's memory: the
+       * checkpoint then records that access was granted, but a replay in
+       * another process must prepare fresh instead of reusing them.
+       */
+      readonly ephemeral?: boolean;
     }>;
   };
   readonly approval: WorkflowApprovalWaiter;
@@ -423,6 +464,14 @@ export interface DurableFeatureWorkflowDependencies {
   ) => Promise<number>;
   readonly verifier: WorkflowVerifier;
   /**
+   * Refuses a Definition of Done whose acceptance tests cannot parse, before
+   * the approval is created. Injectable so a test can stub the subprocess;
+   * production uses `assertAcceptanceTestsParse`.
+   */
+  readonly checkAcceptanceTests?: (
+    tests: readonly { readonly path: string; readonly content: string }[],
+  ) => Promise<void>;
+  /**
    * Paths already present in the run's source bundle. The acceptance-test
    * overlay must be published as `modify`, not `add`, for a path the base
    * repository already carries (the publisher rejects an `add` whose target
@@ -442,4 +491,88 @@ export interface DurableFeatureWorkflowDependencies {
     readonly triggerRunId?: string;
   };
   readonly handleSealer?: WorkflowHandleSealer;
+}
+
+// --- executor ports -----------------------------------------------------
+//
+// These described a Trigger.dev deployment until 2026-09-03. They are ports,
+// not bindings: the workflow engine never imported the SDK, and the executor
+// behind them is now the in-process one. Names are unchanged for this change
+// so the removal stays reviewable; renaming them is its own follow-up (see
+// docs/superpowers/specs/2026-09-03-remove-trigger-design.md).
+
+export const featureTaskPayloadSchema = z
+  .object({
+    version: z.literal('feature-task-payload-v1'),
+    runId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+  })
+  .strict();
+
+export type FeatureTaskPayload = z.infer<typeof featureTaskPayloadSchema>;
+
+export const goalTaskPayloadSchema = z
+  .object({
+    version: z.literal('goal-task-payload-v1'),
+    runId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+  })
+  .strict();
+
+export type GoalTaskPayload = z.infer<typeof goalTaskPayloadSchema>;
+
+/**
+ * How an execution identifies itself to the workflow. `triggerRunId` is the
+ * executor's own reference for this attempt; the workflow only ever uses it
+ * to build the owner string that fences its side effects.
+ */
+export interface WorkflowExecutionContext {
+  readonly taskVersion: string;
+  readonly deploymentVersion: string;
+  readonly triggerRunId?: string;
+}
+
+export interface FeatureWorkflowTaskHandler {
+  run(
+    payload: FeatureTaskPayload,
+    execution?: WorkflowExecutionContext,
+  ): Promise<unknown>;
+}
+
+export interface GoalWorkflowTaskHandler {
+  run(
+    payload: GoalTaskPayload,
+    execution?: WorkflowExecutionContext,
+  ): Promise<unknown>;
+}
+
+/**
+ * What the outbox hands a run to. `retrieve` is read-only and best effort: an
+ * unknown reference answers `undefined` rather than throwing, because it
+ * exists to explain a page and must never be why one fails to render.
+ */
+export interface TriggerWorkflowDispatcher {
+  startFeature(
+    runId: string,
+    projectId: string,
+    attempt?: 0 | 1,
+    resumeGeneration?: number,
+  ): Promise<{ readonly externalRunRef: string }>;
+  startGoal(
+    runId: string,
+    projectId: string,
+    attempt?: 0 | 1,
+    resumeGeneration?: number,
+  ): Promise<{ readonly externalRunRef: string }>;
+  retrieve(
+    externalRunRef: string,
+  ): Promise<{ readonly status: string; readonly error?: string } | undefined>;
+  cancel(externalRunRef: string): Promise<void>;
+}
+
+/**
+ * The approval gate's wake signal. It reports only that something changed;
+ * the decision itself is always re-read from Postgres, so a waiter cannot
+ * approve anything.
+ */
+export interface TriggerApprovalWaiter extends WorkflowApprovalWaiter {
+  wake(id: string): Promise<void>;
 }

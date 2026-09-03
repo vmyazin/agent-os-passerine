@@ -30,12 +30,13 @@ export async function fetchActiveRunCount(): Promise<number> {
 export async function fetchRailCounts(): Promise<RailCounts | undefined> {
   try {
     const service = controlPlaneService();
-    const [inboxCount, waiting, projectCount, activeRunCount] = await Promise.all([
-      fetchInboxAttentionCount(),
-      service.countRunsByStatus('waiting'),
-      service.countProjects(),
-      fetchActiveRunCount(),
-    ]);
+    const [inboxCount, waiting, projectCount, activeRunCount] =
+      await Promise.all([
+        fetchInboxAttentionCount(),
+        service.countRunsByStatus('waiting'),
+        service.countProjects(),
+        fetchActiveRunCount(),
+      ]);
     return {
       inboxCount,
       waitingCount: waiting,

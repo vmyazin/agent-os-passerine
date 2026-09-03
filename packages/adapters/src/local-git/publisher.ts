@@ -207,7 +207,12 @@ function verifyAuthorization(
   at: Date,
 ): void {
   try {
-    validatePublicationAuthorization(parsed, verifier, at, 'local-git-publisher');
+    validatePublicationAuthorization(
+      parsed,
+      verifier,
+      at,
+      'local-git-publisher',
+    );
   } catch {
     rejected('Publication authorization is invalid or expired');
   }
@@ -457,7 +462,10 @@ export function createLocalGitPublisher(options: LocalGitPublisherOptions) {
     if (basename(repo) !== manifest.repository.name)
       rejected('Local repository name does not match the manifest');
 
-    const base = await runGit(repo, ['rev-parse', manifest.expectedBase.branch]);
+    const base = await runGit(repo, [
+      'rev-parse',
+      manifest.expectedBase.branch,
+    ]);
     if (base !== manifest.expectedBase.sha)
       rejected('Publication base changed');
 

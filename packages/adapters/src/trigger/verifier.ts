@@ -12,7 +12,6 @@ import { z } from 'zod';
 import {
   changeSetSchema,
   definitionOfDoneSchema,
-  reviewArtifactSchema,
   testEvidenceSchema,
 } from './schemas.js';
 import type { WorkflowVerifier } from './types.js';
@@ -30,6 +29,8 @@ const observationSchema = z
     sourceSnapshotDigest: digest,
     changeSetDigest: digest,
     configDigest: digest,
+    // Diagnostic only, and stripped before the evidence is attested.
+    output: z.string().max(8_000).optional(),
   })
   .strict();
 
@@ -50,13 +51,10 @@ export function createTrustedWorkflowVerifier(options: {
         );
         const changeSet = changeSetSchema.parse(input.changeSet);
         const testEvidence = testEvidenceSchema.parse(input.testEvidence);
-        const review = reviewArtifactSchema.parse(input.review);
         evaluatePublicationPolicy(
           changeSet.changes,
           options.policy ?? DEFAULT_PUBLICATION_POLICY,
         );
-        if (review.decision !== 'approved')
-          throw new Error('final trusted review is not approved');
         const changeSetDigest = hash(changeSet);
         const observed = observationSchema.parse(
           input.trustedCommandObservation,
@@ -77,16 +75,29 @@ export function createTrustedWorkflowVerifier(options: {
           observed.exitCode !== 0 ||
           Date.parse(observed.completedAt) < Date.parse(observed.startedAt)
         ) {
-          throw new Error('trusted test command failed');
+          // Carry what the command printed. Without it this reads "trusted
+          // test command failed" and the only way to learn which test failed,
+          // and why, is to rebuild the sandbox by hand.
+          throw new Error(
+            observed.output === undefined || observed.output.length === 0
+              ? `trusted test command failed (exit ${String(observed.exitCode)})`
+              : `trusted test command failed (exit ${String(observed.exitCode)}): ${observed.output}`,
+          );
         }
+        // The tail is diagnostic, not evidence: the attestation covers the
+        // command, its exit code and its bindings, exactly as before this
+        // field existed, so a report signed today means what one signed
+        // yesterday meant.
+        const attestedObservation: JsonValue = Object.fromEntries(
+          Object.entries(observed).filter(([key]) => key !== 'output'),
+        ) as JsonValue;
         const evidence: JsonValue = {
           version: 'workflow-verification-v3',
           runId: input.runId,
           definitionOfDone,
           changeSet,
           testEvidence,
-          trustedCommandObservation: observed,
-          review,
+          trustedCommandObservation: attestedObservation,
         };
         if (options.artifacts === undefined || options.attest === undefined)
           throw new Error('trusted verification attestation is not configured');

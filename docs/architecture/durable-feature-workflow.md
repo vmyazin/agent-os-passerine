@@ -18,35 +18,57 @@ session leases.
 2. The specification role writes a separately hashed specification plus
    `definition-of-done-v2` with one `test/acceptance/<id>.test.mjs` per
    criterion.
-3. The workflow creates a scope hash over the run, configuration, specification,
+3. Trusted code parses every acceptance test the specification wrote, with
+   `node --check`, which never executes them. A file that cannot parse fails
+   every implementation including a correct one, so the run stops here rather
+   than after an implementation has been paid for. This caught nothing that
+   review or verification would have caught earlier: both prior instances --
+   an import attribute Node removed, and a path that escaped the repository --
+   were found only after a full run, from an exit code with no output.
+4. The workflow creates a scope hash over the run, configuration, specification,
    and DoD. It stores a domain approval and a Trigger waitpoint reference. The
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
    The inbox shows the acceptance test file bodies.
-4. Planning, implementation/testing, review, and trusted verification use
-   distinct agents, environments, and runtime sessions. Each role receives the
-   exact source bundle (at most one MiB for the current POC runtime transport)
-   plus verified upstream artifacts as read-only mounted
-   files. Its Artifact MCP capability can write only to that role's logical
-   step scope. A requested fix gets one fresh
-   implementation session followed by a fresh final-review session; a final
-   `changes_requested` decision cannot publish.
-5. After implementation, trusted code seals the acceptance test files onto the
+5. Implementation receives the specification and Definition of Done directly.
+   A project may declare a `planning` step; when it does, planning runs first
+   and the plan is handed to implementation as well. Four real runs on
+   2026-09-02 showed the implementer re-deriving the plan from the
+   specification, so the default configurations no longer declare it.
+6. After implementation, trusted code seals the acceptance test files onto the
    change set (`sealed-changes`). Verification materializes the sealed set and
-   runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'` in a
-   separate, secretless Managed sandbox with only source/change inputs and Bash.
-   An implementer change under `test/acceptance/` is a permanent error. It can
-   reach only server-configured package registry hosts; lifecycle scripts are
-   disabled. The provider-observed exact install/test sequence and result are
-   bound into a signed, bounded report.
-6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
-   protected-path policy. A trusted publication authority—not an agent—creates
-   the publisher input. The GitHub App publisher revalidates the stale base and
-   creates only a draft PR.
+   runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'`
+   in a separate, secretless sandbox with only source/change inputs and Bash.
+   An implementer change under `test/acceptance/` is a permanent error. The
+   provider-observed exact install/test sequence and result are bound into a
+   signed, bounded report. On the process runtime this step starts no model
+   session: the sandbox is materialized and the command observed directly.
+7. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
+   protected-path policy. This is the gate.
+8. A project may declare a `review` step. When it does, review runs here,
+   after the gate, and never blocks: its findings are shown on the run page
+   for the operator who merges. A review that requests changes, or a review
+   session that fails or cannot be admitted under the budget, is recorded on
+   its step and the run publishes anyway. Until 2026-09-03 review ran before
+   verification and a `changes_requested` re-review failed the run; the run
+   that motivated the change was blocked by a finding that was true of `||`
+   and false of `??`, on code the acceptance tests then passed.
+9. A trusted publication authority -- not an agent -- creates the publisher
+   input. The GitHub App publisher revalidates the stale base and creates only
+   a draft PR.
 
 No runtime request contains GitHub App, branch-push, merge, or publication
 credentials. Agent outputs are bounded JSON results containing artifact
-manifests; raw reasoning and secrets are not persisted as domain events.
+manifests, and reasoning is not persisted.
+
+Two operator-facing exceptions are deliberate, because a feed that says only
+"the model sent a message" cannot explain the failure it is describing. A
+step's progress notes carry the model's message text, and its completed note
+carries the step's schema-validated result with artifact manifests summarized.
+Both are stripped of control characters, collapsed to one line, and bounded,
+so neither can forge feed structure or flood the run page. Both are
+provider-influenced text: read them as something the model said, never as
+instruction.
 
 Local experiment projects (`project.localPath` instead of
 `project.repository`) swap only the two edges of the pipeline: source
@@ -105,7 +127,7 @@ chained onto the last.
 `advanceBacklog` (`packages/core/src/backlog.ts`) is the whole scheduler as
 one pure function over durable state: given a backlog, its items in order,
 and the runs those items produced, is there an item to start now and on what
-base? Reconciliation calls it per project *after* its run scan — an item's
+base? Reconciliation calls it per project _after_ its run scan — an item's
 run may have just been settled by that scan — and acts on the answer:
 dispatch through the ordinary `createFeatureRun` with `baseRunId`, complete
 the backlog, or pause it.
@@ -165,12 +187,6 @@ model/rate configuration digest when available and otherwise charges the full
 reservation before releasing the fence, so a killed worker cannot silently
 erase paid usage or admit a second paid session.
 
-Trigger retries the version-locked task at most once. Invalid inputs,
-unregistered composition, and unclassified handler failures use Trigger's
-`AbortTaskRunError`; only the stable `FeatureWorkflowTaskTransientError`
-explicitly opts a bootstrap failure into that retry. Agent session retries are
-likewise restricted to the runner's classified transient errors.
-
 The control plane uses pending runs, atomic approval events, and atomic
 `run.cancelled` events as durable outbox intents. The authenticated internal
 route `/api/internal/workflows/reconcile` redelivers them. Trigger and waitpoint
@@ -204,9 +220,61 @@ cancellation therefore cannot silently release uncharged capacity. Usage
 records persist ordinary input/output, cache reads, distinct 5-minute and
 1-hour cache-creation buckets, runtime, and the pricing algorithm/config
 version. Integer-safe ceiling prices every bucket; undifferentiated legacy
-cache creation is conservatively charged at the 1-hour rate. Trigger
-queue concurrency is defense in depth; it is not the budget or concurrency
-authority.
+cache creation is conservatively charged at the 1-hour rate. Budget admission is the concurrency authority.
+
+## The executor
+
+A run executes inside the control-plane process. Trigger.dev coordinated runs
+until 2026-09-03 and was removed
+([design](../superpowers/specs/2026-09-03-remove-trigger-design.md)): the
+workflow engine never imported its SDK, the waitpoint was only a wake signal,
+and Postgres was already authoritative for runs, steps, approvals, effects,
+leases and budgets. What Trigger scheduled, an in-process dispatcher now
+schedules.
+
+Sessions run in the process sandbox against the model API directly, artifacts
+are files under `AGENTOS_LOCAL_STATE_DIR`, the artifact MCP is a function
+call, and approvals wake by polling the approval row. Local projects only: a
+GitHub-bound project is refused by name, because the pairing of the GitHub
+reader and publisher with this executor has never been exercised.
+
+Three consequences, all of them the price of having no worker:
+
+- A run does not outlive the control plane. Close it mid-run and recovery
+  re-dispatches that run on the next start, replaying finished steps and
+  re-running the interrupted one, so one step is paid for twice.
+- One process, one machine. There is no scale-out.
+- A long approval needs the app running, or the run is recovered and replays
+  to the approval when it returns.
+
+What did not change is everything that decides whether a change is safe: role
+isolation, budget admission, the sealed acceptance tests, the signed
+trusted-test-report and the publication authority. None of them were the
+scheduler's.
+
+## Previewing what a run delivered
+
+A finished local run leaves an `agentos/<run>` branch. Reading a diff answers
+whether the change looks right; it does not answer whether the thing runs.
+
+```sh
+pnpm preview <runId> [--port 4173] [--script dev]
+```
+
+It reads the run's own outcome for the branch and repository, checks the
+branch out detached in a scratch worktree, installs, and starts whatever
+dev/start script the project declares, printing the URL. A project with no
+such script gets its checkout left in place with the command to run its tests
+and the command to discard it. Ctrl+C stops the server and removes the
+worktree; the operator's own checkout is never touched and the branch is never
+moved.
+
+This runs model-written code on the operator's machine, outside the sandbox
+the pipeline keeps it inside. The run's sealed verification has already run
+the project's suite and the frozen acceptance tests in that sandbox, so this
+is for looking at the result rather than for deciding whether it is safe.
+A GitHub-bound run has nothing to preview locally: its result is a draft pull
+request.
 
 ## Local verification
 
@@ -226,9 +294,6 @@ Set `TEST_DATABASE_URL` to include the PostgreSQL checkpoint/admission contract
 in `pnpm test:integration`. Normal CI uses fake Trigger, runtime, artifact, and
 publisher boundaries and makes no paid model or cloud calls.
 
-For Trigger.dev local development, set `TRIGGER_PROJECT_REF`,
-`TRIGGER_SECRET_KEY`, and `DATABASE_URL`, then run `pnpm trigger:dev`. The task
-registers a lazy, fail-closed production handler at module load.
 `createProductionFeatureWorkflowFromEnv` wires Neon domain/checkpoint stores,
 R2 plus its durable manifest, Managed Agents, scoped Artifact MCP vaults, the
 isolated command-observation verifier, publication authorization, and the
@@ -238,10 +303,10 @@ Trigger worker. The control plane uses the same Neon repository and
 handle-sealing key for cancellation reconciliation. Missing secrets fail only
 when execution needs the component, never silently during Trigger discovery.
 
-Production feature configuration must contain exact `specification`,
-`planning`, `implementation`, `review`, and `verification` step IDs, each with
-a separate limited-network environment. The first four may use only the
-`artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
+Production feature configuration must contain `specification`,
+`implementation`, and `verification` step IDs, and may declare `planning` and
+`review`; each declared role needs a separate limited-network environment.
+Every role but verification may use only the `artifacts` MCP alias. Verification must be Bash-only with no MCP, configured
 variables, or YAML-selected network/package capabilities. Trusted server
 configuration supplies its exact package-registry host allowlist. Managed
 Agents' broad package-manager registry bypass remains disabled; `pnpm` reaches

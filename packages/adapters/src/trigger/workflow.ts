@@ -16,6 +16,7 @@ import {
   type RuntimeHandle,
   type RuntimeOutput,
   type RuntimeUsage,
+  type DomainEvent,
   type StepRun,
   type UsageRecordEntry,
   type WorkflowRun,
@@ -23,6 +24,7 @@ import {
 } from '@agentos/core';
 import type { ZodType } from 'zod';
 
+import { assertAcceptanceTestsParse } from './acceptance-test-check.js';
 import {
   artifactSchemaFailureMessage,
   changeSetSchema,
@@ -77,11 +79,14 @@ function parseRuntimeAccess(value: JsonValue | undefined): {
     readonly mountPath?: string;
   }[];
   readonly credentialRefs: readonly string[];
+  /** Process-local references that do not survive into another worker. */
+  readonly ephemeral?: boolean;
 } {
   if (
     !isJsonObject(value) ||
     !Array.isArray(value.resources) ||
-    !Array.isArray(value.credentialRefs)
+    !Array.isArray(value.credentialRefs) ||
+    (value.ephemeral !== undefined && typeof value.ephemeral !== 'boolean')
   )
     throw new WorkflowPermanentError('runtime access checkpoint is invalid');
   const resources = value.resources.map((resource) => {
@@ -115,7 +120,11 @@ function parseRuntimeAccess(value: JsonValue | undefined): {
   });
   if (resources.length > 32 || credentialRefs.length > 4)
     throw new WorkflowPermanentError('runtime access checkpoint is invalid');
-  return { resources, credentialRefs };
+  return {
+    resources,
+    credentialRefs,
+    ...(value.ephemeral === true ? { ephemeral: true } : {}),
+  };
 }
 
 const hash = (value: unknown): string =>
@@ -137,8 +146,46 @@ function triggerWaitDuration(deadlineMs: number, now: string): string {
   return `${String(remainingSeconds)}s`;
 }
 
+/**
+ * What actually went wrong, in terms an operator can act on.
+ *
+ * The database driver prefixes a failure with the whole statement and its
+ * parameters, so the message an operator was shown was the query rather than
+ * the reason -- a run reported "Failed query: select ... from approvals"
+ * while the cause underneath went unmentioned. The statement is dropped and
+ * the cause is reported in its place.
+ */
+function describedError(error: unknown): string {
+  if (!(error instanceof Error)) return 'workflow operation failed';
+  if (!error.message.startsWith('Failed query:')) return error.message;
+  const cause = error.cause;
+  const reason = cause instanceof Error ? cause.message.trim() : '';
+  return reason === ''
+    ? 'a database statement failed'
+    : `a database statement failed: ${reason}`;
+}
+
+/**
+ * The run's recorded reason for a failed gate.
+ *
+ * Keeps the END of the findings, not the beginning. A test runner prints its
+ * failures and its summary last, and every bound between here and the run
+ * record truncates from the front, so a head-first message would reliably
+ * discard the only part worth reading.
+ */
+function verificationFailureMessage(
+  findings: readonly string[] | undefined,
+): string {
+  const prefix = 'trusted verification failed';
+  const joined = (findings ?? []).join('; ');
+  if (joined.length === 0) return prefix;
+  const room = 700;
+  const tail = joined.length > room ? `...${joined.slice(-room)}` : joined;
+  return `${prefix}: ${tail}`;
+}
+
 function safeError(error: unknown): string {
-  return (error instanceof Error ? error.message : 'workflow operation failed')
+  return describedError(error)
     .replace(
       /((?:token|secret|password|private.?key))\s*[:=]\s*\S+/gi,
       '$1=[REDACTED]',
@@ -186,6 +233,7 @@ function assertRoleIsolation(
   const environmentIds = new Set<string>();
   for (const role of Object.keys(roles) as FeatureRole[]) {
     const definition = roles[role];
+    if (definition === undefined) continue;
     if (agentIds.has(definition.agent.id))
       throw new WorkflowPermanentError(
         'feature roles must use separate agents',
@@ -386,6 +434,116 @@ async function claimEffect(
   };
 }
 
+/**
+ * An operator can grant a run a one-time allowance to carry it past a budget
+ * that stopped it. The grant is an append-only event on the run, so it is
+ * auditable, it cannot be applied to a different run, and re-reading it is
+ * what makes it survive a worker restart.
+ *
+ * The allowance raises the limits used for both admission and settlement, so
+ * a run admitted under an override is also allowed to settle under it -- a
+ * grant that only moved the admission gate would let a step run and then fail
+ * for spending what it was just permitted to spend.
+ */
+export const BUDGET_OVERRIDE_EVENT = 'run.budget_override_granted';
+
+/** Appended by the control plane when an operator resumes a finished run. */
+export const RUN_RESUMED_EVENT = 'run.resumed';
+
+async function latestResumeMs(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  let latest = 0;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== RUN_RESUMED_EVENT) return;
+    const at = Date.parse(event.occurredAt);
+    if (Number.isFinite(at) && at > latest) latest = at;
+  });
+  return latest;
+}
+
+/**
+ * How many times an operator has resumed this run. Attempt numbering restarts
+ * on resume, so anything keyed by (step, attempt) that must survive across
+ * executions -- the usage ledger -- needs the generation in its identity: the
+ * previous execution's attempt 1 is money already spent, this execution's
+ * attempt 1 is new money, and one may never overwrite the other.
+ */
+async function resumeGenerationOf(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  let generation = 0;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== RUN_RESUMED_EVENT) return;
+    const value = payloadField(event.payload, 'generation');
+    generation =
+      typeof value === 'number' && Number.isSafeInteger(value)
+        ? Math.max(generation, value)
+        : generation + 1;
+  });
+  return generation;
+}
+
+/**
+ * Visits every event of a run, however many there are. The repositories clamp
+ * a single listing to a bounded page, so a one-shot list silently reads only
+ * a run's earliest events -- and control signals (budget overrides, resumes)
+ * are appended late, after the operational chatter. A signal that falls off
+ * the first page must still be seen: a resume read at the wrong generation
+ * collided with the usage ledger, live.
+ */
+async function scanRunEvents(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+  visit: (event: DomainEvent) => void,
+): Promise<void> {
+  let after: number | undefined;
+  for (let pages = 0; pages < 1_000; pages += 1) {
+    const events = await dependencies.repository.listEvents(
+      persistenceId('run', runId),
+      { limit: 1_000, ...(after === undefined ? {} : { after }) },
+    );
+    if (events.length === 0) return;
+    for (const event of events) visit(event);
+    const last = events[events.length - 1]!.sequence;
+    if (after !== undefined && last <= after)
+      throw new WorkflowPermanentError('run events did not paginate forward');
+    after = last;
+  }
+  throw new WorkflowPermanentError('run has too many events to scan');
+}
+
+async function grantedBudgetOverride(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<number> {
+  let granted = 0;
+  await scanRunEvents(dependencies, runId, (event) => {
+    if (event.type !== BUDGET_OVERRIDE_EVENT) return;
+    const amount = payloadField(event.payload, 'microdollars');
+    if (typeof amount !== 'number' || !Number.isSafeInteger(amount)) return;
+    if (amount <= 0) return;
+    granted += amount;
+  });
+  return granted;
+}
+
+async function budgetLimitsWithOverrides(
+  dependencies: DurableFeatureWorkflowDependencies,
+  runId: string,
+): Promise<ReturnType<typeof resolveWorkflowBudgetLimits>> {
+  const base = resolveWorkflowBudgetLimits(dependencies);
+  const granted = await grantedBudgetOverride(dependencies, runId);
+  if (granted === 0) return base;
+  return {
+    ...base,
+    workflowLimitMicrodollars: base.workflowLimitMicrodollars + granted,
+    dailyLimitMicrodollars: base.dailyLimitMicrodollars + granted,
+  };
+}
+
 async function sumWorkflowUsage(
   dependencies: DurableFeatureWorkflowDependencies,
   runId: string,
@@ -465,6 +623,20 @@ interface StepProgressContext {
   readonly stepRunId: StepRun['id'];
   readonly stepKey: string;
   readonly attempt: number;
+  /**
+   * Attempt numbering restarts on resume, and progress events are deduped by
+   * id. Without the generation, a resumed attempt's activity collides with
+   * the failed execution's ids and the operator's feed silently freezes at
+   * the run's first execution.
+   */
+  readonly resumeGeneration?: number;
+  /**
+   * The model this step is running on. Named in every note about the model so
+   * a reader of the feed can tell which one is doing the work: a run may route
+   * different roles to different models, and "the model is using bash" is a
+   * much less useful sentence than naming it.
+   */
+  readonly model?: string;
 }
 
 async function recordStepProgress(
@@ -488,7 +660,11 @@ async function recordStepProgress(
     runId: persistenceId('run', runId),
     eventId: persistenceId(
       'event',
-      `step-progress:${runId}:${step.stepKey}:${String(step.attempt)}:${eventKey}`,
+      `step-progress:${runId}:${step.stepKey}:${String(step.attempt)}:${
+        (step.resumeGeneration ?? 0) === 0
+          ? ''
+          : `resume:${String(step.resumeGeneration)}:`
+      }${eventKey}`,
     ),
     fingerprint: hash({ type, payload }),
     type,
@@ -497,37 +673,251 @@ async function recordStepProgress(
   });
 }
 
+/**
+ * A tool name reaches us on the provider event stream, so it is rendered only
+ * when it still looks like a tool identifier. Anything else keeps the unnamed
+ * wording instead of putting provider-controlled text in front of the
+ * operator, and no other part of a runtime payload is ever persisted.
+ */
+const RUNTIME_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/;
+
+/**
+ * Runtime error codes are a closed set the providers normalize into, so the
+ * operator can be told which failure this was. A provider's own free-text
+ * error message is never rendered.
+ */
+const RUNTIME_ERROR_NOTES = new Map<string, string>([
+  ['model_rate_limited_error', 'Model provider rate limited the session'],
+  ['model_overloaded_error', 'Model provider was overloaded'],
+  ['model_request_failed_error', 'Model request failed'],
+  ['mcp_connection_failed_error', 'Tool server connection failed'],
+  ['mcp_authentication_failed_error', 'Tool server rejected authentication'],
+  ['billing_error', 'Model provider rejected the request for billing'],
+  ['credential_host_unreachable_error', 'Credential host was unreachable'],
+  ['turn_limit', 'Model used up its turns without finishing'],
+]);
+
+const MAX_PROGRESS_SAMPLES_PER_NOTE = 3;
+/** Distinct notes are bounded, but keep one attempt's feed readable anyway. */
+const MAX_PROGRESS_NOTES_PER_ATTEMPT = 60;
+const MAX_TRACKED_TOOL_CALLS = 64;
+
+function payloadField(payload: unknown, key: string): unknown {
+  return typeof payload === 'object' && payload !== null
+    ? Reflect.get(payload, key)
+    : undefined;
+}
+
+function runtimeToolName(payload: unknown, key: string): string | undefined {
+  const value = payloadField(payload, key);
+  return typeof value === 'string' && RUNTIME_TOOL_NAME.test(value)
+    ? value
+    : undefined;
+}
+
+function runtimeToolUseId(payload: unknown): string | undefined {
+  const value = payloadField(payload, 'toolUseId');
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+    ? value
+    : undefined;
+}
+
+interface RuntimeProgressNote {
+  readonly phase: StepProgressPhase;
+  readonly message: string;
+  /**
+   * Distinguishes notes that share an event type -- one per tool, and a
+   * failing tool apart from a succeeding one -- so each is sampled on its
+   * own instead of the first three events of a type hiding the rest.
+   */
+  readonly variant: string;
+}
+
+/**
+ * Rewrites a note that opens by saying "Model" so it says which model. The
+ * subject is the only thing that changes; tool-centric notes ("bash finished")
+ * are already specific and are left alone.
+ */
+function withModelName(
+  note: RuntimeProgressNote | undefined,
+  model: string | undefined,
+): RuntimeProgressNote | undefined {
+  if (note === undefined) return undefined;
+  if (model === undefined || model.length === 0 || model.length > 64)
+    return note;
+  if (!note.message.startsWith('Model')) return note;
+  return {
+    ...note,
+    message: `Model (${model})${note.message.slice('Model'.length)}`,
+  };
+}
+
+/** Hard ceiling on the rendered result carried in a progress note. */
+const MAX_RESULT_NOTE_CHARS = 320;
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
+
+/**
+ * Makes a provider-supplied string safe to put in one line of the operator's
+ * feed: no control characters to forge structure, no newlines to fake a
+ * separate note, no runs of whitespace to pad it out of view.
+ */
+function sanitizeForNote(text: string): string {
+  return text.replace(CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Renders a step's validated result for the operator's activity feed.
+ *
+ * Two things make this safe to show where raw model text is not. It is the
+ * schema-validated result, so its shape is known rather than provider-chosen;
+ * and every string that survives is stripped of control characters, collapsed
+ * to single spaces, and bounded, so a crafted value cannot forge feed
+ * structure or smuggle a wall of text into the run page.
+ *
+ * Artifact references are summarized rather than printed. A manifest entry is
+ * ten fields of key, digest and timestamps; what a reader wants to know is
+ * that the step produced `plan`, and how big it was.
+ */
+function describeStepResult(value: unknown): string | undefined {
+  const clean = sanitizeForNote;
+  const summarize = (input: unknown, depth: number): unknown => {
+    if (depth > 4) return '...';
+    if (typeof input === 'string') return clean(input).slice(0, 120);
+    if (input === null || typeof input !== 'object') return input;
+    if (Array.isArray(input))
+      return input.slice(0, 8).map((entry) => summarize(entry, depth + 1));
+    const record = input as Record<string, unknown>;
+    if (
+      typeof record.artifactId === 'string' &&
+      typeof record.key === 'string' &&
+      typeof record.sizeBytes === 'number'
+    )
+      return `artifact ${clean(record.artifactId)} v${String(record.version ?? 1)}, ${String(record.sizeBytes)} B`;
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record).slice(0, 12))
+      out[clean(key).slice(0, 40)] = summarize(entry, depth + 1);
+    return out;
+  };
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(summarize(value, 0)) ?? '';
+  } catch {
+    return undefined;
+  }
+  if (rendered.length === 0 || rendered === '{}') return undefined;
+  return rendered.length > MAX_RESULT_NOTE_CHARS
+    ? `${rendered.slice(0, MAX_RESULT_NOTE_CHARS)}...`
+    : rendered;
+}
+
+/** Ceiling on model prose carried into a progress note. */
+const MAX_MESSAGE_NOTE_CHARS = 240;
+
+/**
+ * The text of a model message, if the provider reported one. Providers name
+ * this field differently, so the three known spellings are tried before
+ * giving up and leaving the note unqualified.
+ */
+function runtimeMessageText(payload: unknown): string | undefined {
+  for (const field of ['detail', 'text', 'message']) {
+    const value = payloadField(payload, field);
+    if (typeof value !== 'string') continue;
+    const cleaned = sanitizeForNote(value);
+    if (cleaned.length === 0) continue;
+    return cleaned.length > MAX_MESSAGE_NOTE_CHARS
+      ? `${cleaned.slice(0, MAX_MESSAGE_NOTE_CHARS)}...`
+      : cleaned;
+  }
+  return undefined;
+}
+
 function runtimeProgress(
-  type: RuntimeEvent['type'],
-): readonly [phase: StepProgressPhase, message: string] | undefined {
-  switch (type) {
-    case 'message':
+  event: RuntimeEvent,
+  toolCalls: ReadonlyMap<string, string>,
+): RuntimeProgressNote | undefined {
+  const note = (
+    phase: StepProgressPhase,
+    message: string,
+    variant = '',
+  ): RuntimeProgressNote => ({ phase, message, variant });
+  switch (event.type) {
+    case 'message': {
+      // Provider-authored text, shown deliberately. The failure this diagnoses
+      // -- a model answering in prose instead of submitting its result -- is
+      // unreadable without it, and "Model sent a message" is exactly the note
+      // that leaves an operator with nothing to go on. It is sanitized and
+      // bounded like any other rendered value, and it is data: a reader should
+      // treat it as something the model said, never as instruction.
+      const text = runtimeMessageText(event.payload);
+      return text === undefined
+        ? note('working', 'Model sent a message')
+        : note('working', `Model sent a message: ${text}`);
+    }
     case 'thread_message':
+      return note('working', 'Subagent exchanged a message');
     case 'message_summary':
+      return note('working', 'Model compacted its context');
     case 'progress':
-      return ['working', 'Model sent a progress update'];
-    case 'tool_call':
-      return ['tool', 'Model is using a tool'];
-    case 'tool_result':
-      return ['tool', 'Tool finished'];
+      return note('working', 'Model is thinking');
+    case 'tool_call': {
+      const tool = runtimeToolName(event.payload, 'name');
+      if (tool === undefined) return note('tool', 'Model is using a tool');
+      const server = runtimeToolName(event.payload, 'mcpServerName');
+      return note(
+        'tool',
+        server === undefined
+          ? `Model is using ${tool}`
+          : `Model is using ${tool} via ${server}`,
+        tool,
+      );
+    }
+    case 'tool_result': {
+      const failed = payloadField(event.payload, 'isError') === true;
+      const linked = runtimeToolUseId(event.payload);
+      const tool =
+        runtimeToolName(event.payload, 'name') ??
+        (linked === undefined ? undefined : toolCalls.get(linked));
+      if (tool === undefined)
+        return note(
+          'tool',
+          failed ? 'A tool reported an error' : 'Tool finished',
+          failed ? 'failed' : '',
+        );
+      return note(
+        'tool',
+        failed ? `${tool} reported an error` : `${tool} finished`,
+        failed ? `${tool}:failed` : tool,
+      );
+    }
     case 'input_acknowledged':
-      return ['waiting', 'Model received the request'];
+      return note('waiting', 'Model received the request');
     case 'running':
     case 'thread_running':
-      return ['working', 'Model is working'];
+      return note('working', 'Model is working');
     case 'rescheduling':
     case 'thread_rescheduling':
-      return ['waiting', 'Model session is rescheduling'];
+      return note('waiting', 'Model session is rescheduling');
     case 'requires_action':
-      return ['waiting', 'Model requested an action'];
-    case 'error':
+      return note('waiting', 'Model requested an action');
     case 'retries_exhausted':
-      return ['failed', 'Model session reported an error'];
+      return note('failed', 'Model session ran out of provider retries');
+    case 'error': {
+      const code =
+        payloadField(event.payload, 'code') ??
+        payloadField(event.payload, 'reason');
+      const named =
+        typeof code === 'string' ? RUNTIME_ERROR_NOTES.get(code) : undefined;
+      return named === undefined
+        ? note('failed', 'Model session reported an error')
+        : note('failed', named, named);
+    }
     case 'idle':
     case 'terminated':
     case 'thread_idle':
     case 'thread_terminated':
-      return ['working', 'Model response received'];
+      return note('working', 'Model response received');
     default:
       return undefined;
   }
@@ -540,7 +930,9 @@ async function consumeEvents(
   step: StepProgressContext,
 ): Promise<void> {
   let count = 0;
-  const progressCounts = new Map<RuntimeEvent['type'], number>();
+  let notes = 0;
+  const progressCounts = new Map<string, number>();
+  const toolCalls = new Map<string, string>();
   for await (const event of dependencies.runtime.events(handle)) {
     const run = await dependencies.repository.getRun(
       persistenceId('run', runId),
@@ -565,21 +957,35 @@ async function consumeEvents(
     ) {
       throw new WorkflowPermanentError('runtime emitted a malformed event');
     }
-    const progress = runtimeProgress(event.type);
-    if (progress !== undefined) {
-      const occurrence = (progressCounts.get(event.type) ?? 0) + 1;
-      progressCounts.set(event.type, occurrence);
+    if (event.type === 'tool_call' && toolCalls.size < MAX_TRACKED_TOOL_CALLS) {
+      // Result events carry the id of the call they answer but not its name,
+      // so remember the mapping to name the tool that just finished.
+      const toolUseId = runtimeToolUseId(event.payload);
+      const toolName = runtimeToolName(event.payload, 'name');
+      if (toolUseId !== undefined && toolName !== undefined)
+        toolCalls.set(toolUseId, toolName);
+    }
+    const progress = withModelName(
+      runtimeProgress(event, toolCalls),
+      step.model,
+    );
+    if (progress !== undefined && notes < MAX_PROGRESS_NOTES_PER_ATTEMPT) {
+      const variantKey = `${event.type}:${progress.variant}`;
+      const occurrence = (progressCounts.get(variantKey) ?? 0) + 1;
+      progressCounts.set(variantKey, occurrence);
       // Provider streams can emit thousands of repetitive message/tool
-      // updates. Three samples per event type preserve the operational story
+      // updates. Sampling each distinct note -- so every tool the model
+      // reaches for is named at least once -- preserves the operational story
       // without letting progress crowd newer run events out of the page read.
-      if (occurrence <= 3) {
+      if (occurrence <= MAX_PROGRESS_SAMPLES_PER_NOTE) {
+        notes += 1;
         await recordStepProgress(
           dependencies,
           runId,
           step,
-          `runtime:${event.type}:${String(occurrence)}`,
-          progress[0],
-          progress[1],
+          `runtime:${variantKey}:${String(occurrence)}`,
+          progress.phase,
+          progress.message,
           event.occurredAt.toISOString(),
         );
       }
@@ -612,6 +1018,20 @@ const TRANSIENT_ERROR_CODES = new Set<unknown>([
   504,
 ]);
 
+/**
+ * The serverless database driver reports a lost or refused connection as a
+ * bare `fetch failed`, with no code anywhere in the chain to recognise it by.
+ * Left unclassified it reads as a permanent workflow failure, which retries
+ * nothing and discards the run's remaining work over a blip.
+ */
+const TRANSIENT_ERROR_MESSAGES = [
+  'fetch failed',
+  'terminating connection',
+  'connection terminated',
+  'socket hang up',
+  'network error',
+];
+
 function isTransientOperationError(error: unknown): boolean {
   let candidate = error;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -624,6 +1044,45 @@ function isTransientOperationError(error: unknown): boolean {
       (typeof code === 'string' && code.startsWith('08'))
     )
       return true;
+    const message = Reflect.get(candidate, 'message');
+    if (
+      typeof message === 'string' &&
+      TRANSIENT_ERROR_MESSAGES.some((known) =>
+        message.toLowerCase().includes(known),
+      )
+    )
+      return true;
+    candidate = Reflect.get(candidate, 'cause');
+  }
+  return false;
+}
+
+/**
+ * Statuses that mean the provider refused the create request outright, so no
+ * session exists and no model time was bought. Ambiguous outcomes -- a
+ * timeout, throttling, a conflict, any server fault -- are deliberately
+ * absent: those keep the conservative "charge the reservation" behaviour
+ * because a session may well be running and spending.
+ */
+const DEFINITE_START_REJECTIONS = new Set([400, 401, 403, 404, 422]);
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    if (Reflect.get(candidate, 'code') === code) return true;
+    candidate = Reflect.get(candidate, 'cause');
+  }
+  return false;
+}
+
+function isDefiniteStartRejection(error: unknown): boolean {
+  let candidate = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof candidate !== 'object' || candidate === null) return false;
+    const status = Reflect.get(candidate, 'status');
+    if (typeof status === 'number')
+      return DEFINITE_START_REJECTIONS.has(status);
     candidate = Reflect.get(candidate, 'cause');
   }
   return false;
@@ -662,6 +1121,42 @@ async function withTimeout<T>(
   }
 }
 
+/**
+ * A review that could not run is a fact the operator should see on the step,
+ * not a reason to discard verified work. Admission refusals throw before the
+ * step run is marked, leaving it pending, so this records the reason there.
+ */
+async function recordAdvisoryReviewFailure(
+  dependencies: DurableFeatureWorkflowDependencies,
+  workflow: FeatureWorkflowInput,
+  error: unknown,
+): Promise<void> {
+  const steps = await dependencies.repository.listStepRuns(
+    persistenceId('run', workflow.runId),
+    { limit: 100 },
+  );
+  const failure =
+    error instanceof WorkflowBudgetExhaustedError
+      ? { code: 'budget_exhausted', reason: error.reason }
+      : {
+          code: 'review_unavailable',
+          message:
+            error instanceof Error
+              ? error.message.slice(0, 500)
+              : 'review step did not complete',
+        };
+  for (const step of steps) {
+    if (step.stepKey !== 'review' || step.status === 'succeeded') continue;
+    await dependencies.repository.upsertStepRun({
+      ...step,
+      status: 'failed',
+      error: asJson(failure),
+      updatedAt: at(dependencies.clock()),
+      completedAt: at(dependencies.clock()),
+    });
+  }
+}
+
 async function runAgentStep<T>(
   dependencies: DurableFeatureWorkflowDependencies,
   workflow: FeatureWorkflowInput,
@@ -678,6 +1173,10 @@ async function runAgentStep<T>(
   ) => Promise<unknown>,
 ): Promise<T> {
   const inputFingerprint = hash(input);
+  const resumeGeneration = await resumeGenerationOf(
+    dependencies,
+    workflow.runId,
+  );
   const existing = await dependencies.repository.listStepRuns(
     persistenceId('run', workflow.runId),
     { limit: 100 },
@@ -717,6 +1216,10 @@ async function runAgentStep<T>(
     );
     const now = at(dependencies.clock());
     const roleDefinition = dependencies.roles[role];
+    if (roleDefinition === undefined)
+      throw new WorkflowPermanentError(
+        `feature role '${role}' is not declared by this project`,
+      );
     const prior = existing.find(
       (candidate) =>
         candidate.stepKey === stepKey && candidate.attempt === attempt,
@@ -764,6 +1267,8 @@ async function runAgentStep<T>(
       stepRunId: stepId,
       stepKey,
       attempt,
+      resumeGeneration,
+      model: roleDefinition.agent.model,
     };
     const effectKey = `runtime:${workflow.runId}:${stepKey}:${String(attempt)}`;
     const claim = await claimEffect(
@@ -818,8 +1323,12 @@ async function runAgentStep<T>(
       continue;
     }
 
-    const budgetLimits = resolveWorkflowBudgetLimits(dependencies);
-    const projectDailyUsage = resolveProjectDailyUsageMicrodollars(dependencies);
+    const budgetLimits = await budgetLimitsWithOverrides(
+      dependencies,
+      workflow.runId,
+    );
+    const projectDailyUsage =
+      resolveProjectDailyUsageMicrodollars(dependencies);
     const workflowSpent = await sumWorkflowUsage(dependencies, workflow.runId);
     const dailySpent = await projectDailyUsage(
       dependencies.clock(),
@@ -920,9 +1429,18 @@ async function runAgentStep<T>(
           }
         }
         usageDraft = {
+          // Attempt numbering restarts on resume, but the previous
+          // execution's records are money already spent: this attempt's
+          // record needs its own identity or the append conflicts with
+          // history and kills the run. Generation zero renders the exact id
+          // every record before resume existed was written under.
           idempotencyId: persistenceId(
             'usage',
-            `usage:${workflow.runId}:${stepKey}:${String(attempt)}`,
+            `usage:${workflow.runId}:${stepKey}:${String(attempt)}${
+              resumeGeneration === 0
+                ? ''
+                : `:resume:${String(resumeGeneration)}`
+            }`,
           ),
           runId: persistenceId('run', workflow.runId),
           stepRunId: stepId,
@@ -974,8 +1492,31 @@ async function runAgentStep<T>(
           ),
           2 * 60_000,
         );
-        if (accessClaim.effect.status === 'succeeded') {
-          runtimeAccess = parseRuntimeAccess(accessClaim.effect.output);
+        const storedAccess =
+          accessClaim.effect.status === 'succeeded'
+            ? parseRuntimeAccess(accessClaim.effect.output)
+            : undefined;
+        if (storedAccess !== undefined && storedAccess.ephemeral !== true) {
+          runtimeAccess = storedAccess;
+        } else if (storedAccess !== undefined) {
+          // The checkpoint is real but its references are process-local --
+          // staged in whichever worker completed it, gone with that worker.
+          // Managed uploads are remote and reusable; local staging is cheap
+          // and side-effect-free, so a fresh preparation is the correct
+          // replay, and the succeeded effect stays as the record that access
+          // was granted.
+          runtimeAccess = parseRuntimeAccess(
+            asJson(
+              await dependencies.runtimeAccess.prepare({
+                workflow,
+                stepId,
+                logicalStepId: stepKey,
+                role,
+                stepInput: input,
+                idempotencyKey: accessKey,
+              }),
+            ),
+          );
         } else {
           await dependencies.checkpoints.markEffectStarted(
             accessClaim.lease,
@@ -1063,8 +1604,22 @@ async function runAgentStep<T>(
               throw startError;
             }
             const classified = classifiedRuntimeError(startError);
-            if (!(classified instanceof WorkflowTransientError))
+            if (!(classified instanceof WorkflowTransientError)) {
+              // A refused create request bought nothing, so releasing the
+              // attempt keeps a rejection from being billed as a full session.
+              if (isDefiniteStartRejection(startError))
+                runtimeStartAttempted = false;
               throw classified;
+            }
+            if (hasErrorCode(startError, 'runtime_session_missing')) {
+              // The provider answered that the session -- or the local access
+              // it would be built from -- does not exist in this process, so
+              // nothing was created and there is nothing to reconcile. A
+              // fresh attempt prepares fresh access; retaining the attempt
+              // would bill the full reservation for a session that never was.
+              runtimeStartAttempted = false;
+              throw classified;
+            }
             if (dependencies.runtime.reconcileStart === undefined)
               throw new WorkflowPermanentError(
                 'runtime provider does not support start reconciliation',
@@ -1256,13 +1811,17 @@ async function runAgentStep<T>(
           updatedAt: at(dependencies.clock()),
         });
       }
+      const rendered = describeStepResult(parsed.data);
+      const model = progressContext.model;
       await recordStepProgress(
         dependencies,
         workflow.runId,
         progressContext,
         'completed',
         'completed',
-        'Step completed',
+        rendered === undefined
+          ? 'Step completed'
+          : `Step completed. ${model === undefined ? 'Model' : `Model (${model})`} returned: ${rendered}`,
       );
       completedResult = parsed.data;
     } catch (rawError) {
@@ -1409,18 +1968,20 @@ async function getAuthoritativeApproval(
     throw new WorkflowPermanentError(
       'waitpoint woke without an authoritative approval',
     );
-  const events = await dependencies.repository.listEvents(
-    persistenceId('run', workflow.runId),
-    { limit: 1_000 },
-  );
-  const event = events.find(
-    (candidate) =>
+  // Scanned in full: the decision lands after however much operational
+  // chatter the run has already produced, and a bounded first-page read
+  // reported it missing on a busy run.
+  let event: DomainEvent | undefined;
+  await scanRunEvents(dependencies, workflow.runId, (candidate) => {
+    if (
       (candidate.type === 'approval.approved' ||
         candidate.type === 'approval.rejected') &&
       isJsonObject(candidate.payload) &&
       candidate.payload.approvalId === approvalId &&
-      candidate.payload.scopeHash === scopeHash,
-  );
+      candidate.payload.scopeHash === scopeHash
+    )
+      event ??= candidate;
+  });
   if (event === undefined)
     throw new WorkflowPermanentError('approval decision event is missing');
   return event.type === 'approval.approved' ? 'approve' : 'reject';
@@ -1444,8 +2005,17 @@ export function createDurableFeatureWorkflow(
       if (run === undefined)
         throw new WorkflowPermanentError('workflow run does not exist');
       if (isTerminalRun(run.status)) return terminalResult(run);
+      // The execution clock starts when an operator decides, not when the run
+      // was first created: an approval already re-anchors it below, and a
+      // resume is the same kind of decision. Anchoring a resumed run at its
+      // original creation would hand it a deadline that had already passed --
+      // it would fail on the clock while replaying work it had already paid
+      // for.
       let deadlineMs =
-        Date.parse(run.createdAt) + FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
+        Math.max(
+          Date.parse(run.createdAt),
+          await latestResumeMs(dependencies, workflow.runId),
+        ) + FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
       const started = await dependencies.repository.transitionRun(
         runId,
         ['pending', 'running', 'waiting'],
@@ -1494,6 +2064,18 @@ export function createDurableFeatureWorkflow(
           { stepId: 'specification', artifactId: 'dod' },
           definitionOfDoneSchema,
         );
+        // Checked before the operator is asked to approve them: a test that
+        // cannot parse fails every implementation, and finding that out after
+        // a run has been paid for is how the last two failures were found.
+        await (dependencies.checkAcceptanceTests ?? assertAcceptanceTestsParse)(
+          dodBody.acceptanceTests,
+        ).catch((error: unknown) => {
+          throw new WorkflowPermanentError(
+            error instanceof Error
+              ? error.message
+              : 'acceptance tests could not be checked',
+          );
+        });
         const scopeHash = hash({
           runId: workflow.runId,
           scope: 'feature-spec-and-dod',
@@ -1640,9 +2222,14 @@ export function createDurableFeatureWorkflow(
         if (consumed?.consumedAt === undefined) {
           throw new WorkflowPermanentError('approval_consumed_at_missing');
         }
-        deadlineMs =
+        // Never backwards: on a resumed run the approval was consumed before
+        // the resume, and re-anchoring to it would hand the run a deadline
+        // that already passed while it was replaying paid-for work.
+        deadlineMs = Math.max(
+          deadlineMs,
           Date.parse(consumed.consumedAt) +
-          FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs;
+            FEATURE_WORKFLOW_DEFAULTS.workflowTimeoutMs,
+        );
 
         if (
           (await transitionCurrentRun(dependencies, runId, ['waiting'], {
@@ -1653,33 +2240,41 @@ export function createDurableFeatureWorkflow(
           await assertContinuable(dependencies, workflow, deadlineMs);
           throw new WorkflowPermanentError('run state changed after approval');
         }
-        const plan = await runAgentStep(
-          dependencies,
-          workflow,
-          deadlineMs,
-          'planning',
-          'planning',
-          asJson({
-            version: 'plan-request-v1',
-            approvedScopeHash: scopeHash,
-            specificationDigest: specification.specification.digest,
-            definitionOfDoneDigest: specification.definitionOfDone.digest,
-            specificationArtifact: specification.specification,
-            definitionOfDoneArtifact: specification.definitionOfDone,
-            digests: workflow.digests,
-          }),
-          planOutputSchema,
-          executionOwner,
-          handleSealer,
-        );
-        await parseArtifact(
-          dependencies,
-          workflow,
-          plan.plan,
-          { stepId: 'planning', artifactId: 'plan' },
-          implementationPlanSchema,
-        );
-        let implementation = await runAgentStep(
+        // Planning is a step the project may declare. Four real runs showed
+        // the implementer re-deriving the plan from the specification anyway,
+        // so absent a declared step the specification and Definition of Done
+        // go straight to implementation and no session is spent on a list.
+        const plan =
+          dependencies.roles.planning === undefined
+            ? undefined
+            : await runAgentStep(
+                dependencies,
+                workflow,
+                deadlineMs,
+                'planning',
+                'planning',
+                asJson({
+                  version: 'plan-request-v1',
+                  approvedScopeHash: scopeHash,
+                  specificationDigest: specification.specification.digest,
+                  definitionOfDoneDigest: specification.definitionOfDone.digest,
+                  specificationArtifact: specification.specification,
+                  definitionOfDoneArtifact: specification.definitionOfDone,
+                  digests: workflow.digests,
+                }),
+                planOutputSchema,
+                executionOwner,
+                handleSealer,
+              );
+        if (plan !== undefined)
+          await parseArtifact(
+            dependencies,
+            workflow,
+            plan.plan,
+            { stepId: 'planning', artifactId: 'plan' },
+            implementationPlanSchema,
+          );
+        const implementation = await runAgentStep(
           dependencies,
           workflow,
           deadlineMs,
@@ -1687,9 +2282,14 @@ export function createDurableFeatureWorkflow(
           'implementation',
           asJson({
             version: 'implementation-request-v1',
-            planDigest: plan.plan.digest,
-            planArtifact: plan.plan,
             approvedScopeHash: scopeHash,
+            specificationDigest: specification.specification.digest,
+            definitionOfDoneDigest: specification.definitionOfDone.digest,
+            specificationArtifact: specification.specification,
+            definitionOfDoneArtifact: specification.definitionOfDone,
+            ...(plan === undefined
+              ? {}
+              : { planDigest: plan.plan.digest, planArtifact: plan.plan }),
             source: workflow.source,
             digests: workflow.digests,
           }),
@@ -1697,7 +2297,7 @@ export function createDurableFeatureWorkflow(
           executionOwner,
           handleSealer,
         );
-        let producingStepId = 'implementation';
+        const producingStepId = 'implementation';
         let changeSet = await parseArtifact(
           dependencies,
           workflow,
@@ -1705,114 +2305,13 @@ export function createDurableFeatureWorkflow(
           { stepId: 'implementation', artifactId: 'changes' },
           changeSetSchema,
         );
-        let testEvidence = await parseArtifact(
+        const testEvidence = await parseArtifact(
           dependencies,
           workflow,
           implementation.testEvidence,
           { stepId: 'implementation', artifactId: 'tests' },
           testEvidenceSchema,
         );
-        const review = await runAgentStep(
-          dependencies,
-          workflow,
-          deadlineMs,
-          'review',
-          'review',
-          asJson({
-            version: 'review-request-v1',
-            changeSetDigest: implementation.changeSet.digest,
-            testEvidenceDigest: implementation.testEvidence.digest,
-            definitionOfDoneDigest: specification.definitionOfDone.digest,
-            changeSetArtifact: implementation.changeSet,
-            testEvidenceArtifact: implementation.testEvidence,
-            definitionOfDoneArtifact: specification.definitionOfDone,
-            digests: workflow.digests,
-          }),
-          reviewOutputSchema,
-          executionOwner,
-          handleSealer,
-        );
-        let reviewBody = await parseArtifact(
-          dependencies,
-          workflow,
-          review.review,
-          { stepId: 'review', artifactId: 'review' },
-          reviewArtifactSchema,
-        );
-        if (review.decision !== reviewBody.decision)
-          throw new WorkflowPermanentError('review decision mismatch');
-        if (review.decision === 'changes_requested') {
-          implementation = await runAgentStep(
-            dependencies,
-            workflow,
-            deadlineMs,
-            'fix',
-            'implementation',
-            asJson({
-              version: 'fix-request-v1',
-              priorChangeSetDigest: implementation.changeSet.digest,
-              reviewDigest: review.review.digest,
-              planDigest: plan.plan.digest,
-              priorChangeSetArtifact: implementation.changeSet,
-              reviewArtifact: review.review,
-              planArtifact: plan.plan,
-              digests: workflow.digests,
-            }),
-            implementationOutputSchema,
-            executionOwner,
-            handleSealer,
-          );
-          producingStepId = 'fix';
-          changeSet = await parseArtifact(
-            dependencies,
-            workflow,
-            implementation.changeSet,
-            { stepId: 'fix', artifactId: 'changes' },
-            changeSetSchema,
-          );
-          testEvidence = await parseArtifact(
-            dependencies,
-            workflow,
-            implementation.testEvidence,
-            { stepId: 'fix', artifactId: 'tests' },
-            testEvidenceSchema,
-          );
-          const finalReview = await runAgentStep(
-            dependencies,
-            workflow,
-            deadlineMs,
-            'review-after-fix',
-            'review',
-            asJson({
-              version: 'review-request-v1',
-              changeSetDigest: implementation.changeSet.digest,
-              testEvidenceDigest: implementation.testEvidence.digest,
-              definitionOfDoneDigest: specification.definitionOfDone.digest,
-              changeSetArtifact: implementation.changeSet,
-              testEvidenceArtifact: implementation.testEvidence,
-              definitionOfDoneArtifact: specification.definitionOfDone,
-              digests: workflow.digests,
-            }),
-            reviewOutputSchema,
-            executionOwner,
-            handleSealer,
-          );
-          reviewBody = await parseArtifact(
-            dependencies,
-            workflow,
-            finalReview.review,
-            { stepId: 'review-after-fix', artifactId: 'review' },
-            reviewArtifactSchema,
-          );
-          if (
-            finalReview.decision !== 'approved' ||
-            reviewBody.decision !== 'approved'
-          ) {
-            throw new WorkflowPermanentError(
-              'final review after fix must be approved',
-            );
-          }
-        }
         let sealedChanges;
         try {
           sealedChanges = {
@@ -1899,12 +2398,11 @@ export function createDurableFeatureWorkflow(
           definitionOfDone: asJson(dodBody),
           changeSet: asJson(changeSet),
           testEvidence: asJson(testEvidence),
-          review: asJson(reviewBody),
           trustedCommandObservation,
         });
         if (!verification.passed) {
           throw new WorkflowPermanentError(
-            `trusted verification failed: ${(verification.findings ?? []).join('; ').slice(0, 500)}`,
+            verificationFailureMessage(verification.findings),
           );
         }
         if (!/^[0-9a-f]{64}$/.test(verification.evidenceDigest))
@@ -1922,6 +2420,53 @@ export function createDurableFeatureWorkflow(
           throw new WorkflowPermanentError(
             'trusted verifier evidence artifact binding is invalid',
           );
+        // Review, when the project declares it, runs after the gate and never
+        // holds it. The acceptance tests have already passed; what a reviewer
+        // finds now is a note for the operator who merges, and the run page
+        // shows it. A run is not failed for a reviewer's opinion -- the
+        // 2026-09-02 run that motivated this was blocked by a claim about
+        // `??` that was true of `||` -- nor for a review session that dies.
+        // Cancellation is the one thing that still stops the run here.
+        if (dependencies.roles.review !== undefined) {
+          try {
+            const review = await runAgentStep(
+              dependencies,
+              workflow,
+              deadlineMs,
+              'review',
+              'review',
+              asJson({
+                version: 'review-request-v1',
+                changeSetDigest: implementation.changeSet.digest,
+                testEvidenceDigest: implementation.testEvidence.digest,
+                definitionOfDoneDigest: specification.definitionOfDone.digest,
+                changeSetArtifact: implementation.changeSet,
+                testEvidenceArtifact: implementation.testEvidence,
+                definitionOfDoneArtifact: specification.definitionOfDone,
+                verificationDigest: verification.evidenceDigest,
+                digests: workflow.digests,
+              }),
+              reviewOutputSchema,
+              executionOwner,
+              handleSealer,
+            );
+            await parseArtifact(
+              dependencies,
+              workflow,
+              review.review,
+              { stepId: 'review', artifactId: 'review' },
+              reviewArtifactSchema,
+            );
+          } catch (error) {
+            if (
+              error instanceof WorkflowPermanentError &&
+              error.message === 'run_cancelled'
+            )
+              throw error;
+            await recordAdvisoryReviewFailure(dependencies, workflow, error);
+            await assertContinuable(dependencies, workflow, deadlineMs);
+          }
+        }
         await assertContinuable(dependencies, workflow, deadlineMs);
         const publicationRequest =
           await dependencies.publicationAuthority.authorize({
@@ -2048,7 +2593,13 @@ export function createDurableFeatureWorkflow(
       } catch (error) {
         const latest = await dependencies.repository.getRun(runId);
         if (latest?.status === 'cancelled') return { status: 'cancelled' };
-        if (error instanceof WorkflowTransientError)
+        // Infrastructure that blinked is not a failed run: the step results
+        // already paid for are still on disk, so hand it back to Trigger to
+        // retry rather than burning the run over a lost connection.
+        if (
+          error instanceof WorkflowTransientError ||
+          isTransientOperationError(error)
+        )
           throw new FeatureWorkflowTaskTransientError(safeError(error));
         const result: FeatureWorkflowResult =
           error instanceof WorkflowBudgetExhaustedError

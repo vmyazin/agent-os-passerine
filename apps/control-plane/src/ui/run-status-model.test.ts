@@ -41,14 +41,14 @@ describe('explainRunStatus', () => {
     // seconds in as it does when the worker will never arrive.
     expect(pending('2026-08-24T03:24:20.000Z')).toEqual({
       summary: 'Queued 1 minute ago. Nothing has run yet.',
-      next: 'A Trigger.dev worker has to claim it before the first step runs.',
+      next: 'The executor has to start it before the first step runs.',
       live: true,
     });
   });
 
   it('escalates once nothing has claimed it for long enough', () => {
     expect(pending('2026-08-24T03:26:20.000Z').next).toBe(
-      'A worker should have claimed this by now — see below.',
+      'The executor should have started it by now — see below.',
     );
   });
 
@@ -65,17 +65,22 @@ describe('explainRunStatus', () => {
     expect(waiting.live).toBe(true);
   });
 
-  it('stops refreshing once the run is over', () => {
-    for (const status of ['succeeded', 'failed', 'cancelled']) {
-      expect(
-        explainRunStatus({
-          status,
-          stepCount: 5,
-          createdAt: created,
-          updatedAt: '2026-08-24T04:00:00.000Z',
-          now: '2026-08-24T04:05:00.000Z',
-        }).live,
-      ).toBe(false);
-    }
+  it('stops refreshing only once the run can no longer change', () => {
+    const at = (status: string) =>
+      explainRunStatus({
+        status,
+        stepCount: 5,
+        createdAt: created,
+        updatedAt: '2026-08-24T04:00:00.000Z',
+        now: '2026-08-24T04:05:00.000Z',
+      }).live;
+
+    // Succeeded is final: starting the request again produces another run.
+    expect(at('succeeded')).toBe(false);
+    // Failed and cancelled are resumable, so this run's state can still move
+    // underneath the page -- and a stale page offers actions that then fail
+    // against the state it cannot see.
+    expect(at('failed')).toBe(true);
+    expect(at('cancelled')).toBe(true);
   });
 });

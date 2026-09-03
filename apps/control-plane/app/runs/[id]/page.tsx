@@ -2,6 +2,7 @@ import {
   loadRunDispatch,
   loadRunPageModel,
 } from '../../../src/application/run-page-model';
+import { controlPlaneService } from '../../../src/application/runtime';
 import { requirePageSession } from '../../../src/auth/page-session';
 import {
   EmptyState,
@@ -9,9 +10,13 @@ import {
   RunStepTimeline,
 } from '../../../src/ui/components';
 import { isAwaitingDispatch } from '../../../src/ui/dispatch-stall';
+import { isRunPreviewAvailable } from '../../../src/local-system/run-preview';
 import {
   CancelRunAction,
+  OverrideRunBudgetAction,
+  PreviewRunAction,
   RestartRunAction,
+  ResumeRunAction,
 } from '../../../src/ui/mutation-forms';
 import { diagnoseDispatch } from '../../../src/ui/dispatch-diagnostics-model';
 import { RunLiveRefresh } from '../../../src/ui/run-live-refresh';
@@ -26,6 +31,26 @@ export const dynamic = 'force-dynamic';
 // A run that has already stopped has nothing to cancel; the endpoint rejects
 // it with 409, so the button must not be offered in the first place.
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
+
+/**
+ * URL paths a feature request mentions, as written. The request is the only
+ * place that reliably says where a delivered API answers, and a preview link
+ * to a root that returns 404 tells the operator nothing.
+ */
+function pathsNamedBy(description: unknown): readonly string[] {
+  if (typeof description !== 'string') return [];
+  const seen = new Set<string>();
+  for (const match of description.matchAll(
+    /(?:^|[\s(`'"])(\/[A-Za-z0-9_./:-]*[A-Za-z0-9_-])/g,
+  )) {
+    const path = match[1]!;
+    // A file path carries an extension; a route seldom does.
+    if (/\.[a-z]{1,5}$/i.test(path) || path.length > 64) continue;
+    seen.add(path);
+    if (seen.size === 6) break;
+  }
+  return [...seen];
+}
 
 export default async function RunPage({
   params,
@@ -52,6 +77,15 @@ export default async function RunPage({
       : undefined;
   const diagnosis =
     dispatch === undefined ? undefined : diagnoseDispatch(dispatch);
+  // Review is advisory and runs after the gate, so a succeeded run can carry
+  // findings too; those are notes for whoever merges.
+  const review = TERMINAL_STATUSES.has(run.status)
+    ? await controlPlaneService().reviewOutcome(run.id)
+    : undefined;
+  const criteria =
+    run.status === 'succeeded'
+      ? await controlPlaneService().doneCriteria(run.id)
+      : [];
   const explanation = explainRunStatus({
     status: run.status,
     stepCount: run.steps.length,
@@ -77,9 +111,37 @@ export default async function RunPage({
             </>
           )}
         </p>
+        {/* A budget is the one blocker an operator can lift from here, and it
+            blocks a queued run exactly as it blocked the one that stopped, so
+            this is offered on any run a budget is holding back -- not only on
+            a finished one. */}
+        {run.error?.code === 'budget_exhausted' ? (
+          <>
+            <p className="run-status-explanation">
+              A budget stopped this run, so continuing it as it stands would
+              stop at the same place. Allowing more raises this run&apos;s caps
+              by that amount; it does not change the project&apos;s budget or
+              start anything.
+            </p>
+            <OverrideRunBudgetAction runId={run.id} />
+          </>
+        ) : null}
         {TERMINAL_STATUSES.has(run.status) ? (
           run.pipeline === 'feature' || run.pipeline === 'goal' ? (
-            <RestartRunAction runId={run.id} />
+            <>
+              {run.status === 'failed' || run.status === 'cancelled' ? (
+                <>
+                  <p className="run-status-explanation">
+                    Resume continues this run from the step that stopped it,
+                    keeping the steps it already finished and the configuration
+                    and commit it started from. Start again re-runs the whole
+                    request against the configuration applied now.
+                  </p>
+                  <ResumeRunAction runId={run.id} />
+                </>
+              ) : null}
+              <RestartRunAction runId={run.id} />
+            </>
           ) : null
         ) : (
           <CancelRunAction
@@ -101,6 +163,24 @@ export default async function RunPage({
             Why it failed
           </h2>
           <p>{run.error.message ?? 'No reason was recorded.'}</p>
+          {review === undefined || review.findings.length === 0 ? null : (
+            <>
+              <p>
+                {review.stepId === 'review-after-fix'
+                  ? 'The final review asked for these changes:'
+                  : 'The review asked for these changes:'}
+              </p>
+              <ul>
+                {review.findings.map((finding: string) => (
+                  <li key={finding}>{finding}</li>
+                ))}
+              </ul>
+              <p className="dispatch-remedy">
+                Findings come from the reviewing model. Check one before acting
+                on it: a review can be wrong about working code.
+              </p>
+            </>
+          )}
           {run.error.details === undefined ||
           run.error.details.length === 0 ? null : (
             <ul>
@@ -130,13 +210,16 @@ export default async function RunPage({
           )}
           {diagnosis.externalRef === undefined ? null : (
             <p className="dispatch-ref">
-              Trigger run <code>{diagnosis.externalRef}</code>
+              Execution <code>{diagnosis.externalRef}</code>
             </p>
           )}
         </section>
       )}
       {awaitingDispatch && diagnosis?.fromExecutor !== true ? (
         <UndispatchedRunNotice />
+      ) : null}
+      {awaitingDispatch ? (
+        <ResumeRunAction runId={run.id} label="Retry" />
       ) : null}
       <dl className="metadata">
         <div>
@@ -257,6 +340,24 @@ export default async function RunPage({
       {run.outcome === undefined ? null : (
         <section aria-labelledby="outcome-title">
           <h2 id="outcome-title">Outcome</h2>
+          {review === undefined || review.findings.length === 0 ? null : (
+            <>
+              <p>
+                {review.decision === 'changes_requested'
+                  ? 'Review notes. The reviewer would have asked for changes; verification passed, so this is published and these are for you to weigh before merging:'
+                  : 'Review notes:'}
+              </p>
+              <ul>
+                {review.findings.map((finding: string) => (
+                  <li key={finding}>{finding}</li>
+                ))}
+              </ul>
+              <p className="dispatch-remedy">
+                Findings come from the reviewing model and can be wrong about
+                working code.
+              </p>
+            </>
+          )}
           {run.outcome.draftPullRequestUrl === undefined ? null : (
             <p>
               <a href={run.outcome.draftPullRequestUrl}>Draft pull request</a>
@@ -275,6 +376,36 @@ export default async function RunPage({
               <code>git log {run.outcome.localBranch}</code>
             </p>
           )}
+          {run.status === 'succeeded' &&
+          run.outcome.localBranch !== undefined &&
+          run.outcome.localRepositoryUrl !== undefined &&
+          isRunPreviewAvailable() ? (
+            <>
+              <p>
+                Preview it: this checks the branch out in a scratch worktree and
+                runs the delivered code on this machine.
+              </p>
+              {criteria.length === 0 ? null : (
+                <>
+                  <p>
+                    How to smoke test it. These are the acceptance criteria the
+                    specifier froze before implementation, and each one already
+                    passed in sealed verification; this is you seeing it with
+                    your own eyes.
+                  </p>
+                  <ol>
+                    {criteria.map((criterion) => (
+                      <li key={criterion.id}>{criterion.description}</li>
+                    ))}
+                  </ol>
+                </>
+              )}
+              <PreviewRunAction
+                runId={run.id}
+                suggestedPaths={pathsNamedBy(run.input?.description)}
+              />
+            </>
+          ) : null}
         </section>
       )}
       <section aria-labelledby="timeline-title">

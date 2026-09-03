@@ -23,9 +23,7 @@ describe('inbox count presentation', () => {
     expect(formatInboxAttentionCount(1)).toBe('1');
     expect(formatInboxAttentionCount(99)).toBe('99');
     expect(formatInboxAttentionCount(100)).toBe('99+');
-    expect(inboxAttentionAriaLabel(1)).toBe(
-      'Inbox, 1 item needs attention',
-    );
+    expect(inboxAttentionAriaLabel(1)).toBe('Inbox, 1 item needs attention');
     expect(inboxAttentionPresentation(143)).toEqual({
       badgeText: '99+',
       ariaLabel: 'Inbox, 143 items need attention',
@@ -37,9 +35,7 @@ describe('fetchInboxAttentionCount', () => {
   it('accepts only a successful nonnegative safe integer payload', async () => {
     const signal = new AbortController().signal;
     const fetcher = vi.fn(async () => response({ count: 4 }));
-    await expect(
-      fetchInboxAttentionCount(signal, fetcher),
-    ).resolves.toBe(4);
+    await expect(fetchInboxAttentionCount(signal, fetcher)).resolves.toBe(4);
     expect(fetcher).toHaveBeenCalledWith('/api/inbox/count', {
       cache: 'no-store',
       headers: { accept: 'application/json' },
@@ -180,7 +176,9 @@ describe('subscribeToInboxAttentionCount', () => {
         (signal) =>
           new Promise<number | undefined>((_resolve, reject) => {
             activeSignal = signal;
-            signal.addEventListener('abort', () => reject(new Error('aborted')));
+            signal.addEventListener('abort', () =>
+              reject(new Error('aborted')),
+            );
           }),
       ),
       setIntervalFn: () => 'interval',

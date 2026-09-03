@@ -12,8 +12,20 @@ const backlog = (
   title: 'Todo app',
   status: 'active',
   items: [
-    { id: 'i1', ordinal: 1, title: 'Add the store', status: 'succeeded', runId: 'run-1' },
-    { id: 'i2', ordinal: 2, title: 'List by due date', status: 'running', runId: 'run-2' },
+    {
+      id: 'i1',
+      ordinal: 1,
+      title: 'Add the store',
+      status: 'succeeded',
+      runId: 'run-1',
+    },
+    {
+      id: 'i2',
+      ordinal: 2,
+      title: 'List by due date',
+      status: 'running',
+      runId: 'run-2',
+    },
     { id: 'i3', ordinal: 3, title: 'Filter completed', status: 'pending' },
   ],
   createdAt: '2026-08-23T12:00:00.000Z' as BacklogProjection['createdAt'],
@@ -38,7 +50,10 @@ describe('backlogView', () => {
 
   it('says running only when something is actually running', () => {
     const view = backlogView(backlog());
-    expect(view.items[1]).toMatchObject({ state: 'running', emphasis: 'active' });
+    expect(view.items[1]).toMatchObject({
+      state: 'running',
+      emphasis: 'active',
+    });
     expect(view.items[2]).toMatchObject({ state: 'waiting its turn' });
     expect(view.progress).toBe('1 of 3 done · running: List by due date');
   });
@@ -49,10 +64,15 @@ describe('backlogView', () => {
       { publishedBranch: 'agentos/run-3-abcdef01' },
     );
     expect(depth.paused?.sentence).toMatch(/as deep as the project allows/);
-    expect(depth.paused?.action).toBe('Merge agentos/run-3-abcdef01, then resume.');
+    expect(depth.paused?.action).toBe(
+      'Merge agentos/run-3-abcdef01, then resume.',
+    );
 
     const changed = backlogView(
-      backlog({ status: 'paused', pausedReason: 'chain_configuration_changed' }),
+      backlog({
+        status: 'paused',
+        pausedReason: 'chain_configuration_changed',
+      }),
     );
     expect(changed.paused?.sentence).toMatch(/different rules/);
 
@@ -74,8 +94,20 @@ describe('backlogView', () => {
       backlog({
         status: 'completed',
         items: [
-          { id: 'i1', ordinal: 1, title: 'One', status: 'succeeded', runId: 'r1' },
-          { id: 'i2', ordinal: 2, title: 'Two', status: 'succeeded', runId: 'r2' },
+          {
+            id: 'i1',
+            ordinal: 1,
+            title: 'One',
+            status: 'succeeded',
+            runId: 'r1',
+          },
+          {
+            id: 'i2',
+            ordinal: 2,
+            title: 'Two',
+            status: 'succeeded',
+            runId: 'r2',
+          },
         ],
       }),
     );

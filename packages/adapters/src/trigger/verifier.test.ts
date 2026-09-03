@@ -118,3 +118,82 @@ describe('trusted workflow verifier', () => {
     expect(result.findings?.join(' ')).toMatch(/denied path/i);
   });
 });
+
+describe('verification without a review', () => {
+  it('passes on evidence alone: review is advisory and runs after this gate', async () => {
+    const changeSet = {
+      version: 'change-set-v1' as const,
+      changes: [
+        {
+          operation: 'add' as const,
+          path: 'src/status.ts',
+          mode: '100644' as const,
+          content: 'export {};\n',
+        },
+      ],
+    };
+    const withoutReview = Object.fromEntries(
+      Object.entries(base).filter(([key]) => key !== 'review'),
+    ) as Omit<typeof base, 'review'>;
+    const result = await verifier().verify({
+      ...withoutReview,
+      changeSet,
+      trustedCommandObservation: observation(changeSet),
+    });
+    expect(result).toMatchObject({ passed: true });
+  });
+});
+
+describe('a failed gate explains itself', () => {
+  const changeSet = {
+    version: 'change-set-v1' as const,
+    changes: [
+      {
+        operation: 'add' as const,
+        path: 'src/status.ts',
+        mode: '100644' as const,
+        content: 'export {};\n',
+      },
+    ],
+  };
+
+  it('reports what the command printed instead of only that it failed', async () => {
+    const failed = {
+      ...observation(changeSet),
+      exitCode: 1,
+      output:
+        "not ok 4 - package.json has no new dependencies\n  ENOENT: no such file or directory, open '../../../package.json'",
+    };
+    const result = await verifier().verify({
+      ...base,
+      changeSet,
+      trustedCommandObservation: failed,
+    });
+    expect(result.passed).toBe(false);
+    const reported = (result.findings ?? []).join(' ');
+    expect(reported).toContain('exit 1');
+    expect(reported).toContain('no new dependencies');
+    expect(reported).toContain('ENOENT');
+  });
+
+  it('attests the same evidence whether or not output was captured', async () => {
+    const withoutOutput = await verifier().verify({
+      ...base,
+      changeSet,
+      trustedCommandObservation: observation(changeSet),
+    });
+    const withOutput = await verifier().verify({
+      ...base,
+      changeSet,
+      trustedCommandObservation: {
+        ...observation(changeSet),
+        output: 'ok 1 - everything passed',
+      },
+    });
+    expect(withoutOutput.passed).toBe(true);
+    expect(withOutput.passed).toBe(true);
+    // The digest is what a signature commits to: a diagnostic tail must not
+    // change what a report means.
+    expect(withOutput.evidenceDigest).toBe(withoutOutput.evidenceDigest);
+  });
+});

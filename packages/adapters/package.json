@@ -17,8 +17,7 @@
     "smoke:r2": "pnpm build && node scripts/r2-artifact-smoke.mjs",
     "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run --testTimeout=60000 --hookTimeout=60000 src/persistence/postgres.integration.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke:trigger-dispatch": "pnpm build && node scripts/trigger-dispatch-smoke.mjs"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@agentos/core": "workspace:*",
@@ -27,7 +26,6 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@neondatabase/serverless": "1.1.0",
     "@octokit/auth-app": "8.3.0",
-    "@trigger.dev/sdk": "4.5.12",
     "drizzle-orm": "0.45.2",
     "zod": "4.4.3"
   },

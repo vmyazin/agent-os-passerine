@@ -1,4 +1,4 @@
-import type { GoalWorkflowTaskHandler } from './goal-task.js';
+import type { GoalWorkflowTaskHandler } from './types.js';
 
 let initialized: Promise<GoalWorkflowTaskHandler> | undefined;
 

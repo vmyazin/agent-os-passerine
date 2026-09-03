@@ -309,5 +309,6 @@ export const trustedCommandObservationSchema = z
     sourceSnapshotDigest: digest,
     changeSetDigest: digest,
     configDigest: digest,
+    output: z.string().max(8_000).optional(),
   })
   .strict();

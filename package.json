@@ -18,9 +18,8 @@
     "test": "turbo run test",
     "test:integration": "pnpm --filter @agentos/adapters test:integration",
     "test:e2e": "pnpm build && playwright test",
-    "trigger:deploy": "trigger deploy",
-    "trigger:dev": "trigger dev",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "preview": "node scripts/preview-run.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -28,12 +27,10 @@
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
-    "@trigger.dev/sdk": "4.5.16",
     "drizzle-kit": "0.31.10",
     "eslint": "10.8.1",
     "prettier": "3.9.6",
     "turbo": "2.10.10",
-    "trigger.dev": "4.5.12",
     "typescript": "6.0.3",
     "typescript-eslint": "8.67.0",
     "vitest": "4.1.10"

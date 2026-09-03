@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
-import { deterministicGoalCriterionId } from '@agentos/adapters';
+import {
+  BUDGET_OVERRIDE_EVENT,
+  RUN_RESUMED_EVENT,
+  deterministicGoalCriterionId,
+} from '@agentos/adapters';
 
 import type {
   Approval,
@@ -89,12 +93,31 @@ export interface CreateGoalRunInput extends CreateRunInput {
   readonly criteria: readonly CommandCriterion[];
 }
 
+/**
+ * The slice of the workflow checkpoint store a resume needs: enough to clear
+ * the checkpoints that refuse a replay, and to see which resume generations a
+ * run has already used.
+ */
+/**
+ * The ceiling on a single override. An operator pressing a button to get past
+ * a cap should not be able to authorise an unbounded amount by mistyping.
+ */
+export const MAX_BUDGET_OVERRIDE_MICRODOLLARS = 100_000_000;
+
+export interface RunResumptionStore {
+  releaseRunForResume(runId: string): Promise<{ readonly released: number }>;
+  listEffects(runId: string): Promise<readonly { readonly key: string }[]>;
+}
+
 /** Durable intents live in the run/approval event rows; this port delivers them. */
 export interface WorkflowDispatchOutbox {
   requestStart(request: {
     readonly idempotencyKey: string;
     readonly runId: string;
     readonly pipeline: 'feature' | 'goal';
+    /** Non-zero when an operator resumed this run, so the dispatch asks for a
+     * Trigger key that the finished execution did not already claim. */
+    readonly resumeGeneration?: number;
   }): Promise<void>;
   requestApprovalResume(request: {
     readonly idempotencyKey: string;
@@ -392,6 +415,13 @@ export interface InboxProjection {
   readonly reply?: SafeInboxContent;
   readonly createdAt: IsoTimestamp;
   readonly repliedAt?: IsoTimestamp;
+}
+
+export interface ReviewOutcome {
+  /** Which review produced it: `review` or `review-after-fix`. */
+  readonly stepId: string;
+  readonly decision: string;
+  readonly findings: readonly string[];
 }
 
 export interface ApprovalSummary {
@@ -933,6 +963,7 @@ function projectStepProgress(event: DomainEvent):
       readonly stepRunId: string;
       readonly stepKey: string;
       readonly attempt: number;
+      readonly sequence: number;
     })
   | undefined {
   if (event.type !== 'step.progress') return undefined;
@@ -959,6 +990,7 @@ function projectStepProgress(event: DomainEvent):
     stepRunId,
     stepKey,
     attempt,
+    sequence: event.sequence,
     phase,
     message,
     occurredAt: event.occurredAt,
@@ -1023,6 +1055,7 @@ export class ControlPlaneService {
       }>;
     },
     private readonly projectSources?: ProjectSourceGateway,
+    private readonly runResumption?: RunResumptionStore,
   ) {}
 
   private requireProjectSources(): ProjectSourceGateway {
@@ -1789,6 +1822,165 @@ export class ControlPlaneService {
       ...(typeof baseRunId === 'string' ? { baseRunId } : {}),
       ...(criteria === undefined ? {} : { criteria }),
     });
+  }
+
+  /**
+   * Continues a finished run where it stopped, keeping the steps it already
+   * validated.
+   *
+   * This is the counterpart to `restartRun`, not a replacement for it. A
+   * resume re-enters the *same* run, so it reuses that run's pinned
+   * configuration and repository snapshot and replays every succeeded step
+   * from storage instead of paying a model to redo it. That is what you want
+   * when the run died for a reason outside its own inputs -- budget, a
+   * provider fault, a crashed worker. When something was *changed* to make the
+   * work succeed, the pinned snapshot is precisely wrong and `restartRun` is
+   * the right action.
+   *
+   * Trigger holds a task idempotency key for thirty days, so each resume asks
+   * for a fresh generation of both the dispatch effect key and the Trigger
+   * key; reusing either would hand back the execution that already finished.
+   */
+  async resumeRun(
+    runId: string,
+    options: {
+      /**
+       * Set by the route when the newest handoff is to the local executor and
+       * that executor reports it lost or failed. Only then may a queued run
+       * be handed over again: otherwise a queued run may be held by a worker
+       * this process cannot see, and two paid sessions must never share one
+       * run.
+       */
+      readonly lostExecution?: boolean;
+    } = {},
+  ): Promise<RunProjection> {
+    if (this.runResumption === undefined)
+      throw new ServiceError(
+        'run_not_resumable',
+        'resuming runs is not configured',
+        503,
+      );
+    const run = await this.repository.getRun(persistenceId('run', runId));
+    if (run === undefined)
+      throw new ServiceError('not_found', 'run not found', 404);
+    if (run.pipeline !== 'feature' && run.pipeline !== 'goal')
+      throw new ServiceError(
+        'run_not_resumable',
+        'only feature and goal runs can be resumed',
+        409,
+      );
+    // Succeeded runs have nothing left to do, and a run that has not finished
+    // may still have a worker on it -- resuming that would put two paid
+    // sessions on one run.
+    // A queued run is resumable too: after a handoff the executor can lose
+    // it (a restart), and with the start effect already recorded as
+    // succeeded, nothing else will ever hand it over again.
+    if (
+      run.status !== 'failed' &&
+      run.status !== 'cancelled' &&
+      !(run.status === 'pending' && options.lostExecution === true)
+    )
+      throw new ServiceError(
+        'run_not_resumable',
+        run.status === 'succeeded'
+          ? 'this run already finished'
+          : 'this run has not finished; cancel it first, then resume it',
+        409,
+      );
+    const effects = await this.runResumption.listEffects(runId);
+    const generation =
+      effects.reduce((highest, effect) => {
+        const match = /:resume:(\d+)$/.exec(effect.key);
+        return match === null
+          ? highest
+          : Math.max(highest, Number.parseInt(match[1]!, 10));
+      }, 0) + 1;
+    // Clearing before reopening: a resumed worker that reached a dead-lettered
+    // checkpoint would refuse to replay and fail the run all over again.
+    await this.runResumption.releaseRunForResume(runId);
+    const at = this.clock();
+    const reopened = await this.repository.transitionRun(
+      run.id,
+      ['failed', 'cancelled', 'pending'],
+      // The previous failure is cleared with the status it belonged to. A run
+      // that is pending again must not still explain why it failed.
+      { status: 'pending', error: null, output: null, updatedAt: at },
+      run.stateVersion ?? 0,
+    );
+    if (reopened === undefined)
+      throw new ServiceError(
+        'run_not_resumable',
+        'this run changed while it was being resumed; try again',
+        409,
+      );
+    // The worker anchors the run's execution deadline at the latest resume,
+    // because the clock starts when the operator decides -- a resumed run
+    // measured from its original creation would already be out of time.
+    await this.repository.appendEvent({
+      runId: run.id,
+      // Keyed by generation, which is unique per resume by construction --
+      // two resumes in the same clock tick must still be two events.
+      eventId: persistenceId(
+        'event',
+        `run-resumed:${runId}:${String(generation)}`,
+      ),
+      fingerprint: fingerprint(`run-resumed:${runId}:${String(generation)}`),
+      type: RUN_RESUMED_EVENT,
+      payload: { generation },
+      occurredAt: at,
+    });
+    try {
+      await this.workflowDispatch?.requestStart({
+        idempotencyKey: `workflow-start:${runId}:resume:${String(generation)}`,
+        runId,
+        pipeline: run.pipeline,
+        resumeGeneration: generation,
+      });
+    } catch {
+      // The reopened run is the durable intent; reconciliation retries it.
+    }
+    return this.project(reopened);
+  }
+
+  /**
+   * Grants a run a one-time allowance past the budget that stopped it.
+   *
+   * The grant is an append-only event on the run, so it is auditable and
+   * cannot be spent by any other run. It raises that run's daily and workflow
+   * caps by the granted amount rather than disabling the budget: an override
+   * is a decision to spend more on this piece of work, not to stop counting.
+   *
+   * Granting does not restart anything. The run still has to be resumed, so
+   * the operator sees what they are about to continue before it spends.
+   */
+  async overrideRunBudget(
+    runId: string,
+    microdollars: number,
+  ): Promise<RunProjection> {
+    if (
+      !Number.isSafeInteger(microdollars) ||
+      microdollars <= 0 ||
+      microdollars > MAX_BUDGET_OVERRIDE_MICRODOLLARS
+    )
+      throw new ServiceError(
+        'invalid_budget_override',
+        'a budget override must be a positive amount no larger than $100',
+        422,
+      );
+    const run = await this.repository.getRun(persistenceId('run', runId));
+    if (run === undefined)
+      throw new ServiceError('not_found', 'run not found', 404);
+    const at = this.clock();
+    await this.repository.appendEvent({
+      runId: run.id,
+      eventId: persistenceId('event', `budget-override:${runId}:${String(at)}`),
+      fingerprint: fingerprint(`budget-override:${runId}:${String(at)}`),
+      type: BUDGET_OVERRIDE_EVENT,
+      payload: { microdollars },
+      occurredAt: at,
+    });
+    const refreshed = await this.repository.getRun(run.id);
+    return this.project(refreshed ?? run);
   }
 
   async listTrustedGoalCommands(
@@ -2792,6 +2984,110 @@ export class ControlPlaneService {
   }
 
   /**
+   * The acceptance criteria the specifier froze for a run: one per
+   * requirement, each already exercised by a sealed acceptance test. For an
+   * operator about to look at the delivered code, this is the smoke test,
+   * written before the implementation existed. Fail-soft like every other
+   * artifact read here.
+   */
+  async doneCriteria(
+    runId: string,
+  ): Promise<readonly { readonly id: string; readonly description: string }[]> {
+    if (this.artifacts === undefined) return [];
+    try {
+      const run = await this.repository.getRun(persistenceId('run', runId));
+      if (run === undefined) return [];
+      const scope = {
+        projectId: run.projectId,
+        runId: run.id,
+        stepId: 'specification',
+      };
+      const page = await this.artifacts.list({ scope, limit: 10 });
+      const item = page.items.find(
+        (candidate) => candidate.artifactId === 'dod',
+      );
+      if (item === undefined) return [];
+      const value = await this.artifacts.get({
+        scope,
+        key: item.key,
+        maxBytes: 1_000_000,
+      });
+      if (value === undefined) return [];
+      const body = record(
+        JSON.parse(new TextDecoder().decode(value.bytes)) as JsonValue,
+      );
+      const criteria = body?.criteria;
+      if (!Array.isArray(criteria)) return [];
+      return criteria.slice(0, 20).flatMap((entry) => {
+        const candidate = record(entry);
+        const id = safeString(candidate, 'id');
+        const description = safeString(candidate, 'description');
+        return id !== undefined && description !== undefined
+          ? [{ id, description: description.slice(0, 500) }]
+          : [];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * What the reviewer said, for a run that review stopped.
+   *
+   * "final review after fix must be approved" is a true sentence and a dead
+   * end: it names the gate without naming the objection, so the one thing the
+   * operator needs in order to act is the one thing the page does not show.
+   * The findings live in the review artifact, so read them.
+   *
+   * Fail-soft like every other artifact read here: an unreadable review
+   * degrades to the bare failure reason, never to an error page.
+   */
+  async reviewOutcome(runId: string): Promise<ReviewOutcome | undefined> {
+    if (this.artifacts === undefined) return undefined;
+    try {
+      const run = await this.repository.getRun(persistenceId('run', runId));
+      if (run === undefined) return undefined;
+      // The last word wins: a run that was fixed and re-reviewed is explained
+      // by the re-review, not by the objection that triggered the fix.
+      for (const stepId of ['review-after-fix', 'review']) {
+        const scope = { projectId: run.projectId, runId: run.id, stepId };
+        const page = await this.artifacts.list({ scope, limit: 10 });
+        const item = page.items.find(
+          (candidate) => candidate.artifactId === 'review',
+        );
+        if (item === undefined) continue;
+        const value = await this.artifacts.get({
+          scope,
+          key: item.key,
+          maxBytes: 1_000_000,
+        });
+        if (value === undefined) continue;
+        const body = record(
+          JSON.parse(new TextDecoder().decode(value.bytes)) as JsonValue,
+        );
+        if (body?.version !== 'review-result-v1') continue;
+        const decision = safeString(body, 'decision');
+        const rawFindings = body.findings;
+        const findings = Array.isArray(rawFindings)
+          ? rawFindings
+              .slice(0, 20)
+              .map((entry: unknown) =>
+                typeof entry === 'string'
+                  ? redactText(entry).slice(0, 1_000)
+                  : undefined,
+              )
+              .filter((entry): entry is string => entry !== undefined)
+          : [];
+        if (decision === undefined) continue;
+        return { stepId, decision, findings };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Human-readable context for a spec/DoD approval: the feature title plus
    * the specification requirements and Definition of Done criteria the
    * agent stored as artifacts. Fail-soft by design — an unreadable artifact
@@ -3044,6 +3340,14 @@ export class ControlPlaneService {
               entry !== undefined &&
               entry.stepKey === step.stepKey &&
               entry.attempt === step.attempt,
+          )
+          // Each note is stamped with the provider event's own time, which
+          // need not match the order the worker appended them in, so order by
+          // the time the operator sees before keeping the newest notes.
+          .sort(
+            (left, right) =>
+              Date.parse(left.occurredAt) - Date.parse(right.occurredAt) ||
+              left.sequence - right.sequence,
           )
           .slice(-100)
           .map(({ eventId, phase, message, occurredAt }) => ({

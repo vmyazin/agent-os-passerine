@@ -107,6 +107,10 @@ export function createRuntimeStartRecoveryResolver(options: {
       });
       const role = roleForStep(step.stepKey);
       const definition = roles[role];
+      if (definition === undefined)
+        throw new Error(
+          `runtime recovery names role '${role}', which this project does not declare`,
+        );
       const stepInput = record(step.input);
       const payload = stepInput?.payload;
       const provenance = record(stepInput?.provenance);

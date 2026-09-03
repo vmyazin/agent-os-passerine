@@ -387,8 +387,9 @@ runtime: { provider: local }
 
     const ambiguous = await GET(request('/api/configuration'));
     expect(ambiguous.status).toBe(400);
-    expect(((await ambiguous.json()) as { error: { code: string } }).error.code)
-      .toBe('project_required');
+    expect(
+      ((await ambiguous.json()) as { error: { code: string } }).error.code,
+    ).toBe('project_required');
 
     const scoped = await GET(
       request(`/api/configuration?projectId=${first.projectId}`),

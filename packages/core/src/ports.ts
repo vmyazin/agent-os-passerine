@@ -6,6 +6,14 @@ export type Identifier = string;
 export interface RuntimeAgent {
   readonly id: Identifier;
   readonly model: string;
+  /**
+   * The model profile's `provider` value (`anthropic`, `kimi`, ...). A
+   * provider that speaks to more than one upstream API selects its transport
+   * by this field; every other provider ignores it. Optional because it
+   * describes where `model` is served, not what the agent is, and older
+   * persisted callers never set it.
+   */
+  readonly modelProvider?: string;
   readonly instructions?: string;
   readonly tools: readonly string[];
   readonly mcps: readonly string[];
@@ -117,6 +125,14 @@ export interface RuntimeObservedCommand {
   readonly exitCode: number;
   readonly startedAt: string;
   readonly completedAt: string;
+  /**
+   * The tail of what the command printed, bounded by the provider. Present so
+   * a failed gate can say why: an exit code alone leaves the operator to
+   * rebuild the sandbox by hand to read a test's output. It is diagnostic
+   * only -- the signed evidence attests the command, its exit code and its
+   * bindings, never this text.
+   */
+  readonly output?: string;
 }
 
 export interface RuntimeProvider {

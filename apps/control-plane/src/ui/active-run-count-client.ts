@@ -29,7 +29,8 @@ export function activeRunPresentation(
   if (!Number.isSafeInteger(count) || count <= 0) return undefined;
   return {
     badgeText: formatActiveRunCount(count),
-    ariaLabel: count === 1 ? 'Runs, 1 active run' : `Runs, ${count} active runs`,
+    ariaLabel:
+      count === 1 ? 'Runs, 1 active run' : `Runs, ${count} active runs`,
   };
 }
 
@@ -71,7 +72,8 @@ export function subscribeToActiveRunCount(
   const documentTarget =
     options.documentTarget ??
     (typeof document === 'undefined' ? undefined : document);
-  if (windowTarget === undefined || documentTarget === undefined) return () => {};
+  if (windowTarget === undefined || documentTarget === undefined)
+    return () => {};
 
   const isVisible =
     options.isVisible ??

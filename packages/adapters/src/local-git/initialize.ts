@@ -63,8 +63,7 @@ function gitExecEnv(): NodeJS.ProcessEnv {
 
 function isEexist(error: unknown): boolean {
   return (
-    error instanceof Error &&
-    (error as NodeJS.ErrnoException).code === 'EEXIST'
+    error instanceof Error && (error as NodeJS.ErrnoException).code === 'EEXIST'
   );
 }
 
@@ -112,9 +111,7 @@ export async function initializeLocalRepository(
   options: InitializeLocalRepositoryOptions,
 ): Promise<InitializeLocalRepositoryResult> {
   if (!NAME_PATTERN.test(options.name))
-    throw new Error(
-      'repository name must match ^[a-z0-9][a-z0-9-]{0,63}$',
-    );
+    throw new Error('repository name must match ^[a-z0-9][a-z0-9-]{0,63}$');
   if (!options.workspacesRoot.startsWith('/'))
     throw new Error('workspacesRoot must be an absolute path');
 
@@ -142,11 +139,9 @@ export async function initializeLocalRepository(
       ['-C', repo, 'config', 'user.email', 'agentos@localhost'],
       { env: gitExecEnv() },
     );
-    await exec(
-      'git',
-      ['-C', repo, 'config', 'user.name', 'Agent OS Setup'],
-      { env: gitExecEnv() },
-    );
+    await exec('git', ['-C', repo, 'config', 'user.name', 'Agent OS Setup'], {
+      env: gitExecEnv(),
+    });
 
     const packageJson: Record<string, unknown> = {
       name: options.name,

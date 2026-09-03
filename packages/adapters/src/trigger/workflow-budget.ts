@@ -129,11 +129,9 @@ export async function budgetLimitsForRun(
   }
 }
 
-export function resolveWorkflowBudgetLimits(
-  dependencies: {
-    readonly budgetLimits?: WorkflowBudgetLimits;
-  },
-): WorkflowBudgetLimits {
+export function resolveWorkflowBudgetLimits(dependencies: {
+  readonly budgetLimits?: WorkflowBudgetLimits;
+}): WorkflowBudgetLimits {
   return dependencies.budgetLimits ?? DEFAULT_WORKFLOW_BUDGET_LIMITS;
 }
 

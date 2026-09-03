@@ -27,7 +27,9 @@ export function parseGitHubRepositoryAllowlist(
   }
   const result = githubRepositoryAllowlistSchema.safeParse(parsed);
   if (!result.success)
-    throw new Error(`${environmentVariable} must list valid repository bindings`);
+    throw new Error(
+      `${environmentVariable} must list valid repository bindings`,
+    );
   return result.data;
 }
 
@@ -109,9 +111,10 @@ export function listGitHubRepositoryBindings(
 ): readonly string[] | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   try {
-    return parseGitHubRepositoryAllowlist(raw, 'GITHUB_SELECTED_REPOSITORIES_JSON').map(
-      githubRepositoryBindingKey,
-    );
+    return parseGitHubRepositoryAllowlist(
+      raw,
+      'GITHUB_SELECTED_REPOSITORIES_JSON',
+    ).map(githubRepositoryBindingKey);
   } catch {
     return undefined;
   }

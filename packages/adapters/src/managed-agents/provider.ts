@@ -20,6 +20,7 @@ import {
   ManagedAgentsConflictError,
   ManagedAgentsLimitError,
   ManagedAgentsProviderError,
+  ManagedAgentsSessionMissingError,
 } from './errors.js';
 import {
   normalizeEvent,
@@ -100,6 +101,7 @@ interface RequiredLimits {
   maxStreamDurationMs: number;
   maxStreamReconnects: number;
   streamReconnectDelayMs: number;
+  streamIdleCheckMs: number;
 }
 
 const DEFAULT_LIMITS: RequiredLimits = {
@@ -114,6 +116,7 @@ const DEFAULT_LIMITS: RequiredLimits = {
   maxStreamDurationMs: 21 * 60_000,
   maxStreamReconnects: 3,
   streamReconnectDelayMs: 100,
+  streamIdleCheckMs: 60_000,
 };
 
 class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
@@ -149,10 +152,7 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
     return this.syncAgentForProject(DEFAULT_PROJECT_SCOPE, agent);
   }
 
-  syncAgentForProject(
-    projectId: string,
-    agent: RuntimeAgent,
-  ): Promise<void> {
+  syncAgentForProject(projectId: string, agent: RuntimeAgent): Promise<void> {
     validateLocalId(agent.id, 'agent.id');
     validateLocalId(projectId, 'projectId');
     const cacheKey = scopedCacheKey(projectId, agent.id);
@@ -678,29 +678,74 @@ class ManagedAgentsRuntimeProvider implements ManagedAgentsProvider {
           undefined,
           { signal },
         );
-        for await (const providerEvent of stream) {
-          if (this.#clock.now().getTime() >= streamDeadline) {
-            throw new ManagedAgentsLimitError(
-              'Stream exceeds maxStreamDurationMs',
-            );
-          }
-          const event = normalizeEvent(
-            providerEvent,
-            this.#limits.maxEventBytes,
-            this.#clock.now(),
-          );
-          if (event !== undefined && !seen.has(event.id)) {
-            seen.add(event.id);
-            if (seen.size > this.#limits.maxListedEvents) {
+        const iterator = stream[Symbol.asyncIterator]();
+        let pending: Promise<IteratorResult<ManagedAgentsEvent>> | undefined;
+        try {
+          for (;;) {
+            pending ??= iterator.next();
+            const winner = await Promise.race([
+              pending.then((result) => ({ result })),
+              this.#clock
+                .sleep(this.#limits.streamIdleCheckMs)
+                .then(() => 'idle-check' as const),
+            ]);
+            if (winner === 'idle-check') {
+              if (this.#clock.now().getTime() >= streamDeadline) {
+                throw new ManagedAgentsLimitError(
+                  'Stream exceeds maxStreamDurationMs',
+                );
+              }
+              // The stream is a long poll: a session that dies server-side
+              // leaves the connection open and silent, so a quiet stream is
+              // indistinguishable from a working model. Probe the session
+              // directly; a not-found answer means it is gone and every
+              // further second of waiting is wasted deadline.
+              try {
+                await this.#wrap(() =>
+                  this.#client.beta.sessions.retrieve(handle.id),
+                );
+              } catch (error) {
+                if (isProviderNotFound(error)) {
+                  throw new ManagedAgentsSessionMissingError();
+                }
+                // Any other probe failure says nothing about the session;
+                // the stream (and its own error handling) stays in charge.
+              }
+              continue;
+            }
+            const { result } = winner;
+            pending = undefined;
+            if (result.done) break;
+            if (this.#clock.now().getTime() >= streamDeadline) {
               throw new ManagedAgentsLimitError(
-                'Event collection limit exceeded',
+                'Stream exceeds maxStreamDurationMs',
               );
             }
-            yield event;
+            const event = normalizeEvent(
+              result.value,
+              this.#limits.maxEventBytes,
+              this.#clock.now(),
+            );
+            if (event !== undefined && !seen.has(event.id)) {
+              seen.add(event.id);
+              if (seen.size > this.#limits.maxListedEvents) {
+                throw new ManagedAgentsLimitError(
+                  'Event collection limit exceeded',
+                );
+              }
+              yield event;
+            }
           }
+        } finally {
+          // A generator parked on a dead long-poll never honors return();
+          // close it best-effort and let the abort signal reclaim the
+          // underlying connection.
+          pending?.catch(() => {});
+          void iterator.return?.()?.catch(() => {});
         }
       } catch (error) {
         if (isLocalError(error)) throw error;
+        if (error instanceof ManagedAgentsSessionMissingError) throw error;
         if (signal.aborted) {
           throw new ManagedAgentsLimitError(
             'Stream exceeds maxStreamDurationMs',
@@ -1049,9 +1094,7 @@ class ProjectScopedManagedAgentsProvider implements ManagedAgentsProvider {
     return this.inner.syncAgentForProject(this.projectId, agent);
   }
 
-  syncEnvironment(
-    environment: ManagedAgentsRuntimeEnvironment,
-  ): Promise<void> {
+  syncEnvironment(environment: ManagedAgentsRuntimeEnvironment): Promise<void> {
     return this.inner.syncEnvironmentForProject(this.projectId, environment);
   }
 

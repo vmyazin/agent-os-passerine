@@ -133,7 +133,7 @@ leases, multi-repo GitHub binding with split deployment/project readiness, a
 live projects UI with per-project filters, and budgets read from each
 project's configuration.
 
-Per-project *execution* concurrency is keyed, not queued, and that caveat
+Per-project _execution_ concurrency is keyed, not queued, and that caveat
 came due. Phase 2 dispatched each run to a queue named for its project;
 Trigger parks a run on a queue that no task declares in `PENDING_VERSION`
 until its TTL expires, so from 2026-08-20 every run was enqueued, reported
@@ -161,7 +161,7 @@ can be read overnight without spending the run's clock.
 **Applied configurations predating frozen acceptance tests must be
 re-applied.** The specifier prompt now has to write `definition-of-done-v2`
 with one `test/acceptance/<criterionId>.test.mjs` per criterion, and those
-prompts live in each project's *applied revision* -- not in the code. A
+prompts live in each project's _applied revision_ -- not in the code. A
 project configured before that change runs its specification step
 successfully, produces a v1 Definition of Done, and fails the workflow when
 trusted code parses it. Re-apply the project's configuration (Configuration
@@ -186,7 +186,7 @@ Verification boundary for chaining: the branch-stacking claim is proved
 against a real git repository through the local-git publisher (run A off
 `main`, run B off A's branch, B's tree carrying both files, `main`
 untouched), and every refusal has its own credential-free case. What has
-*not* run is a chained pair driven by real agent sessions end to end — that
+_not_ run is a chained pair driven by real agent sessions end to end — that
 needs paid model calls and a Trigger deployment, so it stays an explicit
 gap rather than an implied pass.
 
@@ -227,6 +227,53 @@ first implementation did only for leaf paths — an added or removed
 environment carries the whole object, variables inside. Found by reading a
 real plan against a real project, fixed, and covered by a test that fails
 without it.
+
+A second executor exists, because the first one was not delivering
+([design](./superpowers/specs/2026-09-02-local-direct-runtime-design.md),
+[plan](./superpowers/plans/2026-09-02-local-direct-runtime.md)). Between
+2026-08-17 and 2026-08-28 the control plane recorded 101 feature runs and four
+successes, two of them seed fixtures and two one-line probes; twenty-three
+attempts at a single small change against this repository all failed, across
+about eighteen distinct causes at six different runtime boundaries. Every one
+of those boundaries is mocked in the credential-free suite, which is why the
+suite stayed green throughout.
+
+`AGENTOS_EXECUTOR=local-direct` runs a local project's whole pipeline inside
+the control-plane process: the process sandbox talking to the model API
+directly, artifacts on disk, the artifact MCP as a function call, approvals
+woken by a database poll. No Trigger.dev, no Managed Agents, no tunnel, no R2.
+It is a `profile` parameter on the existing composition, so role isolation,
+budget admission, sealed acceptance tests, the signed trusted-test-report and
+the publication authority are the same code on both paths.
+
+Verification boundary for the local executor: every part of it is covered by
+credential-free tests, and that is explicitly not the gate. The gate is a real
+feature succeeding three times in a row against this repository, and it has not
+been run yet. Restart recovery, the live smoke, and goal runs on this executor
+are still open.
+
+The pipeline is three steps by default
+([design](./superpowers/specs/2026-09-03-three-step-pipeline-design.md)):
+specification with frozen acceptance tests, operator approval, implementation,
+trusted verification, publish. Planning and review are steps a project may
+declare. Review, when declared, runs after the gate and never blocks; its
+findings are notes on the run page. The change was made after a real run was
+failed by a reviewer's claim that was true of `||` and false of `??`, on code
+whose acceptance tests passed. On the process runtime verification no longer
+starts a model session. The feature the old review had wrongly blocked was re-run
+on the three-step configuration and succeeded in twelve minutes for eleven cents,
+verification at zero tokens, and its server answered `/health` through the run
+page's preview.
+
+Trigger.dev is gone
+([design](./superpowers/specs/2026-09-03-remove-trigger-design.md)). Three
+files imported its SDK; the workflow engine never did, the waitpoint was
+documented as "only a wake signal", and Postgres was already authoritative for
+every durable fact. Removing it left one execution path and cost no guarantee.
+What it takes away is unattended execution, scale-out, and a long approval
+that survives closing the app -- all three already absent from the local
+executor, now the only option. Suites after removal: core 229, adapters 745,
+control plane 320, CLI 101.
 
 Automatic merge, deployment, teams, tenancy, billing, and unrestricted business
 automation remain out of scope.

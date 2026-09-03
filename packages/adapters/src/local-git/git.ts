@@ -34,7 +34,10 @@ const SUBCOMMAND_RULES: Record<string, SubcommandRule> = {
     allowPositional: false,
     requiredFlags: ['--stdin'],
   },
-  mktree: { flags: ['-z', '--missing', '--missing=error'], allowPositional: true },
+  mktree: {
+    flags: ['-z', '--missing', '--missing=error'],
+    allowPositional: true,
+  },
   'commit-tree': { flags: ['-p', '-m'], allowPositional: true },
   'update-ref': { flags: [], allowPositional: true },
   status: { flags: ['--porcelain'], allowPositional: true },
@@ -74,7 +77,9 @@ const ALLOWED_ENV_KEYS = new Set([
   'GIT_COMMITTER_DATE',
 ]);
 
-function assertSafeEnv(env: Readonly<Record<string, string>> | undefined): void {
+function assertSafeEnv(
+  env: Readonly<Record<string, string>> | undefined,
+): void {
   if (env === undefined) return;
   for (const [envKey, value] of Object.entries(env)) {
     if (!ALLOWED_ENV_KEYS.has(envKey))
@@ -99,7 +104,10 @@ function assertSafeEnv(env: Readonly<Record<string, string>> | undefined): void 
  * its subcommand, or (where positionals are allowed at all) a value that
  * does not look like a flag and is bounded in size and character content.
  */
-function assertSafeArguments(subcommand: string, rest: readonly string[]): void {
+function assertSafeArguments(
+  subcommand: string,
+  rest: readonly string[],
+): void {
   const rule = SUBCOMMAND_RULES[subcommand];
   if (rule === undefined)
     throw new LocalGitError(

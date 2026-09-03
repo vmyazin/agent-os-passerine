@@ -243,13 +243,9 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
           request.admissionDenominator,
       );
       if (
-        deploymentSpent +
-          deploymentReserved +
-          request.estimatedMicrodollars >=
+        deploymentSpent + deploymentReserved + request.estimatedMicrodollars >=
           deploymentThreshold ||
-        deploymentSpent +
-          deploymentReserved +
-          request.estimatedMicrodollars >
+        deploymentSpent + deploymentReserved + request.estimatedMicrodollars >
           deploymentLimit
       ) {
         return { admitted: false, reason: 'daily_budget' };
@@ -352,6 +348,20 @@ export class InMemoryWorkflowCheckpointStore implements WorkflowCheckpointStore 
         reservationKey,
         ...reservation,
       }));
+  }
+
+  async releaseRunForResume(runId: string): Promise<{ released: number }> {
+    let released = 0;
+    for (const [key, effect] of [...this.#effects.entries()]) {
+      if (effect.runId !== runId || effect.status === 'succeeded') continue;
+      this.#effects.delete(key);
+      released += 1;
+    }
+    for (const [key, reservation] of [...this.#reservations.entries()])
+      if (reservation.runId === runId) this.#reservations.delete(key);
+    for (const [key, session] of [...this.#sessions.entries()])
+      if (session.runId === runId) this.#sessions.delete(key);
+    return { released };
   }
 
   #require(key: string): WorkflowEffect {

@@ -6,8 +6,9 @@ import {
 export function completeInboxMutation(
   refresh: () => void,
   detail: InboxAttentionChangedDetail,
-  publish: (detail: InboxAttentionChangedDetail) => void =
-    publishInboxAttentionChanged,
+  publish: (
+    detail: InboxAttentionChangedDetail,
+  ) => void = publishInboxAttentionChanged,
 ): void {
   publish(detail);
   refresh();

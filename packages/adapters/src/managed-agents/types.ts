@@ -15,6 +15,7 @@ export interface ManagedAgentsLimits {
   readonly maxStreamDurationMs?: number;
   readonly maxStreamReconnects?: number;
   readonly streamReconnectDelayMs?: number;
+  readonly streamIdleCheckMs?: number;
 }
 
 export interface ManagedAgentsRuntimeProviderOptions {

@@ -501,6 +501,28 @@ async function callTool(
       stringArgument(call.arguments, 'contentBase64')!,
       Math.min(unverified.maxBytes, MAX_AGENT_ARTIFACT_BYTES),
     );
+    const mediaType = stringArgument(call.arguments, 'mediaType')!;
+    // A body that is well-formed base64 of valid UTF-8 but not actually JSON
+    // clears every other check here, is hashed and stored immutably, and only
+    // fails when a later step reads it back -- permanently, after the whole
+    // session has been paid for. Rejecting it now returns a tool error while
+    // the agent still holds the session and can re-send a corrected body.
+    if (/^application\/json\s*(?:;|$)/i.test(mediaType.trim())) {
+      try {
+        JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch (error) {
+        // The reason travels back to the agent, which is the only party that
+        // can fix it, and it describes the agent's own content.
+        throw new JsonRpcCallError(
+          -32602,
+          `contentBase64 must decode to valid JSON for mediaType application/json: ${
+            error instanceof Error
+              ? error.message.slice(0, 200)
+              : 'parse failed'
+          }`,
+        );
+      }
+    }
     const claims = capability(options, token, {
       method: 'artifact.put',
       artifactId,
@@ -518,7 +540,7 @@ async function callTool(
       artifactId,
       version: integerArgument(call.arguments, 'version')!,
       bytes,
-      mediaType: stringArgument(call.arguments, 'mediaType')!,
+      mediaType,
       ...(stringArgument(call.arguments, 'digest', false) === undefined
         ? {}
         : { digest: stringArgument(call.arguments, 'digest', false)! }),

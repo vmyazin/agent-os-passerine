@@ -18,6 +18,13 @@ models:
   #   outputMicrodollarsPerMillionTokens: 0
   #   runtimeMicrodollarsPerMinute: 0
 agents:
+  specifier:
+    model: standard
+    environment: spec-env
+    tools: []
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
   implementer:
     model: standard
     environment: default
@@ -25,17 +32,41 @@ agents:
     mcps: []
     retries: 0
     timeoutMs: 900000
+  verifier:
+    model: standard
+    environment: sealed
+    tools: [bash]
+    mcps: []
+    retries: 0
+    timeoutMs: 900000
 environments:
+  spec-env:
+    runtime: process
+    variables: {}
+    tools: []
+    mcps: []
   default:
+    runtime: process
+    variables: {}
+    tools: []
+    mcps: []
+  sealed:
     runtime: process
     variables: {}
     tools: []
     mcps: []
 pipelines:
   feature:
+    # The three steps a feature run needs. A project may also declare
+    # `planning` (before implementation) and `review` (after verification,
+    # advisory, never blocking); see docs/architecture/durable-feature-workflow.md.
     steps:
-      - id: implement
+      - id: specification
+        agent: specifier
+      - id: implementation
         agent: implementer
+      - id: verification
+        agent: verifier
 policies:
   protectedPaths:
     - .github/workflows/**

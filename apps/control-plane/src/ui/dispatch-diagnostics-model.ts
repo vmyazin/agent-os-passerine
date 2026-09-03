@@ -69,12 +69,20 @@ function explainExternalStatus(state: ExternalRunState): {
     case 'DEQUEUED':
     case 'EXECUTING':
       return {
-        detail:
-          'A worker has it and is executing. Steps appear here as they finish.',
+        detail: 'It is executing. Steps appear here as they finish.',
         actionable: false,
       };
+    case 'LOST':
+      return {
+        detail:
+          'The control plane was restarted after the handoff and has no record of this execution. Nothing will retry it on its own; Retry hands it over again from where it stopped.',
+        actionable: true,
+      };
     case 'DELAYED':
-      return { detail: 'Trigger is holding it until its delay elapses.', actionable: false };
+      return {
+        detail: 'Trigger is holding it until its delay elapses.',
+        actionable: false,
+      };
     case 'EXPIRED':
       return {
         detail:
@@ -93,7 +101,10 @@ function explainExternalStatus(state: ExternalRunState): {
         actionable: true,
       };
     case 'TIMED_OUT':
-      return { detail: 'The attempt exceeded its maximum duration.', actionable: true };
+      return {
+        detail: 'The attempt exceeded its maximum duration.',
+        actionable: true,
+      };
     case 'CANCELED':
     case 'CANCELLED':
       return { detail: 'The Trigger run was cancelled.', actionable: false };
@@ -101,8 +112,8 @@ function explainExternalStatus(state: ExternalRunState): {
       return {
         detail:
           state.error === undefined
-            ? 'The task ran and failed.'
-            : `The task ran and failed: ${state.error}`,
+            ? 'The execution failed before the first step was recorded.'
+            : `The execution failed before the first step was recorded: ${state.error}`,
         actionable: true,
       };
     case 'COMPLETED':
@@ -135,15 +146,24 @@ export function diagnoseDispatch({
   const source = records.find(
     (record) => record.kind === 'source-snapshot-ingest',
   );
-  const start = records.find(
-    (record) => record.kind === 'trigger-workflow-start',
-  );
+  // The newest handoff: a resumed run has one per generation, and the one
+  // the operator is waiting on is the last one made.
+  let start: DispatchRecord | undefined;
+  for (const record of records) {
+    if (record.kind !== 'trigger-workflow-start') continue;
+    if (
+      start === undefined ||
+      (record.updatedAt ?? '') > (start.updatedAt ?? '')
+    )
+      start = record;
+  }
 
   // Source ingestion runs before dispatch, so its failure is the reason
   // nothing was ever handed off.
   if (source?.status === 'failed' || source?.status === 'dead-letter')
     return {
-      headline: 'Reading the repository failed, so the run was never dispatched.',
+      headline:
+        'Reading the repository failed, so the run was never dispatched.',
       ...(source.error === undefined ? {} : { detail: source.error }),
       actionable: true,
       fromExecutor: false,
@@ -166,8 +186,11 @@ export function diagnoseDispatch({
       fromExecutor: false,
     };
 
+  const local = start.externalRef?.startsWith('local-direct:') === true;
   const base = {
-    headline: 'Handed off to Trigger.',
+    headline: local
+      ? 'Handed to the local executor.'
+      : 'Handed off to Trigger.',
     ...(start.externalRef === undefined
       ? {}
       : { externalRef: start.externalRef }),
@@ -175,9 +198,10 @@ export function diagnoseDispatch({
   if (external === undefined)
     return {
       ...base,
-      detail:
-        'What happened after that is only visible in Trigger; this deployment cannot query it.',
-      actionable: false,
+      detail: local
+        ? 'This process has no record of the execution.'
+        : 'What happened after that is only visible in Trigger; this deployment cannot query it.',
+      actionable: local,
       fromExecutor: false,
     };
   const explained = explainExternalStatus(external);

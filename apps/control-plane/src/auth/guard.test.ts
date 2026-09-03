@@ -37,31 +37,33 @@ describe('request authentication guard', () => {
   });
 
   it('accepts a same-origin localhost mutation on a preview port', () => {
-    const request = new Request('http://localhost:3119/api/approvals/1/approve', {
-      method: 'POST',
-      headers: {
-        origin: 'http://localhost:3119',
-        'sec-fetch-site': 'same-origin',
+    const request = new Request(
+      'http://localhost:3119/api/approvals/1/approve',
+      {
+        method: 'POST',
+        headers: {
+          origin: 'http://localhost:3119',
+          'sec-fetch-site': 'same-origin',
+        },
       },
-    });
+    );
 
     expect(() =>
-      enforceBrowserMutationOrigin(
-        request,
-        'http://localhost:3010',
-        true,
-      ),
+      enforceBrowserMutationOrigin(request, 'http://localhost:3010', true),
     ).not.toThrow();
   });
 
   it('keeps preview-port mutations closed outside local development', () => {
-    const request = new Request('http://localhost:3119/api/approvals/1/approve', {
-      method: 'POST',
-      headers: {
-        origin: 'http://localhost:3119',
-        'sec-fetch-site': 'same-origin',
+    const request = new Request(
+      'http://localhost:3119/api/approvals/1/approve',
+      {
+        method: 'POST',
+        headers: {
+          origin: 'http://localhost:3119',
+          'sec-fetch-site': 'same-origin',
+        },
       },
-    });
+    );
 
     expect(() =>
       enforceBrowserMutationOrigin(request, 'http://localhost:3010'),

@@ -159,9 +159,7 @@ describe('local source snapshot ingestion', () => {
         repositorySha: headSha,
       },
     });
-    await expect(ingestor.ensure('run-1')).rejects.toThrow(
-      /symlink|submodule/,
-    );
+    await expect(ingestor.ensure('run-1')).rejects.toThrow(/symlink|submodule/);
   });
 
   it('rejects a file containing a NUL byte', async () => {

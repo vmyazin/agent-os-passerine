@@ -110,10 +110,13 @@ describe('runKimiAgentLoop', () => {
     ]);
     expect(events[0]).toEqual({
       type: 'tool_call',
+      name: 'bash',
       detail: JSON.stringify({ name: 'bash', input: { cmd: 'ls' } }),
     });
     expect(events[1]).toEqual({
       type: 'tool_result',
+      name: 'bash',
+      isError: false,
       detail: JSON.stringify({
         name: 'bash',
         isError: false,
@@ -646,11 +649,12 @@ describe('createKimiHttpTransport', () => {
   it('classifies an empty successful response as a transient transport failure', async () => {
     const transport = createKimiHttpTransport({
       apiKey: 'kimi-key',
-      fetchImpl: vi.fn<typeof fetch>(async () =>
-        new Response('', {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
+      fetchImpl: vi.fn<typeof fetch>(
+        async () =>
+          new Response('', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
       ),
     });
 
@@ -675,26 +679,23 @@ describe('createKimiHttpTransport', () => {
     const transport = createKimiHttpTransport({
       apiKey: 'kimi-key',
       fetchImpl,
+      // This test is about the error it raises once retries are exhausted, not
+      // about the retry schedule -- see transport.test.ts for that -- so the
+      // backoff is skipped rather than waited out.
+      sleepImpl: async () => {},
     });
 
-    vi.useFakeTimers();
-    try {
-      const promise = transport.send({
-        model: 'kimi-test',
-        messages: [],
-        tools: [],
-        maxTokens: 1,
-      });
-      const assertion = expect(promise).rejects.toMatchObject({
-        name: 'KimiTransportError',
-        status: 500,
-      });
-      await vi.advanceTimersByTimeAsync(1000);
-      await assertion;
-      const rejection = await promise.catch((error: unknown) => error);
-      expect((rejection as { body: string }).body).toHaveLength(500);
-    } finally {
-      vi.useRealTimers();
-    }
+    const promise = transport.send({
+      model: 'kimi-test',
+      messages: [],
+      tools: [],
+      maxTokens: 1,
+    });
+    await expect(promise).rejects.toMatchObject({
+      name: 'KimiTransportError',
+      status: 500,
+    });
+    const rejection = await promise.catch((error: unknown) => error);
+    expect((rejection as { body: string }).body).toHaveLength(500);
   });
 });

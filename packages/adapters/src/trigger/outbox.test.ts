@@ -391,7 +391,7 @@ describe('durable Trigger outbox start', () => {
 
     await outbox.requestStart(request);
 
-    expect(startGoal).toHaveBeenCalledWith('goal-1', 'goal-project');
+    expect(startGoal).toHaveBeenCalledWith('goal-1', 'goal-project', 0, 0);
     expect(startFeature).not.toHaveBeenCalled();
     await expect(
       outbox.requestStart({ ...request, pipeline: 'feature' }),
@@ -524,8 +524,8 @@ describe('durable Trigger outbox start', () => {
     await fixture.outbox.requestStart(request);
 
     expect(fixture.startFeature.mock.calls).toEqual([
-      ['run-1', 'project-1'],
-      ['run-1', 'project-1', 1],
+      ['run-1', 'project-1', 0, 0],
+      ['run-1', 'project-1', 1, 0],
     ]);
     await expect(
       fixture.checkpoints.getEffect('workflow-start:run-1:retry:1'),

@@ -99,12 +99,10 @@ describe('control-plane GitHub reader identity', () => {
     delete process.env.GITHUB_SELECTED_REPOSITORIES_JSON;
 
     // No GitHub reader/publisher env at all: construction must not throw
-    // trying to validate a reader this deployment will never use. (It will
-    // still fail later, for an unrelated reason -- no R2 env configured --
-    // proving reader validation specifically was skipped, not that
-    // everything happened to succeed.)
-    expect(() => workflowDispatchFromEnv()).toThrow(
-      'CLOUDFLARE_R2_ACCOUNT_ID is required',
-    );
+    // trying to validate a reader this deployment will never use. It still
+    // fails, for an unrelated reason -- this fixture has no usable database
+    // URL -- which proves reader validation specifically was skipped rather
+    // than everything happening to succeed.
+    expect(() => workflowDispatchFromEnv()).toThrow(/DATABASE_URL/);
   });
 });

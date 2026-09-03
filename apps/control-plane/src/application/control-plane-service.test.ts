@@ -14,6 +14,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import { ControlPlaneService, ServiceError } from './control-plane-service';
+import { runProjectionSchema } from '../http/contracts';
 
 const now = isoTimestamp('2026-08-17T12:00:00.000Z');
 const ids = (kind: string, key: string) =>
@@ -1042,6 +1043,63 @@ runtime: { provider: local }
     expect(JSON.stringify(projection)).not.toContain('must never escape');
   });
 
+  it('orders step progress by the time it shows, not by append order', async () => {
+    const repository = new InMemoryDomainRepository();
+    const runId = persistenceId('run', 'run-progress-order');
+    const stepRunId = persistenceId('stepRun', 'run-progress-order:planning:1');
+    await repository.createProject({
+      id: persistenceId('project', 'project-1'),
+      name: 'Passerine',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.createRun({
+      id: runId,
+      projectId: persistenceId('project', 'project-1'),
+      pipeline: 'feature',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.upsertStepRun({
+      id: stepRunId,
+      runId,
+      stepKey: 'planning',
+      attempt: 1,
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+    // Provider events are stamped with their own times, so the worker can
+    // append a later-stamped note before an earlier-stamped one.
+    for (const [ordinal, occurredAt, message] of [
+      [1, '2026-08-17T12:00:02.000Z', 'Waiting on response'],
+      [2, '2026-08-17T12:00:01.000Z', 'Model is working'],
+    ] as const) {
+      await repository.appendEvent({
+        runId,
+        eventId: persistenceId('event', `ordered-${String(ordinal)}`),
+        fingerprint: `ordered-${String(ordinal)}`,
+        type: 'step.progress',
+        payload: {
+          stepRunId,
+          stepKey: 'planning',
+          attempt: 1,
+          phase: 'waiting',
+          message,
+        },
+        occurredAt: isoTimestamp(occurredAt),
+      });
+    }
+
+    const projection =
+      await createService(repository).getRun('run-progress-order');
+
+    expect(projection.steps[0]?.progress.map((entry) => entry.message)).toEqual(
+      ['Model is working', 'Waiting on response'],
+    );
+  });
+
   it('uses allowlisted projection DTOs and redacts secret-bearing values', async () => {
     const repository = new InMemoryDomainRepository();
     await repository.createProject({
@@ -1994,6 +2052,220 @@ runtime: { provider: local }
       0,
     );
   };
+
+  it('resumes the same run and asks for a dispatch generation it has not used', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const effectKeys: { key: string }[] = [];
+    const releaseRunForResume = vi.fn(async () => ({ released: 3 }));
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart, requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+      [],
+      undefined,
+      undefined,
+      { releaseRunForResume, listEffects: async () => effectKeys },
+    );
+    const applied = await service.applyConfiguration('resume-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('resume-1', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    // A run worth resuming has already executed a step, and that step carries
+    // its activity. Returning one is what a resume response actually does.
+    await repository.upsertStepRun({
+      id: persistenceId('stepRun', `${run.id}:specification:1`),
+      runId: persistenceId('run', run.id),
+      stepKey: 'specification',
+      attempt: 1,
+      status: 'succeeded',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await repository.appendEvent({
+      runId: persistenceId('run', run.id),
+      eventId: persistenceId('event', `${run.id}-progress`),
+      fingerprint: `${run.id}-progress`,
+      type: 'step.progress',
+      payload: {
+        stepRunId: `${run.id}:specification:1`,
+        stepKey: 'specification',
+        attempt: 1,
+        phase: 'tool',
+        message: 'Model is using glob',
+      },
+      occurredAt: now,
+    });
+    await finish(repository, run.id);
+
+    const resumed = await service.resumeRun(run.id);
+
+    // Same run: that is what makes its finished steps reusable.
+    expect(resumed.id).toBe(run.id);
+    expect(resumed.status).toBe('pending');
+    // The run is pending again, so the failure it is being resumed past must
+    // not still be attached to it.
+    expect(resumed.error).toBeUndefined();
+    // The response has to satisfy the route's own output contract. A step's
+    // activity was missing from that contract, so every resume of a run that
+    // had actually run a step failed with an internal error.
+    // projectId is substituted because this suite's fake id generator derives
+    // it from the repository binding and yields a slash, which a real
+    // (hash-derived) project id never contains.
+    expect(() =>
+      runProjectionSchema.parse({ ...resumed, projectId: 'project-test' }),
+    ).not.toThrow();
+    expect(resumed.steps[0]?.progress?.[0]?.message).toBe(
+      'Model is using glob',
+    );
+    expect(releaseRunForResume).toHaveBeenCalledWith(run.id);
+    expect(requestStart).toHaveBeenLastCalledWith({
+      idempotencyKey: `workflow-start:${run.id}:resume:1`,
+      runId: run.id,
+      pipeline: 'feature',
+      resumeGeneration: 1,
+    });
+
+    // A second resume must not reuse the first generation: Trigger holds a key
+    // for thirty days and would hand back the execution that already ran.
+    effectKeys.push({ key: `workflow-start:${run.id}:resume:1` });
+    const reopened = await repository.getRun(persistenceId('run', run.id));
+    await repository.transitionRun(
+      persistenceId('run', run.id),
+      ['pending'],
+      { status: 'failed', updatedAt: now, completedAt: now },
+      reopened?.stateVersion ?? 0,
+    );
+    await service.resumeRun(run.id);
+    expect(requestStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resumeGeneration: 2 }),
+    );
+  });
+
+  it('records a budget override on the run without starting anything', async () => {
+    const repository = new InMemoryDomainRepository();
+    const requestStart = vi.fn();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart, requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+    );
+    const applied = await service.applyConfiguration('override-cfg', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('override-1', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, run.id);
+    requestStart.mockClear();
+
+    await service.overrideRunBudget(run.id, 2_000_000);
+
+    const events = await repository.listEvents(persistenceId('run', run.id), {
+      limit: 100,
+    });
+    const granted = events.filter(
+      (event) => event.type === 'run.budget_override_granted',
+    );
+    expect(granted).toHaveLength(1);
+    expect(granted[0]?.payload).toMatchObject({ microdollars: 2_000_000 });
+    // Authorising the spend and continuing the run are separate decisions.
+    expect(requestStart).not.toHaveBeenCalled();
+    await expect(
+      repository.getRun(persistenceId('run', run.id)),
+    ).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  it('refuses a budget override that is not a sane positive amount', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+    );
+    const applied = await service.applyConfiguration('override-cfg-2', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const run = await service.startRunForProject('override-2', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    await finish(repository, run.id);
+
+    for (const amount of [0, -1, 1.5, 100_000_001])
+      await expect(
+        service.overrideRunBudget(run.id, amount),
+      ).rejects.toMatchObject({ code: 'invalid_budget_override' });
+  });
+
+  it('refuses to resume a run that finished successfully or is still live', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = new ControlPlaneService(
+      repository,
+      () => now,
+      ids,
+      { requestStart: vi.fn(), requestApprovalResume: vi.fn() },
+      { resolve: vi.fn(async () => 'b'.repeat(40)) },
+      goalCommands,
+      [],
+      undefined,
+      undefined,
+      {
+        releaseRunForResume: async () => ({ released: 0 }),
+        listEffects: async () => [],
+      },
+    );
+    const applied = await service.applyConfiguration('resume-cfg-2', {
+      canonicalConfig: canonicalConfigJson(config()),
+      digest: canonicalConfigHash(config()),
+      expectedRevision: null,
+      expectedDigest: null,
+    });
+    const live = await service.startRunForProject('resume-2', {
+      projectId: applied.projectId,
+      title: 'about page',
+      description: 'a page describing the purpose of the app',
+      pipeline: 'feature',
+    });
+    // Still pending: a worker may hold it, and two paid sessions must never
+    // share one run.
+    await expect(service.resumeRun(live.id)).rejects.toMatchObject({
+      code: 'run_not_resumable',
+    });
+
+    await finish(repository, live.id, 'succeeded');
+    await expect(service.resumeRun(live.id)).rejects.toMatchObject({
+      code: 'run_not_resumable',
+    });
+  });
 
   it('re-issues the request as a new run, leaving the original as the record', async () => {
     const { repository, service, applied } = await seeded();

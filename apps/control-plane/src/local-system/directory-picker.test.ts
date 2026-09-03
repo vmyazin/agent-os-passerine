@@ -50,10 +50,7 @@ describe('local macOS directory picker', () => {
     expect(runFile).toHaveBeenCalledOnce();
     expect(runFile).toHaveBeenCalledWith(
       '/usr/bin/osascript',
-      [
-        '-e',
-        expect.stringContaining('choose folder'),
-      ],
+      ['-e', expect.stringContaining('choose folder')],
       expect.objectContaining({
         shell: false,
         timeout: expect.any(Number),
@@ -88,7 +85,9 @@ describe('local macOS directory picker', () => {
       stderr: '',
     }));
 
-    await expect(selectLocalDirectory({ runFile: unsafe })).rejects.toMatchObject({
+    await expect(
+      selectLocalDirectory({ runFile: unsafe }),
+    ).rejects.toMatchObject({
       code: 'directory_picker_invalid_output',
       status: 500,
     });

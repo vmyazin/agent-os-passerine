@@ -607,6 +607,12 @@ h1 {
    element that cannot simply ignore it. The ring becomes a filled dot: the
    same "something is in flight" signal, standing still. */
 @media (prefers-reduced-motion: reduce) {
+  /* Still marks which step is running -- a steady dashed rail -- without
+     motion for a reader who asked for none. */
+  .run-step-item-running::before {
+    animation: none;
+    opacity: 1;
+  }
   .status-spinner {
     border-top-color: currentColor;
     background: currentColor;
@@ -1568,6 +1574,52 @@ div.inbox-message-copy {
 .run-step-list > li {
   border-left: 3px solid var(--timeline-rail);
   background: var(--surface-sheet);
+}
+/*
+ * The running step's rail: a dashed line travelling upward, breathing.
+ *
+ * Drawn as a gradient on a pseudo-element rather than as a border, because a
+ * border cannot animate its dashes. The element keeps its 3px border box so
+ * nothing shifts when a step starts or stops running, and the rail is painted
+ * over it.
+ */
+.run-step-item-running {
+  position: relative;
+  border-left-color: transparent;
+}
+.run-step-item-running::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: -3px;
+  width: 3px;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--signal-violet) 0 8px,
+    transparent 8px 16px
+  );
+  background-size: 100% 16px;
+  animation:
+    run-step-rail-travel 900ms linear infinite,
+    run-step-rail-breathe 2.4s ease-in-out infinite;
+}
+@keyframes run-step-rail-travel {
+  /* One dash period per cycle, so the loop has no visible seam. */
+  from {
+    background-position-y: 0;
+  }
+  to {
+    background-position-y: -16px;
+  }
+}
+@keyframes run-step-rail-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .run-step {
   min-width: 0;

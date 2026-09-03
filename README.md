@@ -37,13 +37,10 @@ GitHub OAuth app is needed on localhost. Optional demo data: set
 ### Full stack
 
 Real runs add, in order: a Neon Postgres (`DATABASE_URL`,
-`AGENTOS_REPOSITORY=neon`, `pnpm db:migrate`), a Trigger.dev project
-(`npx trigger.dev@latest dev` registers the workflow tasks), Cloudflare R2,
+`AGENTOS_REPOSITORY=neon`, `pnpm db:migrate`), Cloudflare R2,
 model keys (`ANTHROPIC_API_KEY`, optionally `KIMI_API_KEY`), the trust-anchor
 secrets, two GitHub Apps (read-only reader + draft-PR publisher) bound to one
-selected repository, and finally `TRIGGER_SECRET_KEY` — the switch that
-enables durable dispatch and makes the control plane validate the whole
-chain at boot. Every variable is documented in `.env.example`. Verify
+selected repository,. Every variable is documented in `.env.example`. Verify
 credentials with the live smokes
 (`AGENTOS_LIVE_TESTS=1 node packages/adapters/scripts/<r2|kimi|managed-agents>-smoke.mjs`).
 
@@ -53,9 +50,10 @@ Local experiment projects: set `AGENTOS_LOCAL_WORKSPACES_ROOT`, choose
 no GitHub Apps required (agent sessions still execute in the Managed
 Agents cloud and artifacts are stored in R2).
 
-The no-cost test path uses in-memory/fake providers. Production uses Neon,
-Trigger.dev, Managed Agents, R2, and the selected-repository GitHub Apps
-through the same stable contracts.
+The no-cost test path uses in-memory/fake providers. Runs execute inside the
+control-plane process; see the
+[workflow runbook](./docs/architecture/durable-feature-workflow.md) for what
+that means and what it costs.
 
 Start with the [architecture overview](./docs/architecture/README.md), the
 [durable workflow runbook](./docs/architecture/durable-feature-workflow.md),
