@@ -14,6 +14,7 @@ import {
 } from './icons';
 import type { InboxAttentionChangedDetail } from './inbox-count-client';
 import { completeInboxMutation } from './inbox-mutation-success';
+import { Button, ButtonLink } from './button';
 
 /**
  * Prefer the server's explanation over a generic retry prompt. A 409 here
@@ -85,27 +86,25 @@ export function ApprovalActions({
   return (
     <div className="action-stack">
       <div className="button-row">
-        <button
+        <Button
           onClick={() =>
             void mutate(`/api/approvals/${approvalId}/approve`, { scopeHash })
           }
           disabled={pending}
-          type="button"
         >
           <CheckIcon className="button-icon" />
           Approve request
-        </button>
-        <button
-          className="secondary"
+        </Button>
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() =>
             void mutate(`/api/approvals/${approvalId}/reject`, { scopeHash })
           }
-          type="button"
         >
           <XIcon className="button-icon" />
           Reject request
-        </button>
+        </Button>
       </div>
       <p aria-live="polite" ref={statusRef} tabIndex={-1}>
         {message}
@@ -169,14 +168,13 @@ export function OverrideRunBudgetAction({
   return (
     <div className="action-stack">
       <div className="button-row">
-        <button
-          className="secondary"
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() => void grant()}
-          type="button"
         >
           {pending ? 'Granting…' : `Allow ${amount} more`}
-        </button>
+        </Button>
       </div>
       <p aria-live="polite">{message}</p>
     </div>
@@ -232,10 +230,10 @@ export function ResumeRunAction({
   return (
     <div className="action-stack">
       <div className="button-row">
-        <button disabled={pending} onClick={() => void resume()} type="button">
+        <Button disabled={pending} onClick={() => void resume()}>
           <RotateCcwIcon className="button-icon" />
           {pending ? `${label}…` : label}
-        </button>
+        </Button>
       </div>
       <p aria-live="polite">{message}</p>
     </div>
@@ -351,15 +349,14 @@ export function PreviewRunAction({
         <p>Checking for a running preview…</p>
       ) : preview === null ? (
         <div className="button-row">
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={pending}
             onClick={() => void start()}
-            type="button"
           >
             <PlayIcon className="button-icon" />
             {pending ? 'Starting…' : 'Start preview'}
-          </button>
+          </Button>
         </div>
       ) : (
         <>
@@ -409,15 +406,14 @@ export function PreviewRunAction({
             </p>
           )}
           <div className="button-row">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               disabled={pending}
               onClick={() => void stop()}
-              type="button"
             >
               <SquareIcon className="button-icon" />
               {pending ? 'Stopping…' : 'Stop'}
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -462,31 +458,22 @@ export function RestartRunAction({ runId }: { readonly runId: string }) {
       <div className="button-row">
         {confirming ? (
           <>
-            <button
-              disabled={pending}
-              onClick={() => void start()}
-              type="button"
-            >
+            <Button disabled={pending} onClick={() => void start()}>
               <PlayIcon className="button-icon" />
               {pending ? 'Starting…' : 'Confirm, start again'}
-            </button>
-            <button
-              className="secondary"
+            </Button>
+            <Button
+              variant="secondary"
               disabled={pending}
               onClick={() => setConfirming(false)}
-              type="button"
             >
               Cancel
-            </button>
+            </Button>
           </>
         ) : (
-          <button
-            className="secondary"
-            onClick={() => setConfirming(true)}
-            type="button"
-          >
+          <Button variant="secondary" onClick={() => setConfirming(true)}>
             Start again
-          </button>
+          </Button>
         )}
       </div>
       <p aria-live="polite">{message}</p>
@@ -516,36 +503,28 @@ export function CancelRunAction({
       <div className="button-row">
         {confirming ? (
           <>
-            <button
+            <Button
               disabled={pending}
               onClick={() => void mutate(`/api/runs/${runId}/cancel`, {})}
-              type="button"
             >
               <BanIcon className="button-icon" />
               {pending ? 'Cancelling…' : 'Confirm cancel'}
-            </button>
-            <button
-              className="secondary"
+            </Button>
+            <Button
+              variant="secondary"
               disabled={pending}
               onClick={() => setConfirming(false)}
-              type="button"
             >
               Keep run
-            </button>
+            </Button>
           </>
         ) : (
           <>
-            <button
-              className="secondary"
-              onClick={() => setConfirming(true)}
-              type="button"
-            >
+            <Button variant="secondary" onClick={() => setConfirming(true)}>
               Cancel run
-            </button>
+            </Button>
             {inboxHref === undefined ? null : (
-              <a className="button" href={inboxHref}>
-                View Inbox
-              </a>
+              <ButtonLink href={inboxHref}>View Inbox</ButtonLink>
             )}
           </>
         )}
@@ -588,9 +567,9 @@ export function ReplyForm({ messageId }: { readonly messageId: string }) {
         rows={4}
         value={reply}
       />
-      <button disabled={pending} type="submit">
+      <Button disabled={pending} type="submit">
         {pending ? 'Sending…' : 'Send reply'}
-      </button>
+      </Button>
       <p aria-live="polite" ref={statusRef} tabIndex={-1}>
         {message}
       </p>

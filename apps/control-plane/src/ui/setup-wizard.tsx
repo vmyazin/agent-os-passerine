@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ProjectListProjection } from '../application/control-plane-service';
 import { publishProjectCount } from './project-count-signal';
 import { renderSetupConfig } from './setup-template-render';
+import { Button } from './button';
 
 interface ReadinessItem {
   readonly key: string;
@@ -188,7 +189,8 @@ export function SetupWizard() {
     try {
       const response = await fetch('/api/projects');
       if (!response.ok) return;
-      const loaded = (await response.json()) as readonly ProjectListProjection[];
+      const loaded =
+        (await response.json()) as readonly ProjectListProjection[];
       setProjects(loaded);
       // Applying a configuration can create a project; tell the rail so its
       // badge stops disagreeing with the switcher right next to it.
@@ -238,9 +240,10 @@ export function SetupWizard() {
     // whatever is loaded. Treating a missing config as "no project" reset the
     // wizard instead, which made the switcher look like it did nothing.
     const loaded: WizardSnapshot = {
-      mode: body.active.canonicalConfig === undefined
-        ? mode
-        : modeFromYaml(body.active.canonicalConfig),
+      mode:
+        body.active.canonicalConfig === undefined
+          ? mode
+          : modeFromYaml(body.active.canonicalConfig),
       yaml: body.active.canonicalConfig ?? yaml,
       localName: '',
       applied: {
@@ -375,9 +378,7 @@ export function SetupWizard() {
     },
   ] as const;
 
-  const fillTestProject = async (
-    project: (typeof TEST_PROJECTS)[number],
-  ) => {
+  const fillTestProject = async (project: (typeof TEST_PROJECTS)[number]) => {
     const created = await createRepository({ namePrefix: project.namePrefix });
     if (created === undefined) return;
     setTitle(project.title);
@@ -407,7 +408,9 @@ export function SetupWizard() {
         mode,
         yaml,
         localName,
-        ...(localRepositoryResult === undefined ? {} : { localRepositoryResult }),
+        ...(localRepositoryResult === undefined
+          ? {}
+          : { localRepositoryResult }),
         applied: result,
         title,
         description,
@@ -460,12 +463,18 @@ export function SetupWizard() {
       setTrustedCommands(body.commands);
       if (body.commands.length > 0 && criteria.length === 0)
         setCriteria([
-          { key: crypto.randomUUID(), description: '', command: body.commands[0]! },
+          {
+            key: crypto.randomUUID(),
+            description: '',
+            command: body.commands[0]!,
+          },
         ]);
     } catch (error) {
       setTrustedCommands([]);
       setCommandsError(
-        error instanceof Error ? error.message : 'command allowlist unavailable',
+        error instanceof Error
+          ? error.message
+          : 'command allowlist unavailable',
       );
     }
   };
@@ -491,34 +500,34 @@ export function SetupWizard() {
       const response = await fetch(
         pipeline === 'goal' ? '/api/goals' : '/api/features',
         {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          projectId: applied.projectId,
-          title,
-          description,
-          repositorySha: head.repositorySha,
-          configDigest: applied.provenance.configDigest,
-          modelDigest: applied.provenance.modelDigest,
-          promptDigest: applied.provenance.promptDigest,
-          environmentDigest: applied.provenance.environmentDigest,
-          policyDigest: applied.provenance.policyDigest,
-          ...(pipeline === 'goal'
-            ? {
-                criteria: criteria.map((criterion, ordinal) => ({
-                  // Stable, readable, and unique within the goal; the draft
-                  // key is a UUID that would only clutter the run record.
-                  id: `criterion-${ordinal + 1}`,
-                  type: 'command' as const,
-                  description: criterion.description.trim(),
-                  command: criterion.command,
-                })),
-              }
-            : {}),
-        }),
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': crypto.randomUUID(),
+          },
+          body: JSON.stringify({
+            projectId: applied.projectId,
+            title,
+            description,
+            repositorySha: head.repositorySha,
+            configDigest: applied.provenance.configDigest,
+            modelDigest: applied.provenance.modelDigest,
+            promptDigest: applied.provenance.promptDigest,
+            environmentDigest: applied.provenance.environmentDigest,
+            policyDigest: applied.provenance.policyDigest,
+            ...(pipeline === 'goal'
+              ? {
+                  criteria: criteria.map((criterion, ordinal) => ({
+                    // Stable, readable, and unique within the goal; the draft
+                    // key is a UUID that would only clutter the run record.
+                    id: `criterion-${ordinal + 1}`,
+                    type: 'command' as const,
+                    description: criterion.description.trim(),
+                    command: criterion.command,
+                  })),
+                }
+              : {}),
+          }),
         },
       );
       if (!response.ok) throw new Error(await readError(response));
@@ -558,9 +567,9 @@ export function SetupWizard() {
         {readinessError !== '' ? (
           <p role="alert">
             {readinessError}{' '}
-            <button className="secondary" onClick={() => void loadReadiness()} type="button">
+            <Button variant="secondary" onClick={() => void loadReadiness()}>
               Retry
-            </button>
+            </Button>
           </p>
         ) : null}
         {readiness !== undefined ? (
@@ -610,58 +619,62 @@ export function SetupWizard() {
                 enqueue work. Runs stay <strong>Pending</strong> until a
                 Trigger.dev worker is connected: locally run{' '}
                 <code>npx trigger.dev@latest dev</code> in a second terminal,
-                and deploy one with <code>pnpm trigger:deploy</code>. Nothing
-                on this page can detect that worker, so a fully green check
-                above does not by itself mean a run will execute.
+                and deploy one with <code>pnpm trigger:deploy</code>. Nothing on
+                this page can detect that worker, so a fully green check above
+                does not by itself mean a run will execute.
               </p>
             ) : null}
-            <button className="secondary" onClick={() => void loadReadiness()} type="button">
+            <Button variant="secondary" onClick={() => void loadReadiness()}>
               Check again
-            </button>
+            </Button>
           </>
         ) : null}
       </section>
 
       <section aria-labelledby="setup-step-2">
-        <StepHeading step={2} title="Apply configuration" done={applied !== undefined} />
+        <StepHeading
+          step={2}
+          title="Apply configuration"
+          done={applied !== undefined}
+        />
         <nav aria-label="Project switcher" className="project-switcher">
-          <button
+          <Button
             aria-pressed={activeProjectKey === NEW_PROJECT_KEY}
-            className={activeProjectKey === NEW_PROJECT_KEY ? undefined : 'secondary'}
+            variant={
+              activeProjectKey === NEW_PROJECT_KEY ? 'primary' : 'secondary'
+            }
             onClick={() => void selectProject(NEW_PROJECT_KEY)}
-            type="button"
           >
             New project
-          </button>
+          </Button>
           {projects.map((project) => (
-            <button
+            <Button
               aria-pressed={activeProjectKey === project.id}
-              className={activeProjectKey === project.id ? undefined : 'secondary'}
+              variant={
+                activeProjectKey === project.id ? 'primary' : 'secondary'
+              }
               key={project.id}
               onClick={() => void selectProject(project.id)}
-              type="button"
             >
               {project.name}
-            </button>
+            </Button>
           ))}
         </nav>
         <div className="button-row" role="group" aria-label="Project type">
-          <button
+          <Button
             aria-pressed={mode === 'github'}
-            className={mode === 'github' ? undefined : 'secondary'}
+            variant={mode === 'github' ? 'primary' : 'secondary'}
             onClick={() => selectMode('github')}
-            type="button"
           >
             GitHub project
-          </button>
-          <button
+          </Button>
+          <Button
             aria-pressed={mode === 'local'}
-            className={mode === 'local' ? undefined : 'secondary'}
+            variant={mode === 'local' ? 'primary' : 'secondary'}
             onClick={() => selectMode('local')}
-            type="button"
           >
             Local experiment
-          </button>
+          </Button>
         </div>
         {mode === 'local' ? (
           <p>
@@ -673,8 +686,10 @@ export function SetupWizard() {
         ) : null}
         <p>
           Edit the template: set the project name,{' '}
-          {mode === 'local' ? 'the local repository path' : 'the repository URL'},
-          and the default branch. The agents, environments, prompts, and
+          {mode === 'local'
+            ? 'the local repository path'
+            : 'the repository URL'}
+          , and the default branch. The agents, environments, prompts, and
           policies below are a working baseline.
         </p>
         {mode === 'local' ? (
@@ -692,47 +707,45 @@ export function SetupWizard() {
               <small>Lowercase letters, digits, and hyphens.</small>
             </p>
             <div className="button-row">
-              <button
-                className="secondary"
+              <Button
+                variant="secondary"
                 disabled={
                   creatingLocalRepository ||
                   localName.trim() === '' ||
                   localNotReady
                 }
                 onClick={() => void createLocalRepository()}
-                type="button"
               >
-                {creatingLocalRepository ? 'Creating…' : 'Create local repository'}
-              </button>
+                {creatingLocalRepository
+                  ? 'Creating…'
+                  : 'Create local repository'}
+              </Button>
               {TEST_PROJECTS.map((project) => (
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   disabled={creatingLocalRepository || localNotReady}
                   key={project.key}
                   onClick={() => void fillTestProject(project)}
-                  type="button"
                 >
                   {creatingLocalRepository
                     ? 'Creating…'
                     : `Fill: ${project.label}`}
-                </button>
+                </Button>
               ))}
             </div>
             <p>
               <small>
-                Each Fill button creates the next numbered repository for
-                that project type (todo-app-01, dashboard-01, snake-01, …)
-                and pre-fills the configuration and a small dependency-free
-                first feature; you still apply, resolve the head, and start
-                the run. Later runs grow the same project one feature at a
-                time.
+                Each Fill button creates the next numbered repository for that
+                project type (todo-app-01, dashboard-01, snake-01, …) and
+                pre-fills the configuration and a small dependency-free first
+                feature; you still apply, resolve the head, and start the run.
+                Later runs grow the same project one feature at a time.
               </small>
             </p>
             {localNotReady ? (
               <p>
                 <small>
-                  Set AGENTOS_LOCAL_WORKSPACES_ROOT to enable local
-                  experiments.
+                  Set AGENTOS_LOCAL_WORKSPACES_ROOT to enable local experiments.
                 </small>
               </p>
             ) : null}
@@ -756,9 +769,12 @@ export function SetupWizard() {
           value={yaml}
         />
         <div className="button-row">
-          <button disabled={applying || !modeReady} onClick={() => void apply()} type="button">
+          <Button
+            disabled={applying || !modeReady}
+            onClick={() => void apply()}
+          >
             {applying ? 'Applying…' : 'Apply configuration'}
-          </button>
+          </Button>
         </div>
         {readiness !== undefined && !modeReady ? (
           <p>Complete step 1 before applying.</p>
@@ -774,21 +790,24 @@ export function SetupWizard() {
       </section>
 
       <section aria-labelledby="setup-step-3">
-        <StepHeading step={3} title="Repository head" done={head !== undefined} />
+        <StepHeading
+          step={3}
+          title="Repository head"
+          done={head !== undefined}
+        />
         <p>
-          The run pins the exact commit it builds on — this works the same
-          way for GitHub and local projects. Refresh after every merge so the
-          base matches the repository.
+          The run pins the exact commit it builds on — this works the same way
+          for GitHub and local projects. Refresh after every merge so the base
+          matches the repository.
         </p>
         <div className="button-row">
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={fetchingHead || applied === undefined}
             onClick={() => void fetchHead()}
-            type="button"
           >
             {fetchingHead ? 'Resolving…' : 'Resolve current head'}
-          </button>
+          </Button>
         </div>
         {applied === undefined ? <p>Complete step 2 first.</p> : null}
         {headError !== '' ? <p role="alert">{headError}</p> : null}
@@ -803,23 +822,21 @@ export function SetupWizard() {
       <section aria-labelledby="setup-step-4">
         <StepHeading step={4} title="Start the first run" done={runId !== ''} />
         <div className="button-row" role="group" aria-label="Run type">
-          <button
+          <Button
             aria-pressed={pipeline === 'feature'}
-            className={pipeline === 'feature' ? undefined : 'secondary'}
+            variant={pipeline === 'feature' ? 'primary' : 'secondary'}
             onClick={() => selectPipeline('feature')}
-            type="button"
           >
             Feature
-          </button>
-          <button
+          </Button>
+          <Button
             aria-pressed={pipeline === 'goal'}
-            className={pipeline === 'goal' ? undefined : 'secondary'}
+            variant={pipeline === 'goal' ? 'primary' : 'secondary'}
             disabled={applied === undefined}
             onClick={() => selectPipeline('goal')}
-            type="button"
           >
             Goal
-          </button>
+          </Button>
         </div>
         <p>
           {pipeline === 'feature'
@@ -857,26 +874,25 @@ export function SetupWizard() {
             {commandsError !== '' ? (
               <p role="alert">
                 {commandsError}{' '}
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   onClick={() =>
                     applied === undefined
                       ? undefined
                       : void loadTrustedCommands(applied.projectId)
                   }
-                  type="button"
                 >
                   Retry
-                </button>
+                </Button>
               </p>
             ) : null}
             {commandsError === '' && trustedCommands.length === 0 ? (
               <p>
                 <small>
-                  No trusted test commands are configured, so a goal has
-                  nothing to verify against. Set
-                  AGENTOS_TRUSTED_TEST_COMMANDS_JSON, or narrow it per project
-                  under <code>verification</code> in the configuration.
+                  No trusted test commands are configured, so a goal has nothing
+                  to verify against. Set AGENTOS_TRUSTED_TEST_COMMANDS_JSON, or
+                  narrow it per project under <code>verification</code> in the
+                  configuration.
                 </small>
               </p>
             ) : null}
@@ -914,27 +930,24 @@ export function SetupWizard() {
                   </select>
                 </label>
                 <div className="button-row">
-                  <button
-                    className="secondary"
+                  <Button
+                    variant="secondary"
                     disabled={criteria.length === 1}
                     onClick={() =>
                       setCriteria((current) =>
                         current.filter((item) => item.key !== criterion.key),
                       )
                     }
-                    type="button"
                   >
                     Remove criterion
-                  </button>
+                  </Button>
                 </div>
               </fieldset>
             ))}
             <div className="button-row">
-              <button
-                className="secondary"
-                disabled={
-                  trustedCommands.length === 0 || criteria.length >= 20
-                }
+              <Button
+                variant="secondary"
+                disabled={trustedCommands.length === 0 || criteria.length >= 20}
                 onClick={() =>
                   setCriteria((current) => [
                     ...current,
@@ -945,15 +958,14 @@ export function SetupWizard() {
                     },
                   ])
                 }
-                type="button"
               >
                 Add criterion
-              </button>
+              </Button>
             </div>
           </div>
         ) : null}
         <div className="button-row">
-          <button
+          <Button
             disabled={
               starting ||
               applied === undefined ||
@@ -969,14 +981,13 @@ export function SetupWizard() {
                   )))
             }
             onClick={() => void startRun()}
-            type="button"
           >
             {starting
               ? 'Starting…'
               : pipeline === 'goal'
                 ? 'Start goal run'
                 : 'Start feature run'}
-          </button>
+          </Button>
         </div>
         {startError !== '' ? <p role="alert">{startError}</p> : null}
         {runId !== '' ? (
@@ -985,14 +996,14 @@ export function SetupWizard() {
             {pipeline === 'goal'
               ? 'That page tracks each criterion and every attempt against it.'
               : 'Watch its steps there.'}{' '}
-            Grant the specification approval in the{' '}
-            <a href="/inbox">inbox</a> when it appears
+            Grant the specification approval in the <a href="/inbox">inbox</a>{' '}
+            when it appears
             {pipeline === 'goal' ? ' — once per attempt' : ''}.
             {mode === 'local' ? (
               <>
-                {' '}When it succeeds, the result is a local branch — inspect
-                it with <code>git log agentos/{runId}-…</code> in your
-                repository.
+                {' '}
+                When it succeeds, the result is a local branch — inspect it with{' '}
+                <code>git log agentos/{runId}-…</code> in your repository.
               </>
             ) : null}
           </p>

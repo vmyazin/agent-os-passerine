@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react';
 
 import { submittableCriteria } from './start-run-model';
+import { Button } from './button';
 
 /**
  * Starting work from the project that will own it.
@@ -67,7 +68,11 @@ export function StartRunForm({
     return (
       <p className="start-run-unconfigured">
         This project has no applied configuration yet, so there is nothing to
-        pin a run to. <a href={`/setup?projectId=${encodeURIComponent(projectId)}`}>Apply one in Setup</a>.
+        pin a run to.{' '}
+        <a href={`/setup?projectId=${encodeURIComponent(projectId)}`}>
+          Apply one in Setup
+        </a>
+        .
       </p>
     );
 
@@ -126,12 +131,7 @@ export function StartRunForm({
     description.trim() !== '' &&
     (pipeline === 'feature' || submittableCriteria(criteria).length > 0);
 
-  if (!open)
-    return (
-      <button onClick={() => setOpen(true)} type="button">
-        {label}
-      </button>
-    );
+  if (!open) return <Button onClick={() => setOpen(true)}>{label}</Button>;
 
   return (
     <div className="start-run-form">
@@ -147,22 +147,20 @@ export function StartRunForm({
         </p>
       )}
       <div className="button-row" role="group" aria-label="Run type">
-        <button
+        <Button
           aria-pressed={pipeline === 'feature'}
-          className={pipeline === 'feature' ? undefined : 'secondary'}
+          variant={pipeline === 'feature' ? 'primary' : 'secondary'}
           onClick={() => setPipeline('feature')}
-          type="button"
         >
           Feature
-        </button>
-        <button
+        </Button>
+        <Button
           aria-pressed={pipeline === 'goal'}
-          className={pipeline === 'goal' ? undefined : 'secondary'}
+          variant={pipeline === 'goal' ? 'primary' : 'secondary'}
           onClick={() => setPipeline('goal')}
-          type="button"
         >
           Goal
-        </button>
+        </Button>
       </div>
       <label>
         Title
@@ -226,8 +224,8 @@ export function StartRunForm({
               </select>
             </div>
           ))}
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={commands.length === 0 || criteria.length >= 20}
             onClick={() =>
               setCriteria((current) => [
@@ -235,10 +233,9 @@ export function StartRunForm({
                 { description: '', command: commands[0] ?? '' },
               ])
             }
-            type="button"
           >
             Add criterion
-          </button>
+          </Button>
         </fieldset>
       )}
       {workflowCap === undefined ? null : (
@@ -251,17 +248,16 @@ export function StartRunForm({
         </p>
       )}
       <div className="button-row">
-        <button disabled={pending || !ready} onClick={() => void submit()} type="button">
+        <Button disabled={pending || !ready} onClick={() => void submit()}>
           {pending ? 'Starting…' : 'Start run'}
-        </button>
-        <button
-          className="secondary"
+        </Button>
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() => setOpen(false)}
-          type="button"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       <p aria-live="polite">{message}</p>
     </div>

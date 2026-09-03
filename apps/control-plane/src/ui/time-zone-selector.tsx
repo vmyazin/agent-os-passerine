@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { formatDisplayDateTime } from './format-timestamp';
+import { Button } from './button';
 
 export function TimeZoneSelector({
   currentTimeZone,
@@ -78,13 +79,12 @@ export function TimeZoneSelector({
             : 'Choose a timezone from the list.'}
         </p>
         <div className="button-row">
-          <button
+          <Button
             disabled={pending || !valid || timeZone === currentTimeZone}
             onClick={() => void save()}
-            type="button"
           >
             {pending ? 'Saving…' : 'Save timezone'}
-          </button>
+          </Button>
         </div>
         <p aria-live="polite" id="time-zone-message">
           {message}

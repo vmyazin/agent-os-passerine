@@ -707,14 +707,18 @@ button {
   align-items: center;
   gap: 0.4rem;
   justify-content: center;
-  min-height: 48px;
+  /* Compact by default: a control should be comfortably clickable without
+     taking the vertical space of a paragraph. Still above the 24px minimum
+     target size, and rows of them fit on one line at narrow widths. */
+  min-height: 34px;
   border: 1px solid var(--signal-violet-dark);
-  border-radius: 0.55rem;
+  border-radius: 0.5rem;
   background: var(--signal-violet);
   color: var(--surface-sheet);
-  padding: 0.72rem 1rem;
+  padding: 0.35rem 0.8rem;
   font: inherit;
-  font-weight: 700;
+  font-size: 0.875rem;
+  font-weight: 600;
   text-decoration: none;
   cursor: pointer;
 }
@@ -733,6 +737,38 @@ button:active,
 button:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+/* The Button component's appearance, chosen by name rather than by class at
+   the call site. The element rules above are the shared base; these say what
+   a control weighs and how dense it is. */
+.btn-secondary {
+  border-color: var(--signal-violet-dark);
+  background: transparent;
+  color: var(--signal-violet-dark);
+}
+/* An affordance that must not compete with the content beside it. */
+.btn-quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+.btn-quiet:hover:not(:disabled) {
+  background: var(--surface-inset);
+  color: var(--ink-secondary);
+}
+/* For controls inside a dense row, where a full-size button would set the
+   row's height rather than sit in it. */
+.btn-sm {
+  min-height: 26px;
+  border-radius: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+.btn-block {
+  width: 100%;
 }
 
 button:focus-visible,
@@ -1728,24 +1764,6 @@ div.inbox-message-copy {
   gap: 0.45rem;
 }
 
-/* A quiet control in the step header: no fill, no border, sized to the meta
-   text beside it, so it reads as an affordance rather than a call to action. */
-.step-copy {
-  min-height: 0;
-  border: 0;
-  border-radius: 0.4rem;
-  background: none;
-  color: var(--ink-muted);
-  padding: 0.2rem 0.3rem;
-  gap: 0.3rem;
-  /* Sized against the step name it sits beside, not the smaller meta text. */
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-.step-copy:hover {
-  background: var(--surface-inset);
-  color: var(--ink-secondary);
-}
 .step-copy-state:empty {
   display: none;
 }

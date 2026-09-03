@@ -48,7 +48,9 @@ export function ProjectFilterChips({
         <button
           aria-expanded={expanded}
           aria-label={
-            expanded ? 'Show fewer projects' : `Show ${hiddenCount} more projects`
+            expanded
+              ? 'Show fewer projects'
+              : `Show ${hiddenCount} more projects`
           }
           className="project-filter-toggle"
           onClick={() => setExpanded((current) => !current)}

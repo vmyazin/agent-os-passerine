@@ -2,6 +2,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Button } from './button';
 
 async function post(url: string, body: object): Promise<string | undefined> {
   const response = await fetch(url, {
@@ -48,14 +49,13 @@ export function BacklogStatusAction({
   };
   return (
     <span className="backlog-status-action">
-      <button
-        className="secondary"
+      <Button
+        variant="secondary"
         disabled={pending}
         onClick={() => void submit()}
-        type="button"
       >
         {status === 'active' ? 'Pause' : 'Resume'}
-      </button>
+      </Button>
       <span aria-live="polite">{message}</span>
     </span>
   );
@@ -97,26 +97,21 @@ export function DeleteBacklogAction({
     <span className="backlog-status-action">
       {confirming ? (
         <>
-          <button disabled={pending} onClick={() => void submit()} type="button">
+          <Button disabled={pending} onClick={() => void submit()}>
             {pending ? 'Deleting…' : 'Confirm delete'}
-          </button>
-          <button
-            className="secondary"
+          </Button>
+          <Button
+            variant="secondary"
             disabled={pending}
             onClick={() => setConfirming(false)}
-            type="button"
           >
             Keep
-          </button>
+          </Button>
         </>
       ) : (
-        <button
-          className="secondary"
-          onClick={() => setConfirming(true)}
-          type="button"
-        >
+        <Button variant="secondary" onClick={() => setConfirming(true)}>
           Delete
-        </button>
+        </Button>
       )}
       <span aria-live="polite">{message}</span>
     </span>
@@ -172,9 +167,9 @@ export function CreateBacklogForm({
 
   if (!open)
     return (
-      <button className="secondary" onClick={() => setOpen(true)} type="button">
+      <Button variant="secondary" onClick={() => setOpen(true)}>
         Create a backlog
-      </button>
+      </Button>
     );
 
   return (
@@ -230,27 +225,25 @@ export function CreateBacklogForm({
         ))}
       </ol>
       <div className="button-row">
-        <button
-          className="secondary"
+        <Button
+          variant="secondary"
           disabled={items.length >= 50}
           onClick={() =>
             setItems((current) => [...current, { title: '', description: '' }])
           }
-          type="button"
         >
           Add item
-        </button>
-        <button disabled={pending || !ready} onClick={() => void submit()} type="button">
+        </Button>
+        <Button disabled={pending || !ready} onClick={() => void submit()}>
           {pending ? 'Creating…' : `Create backlog (${String(filled.length)})`}
-        </button>
-        <button
-          className="secondary"
+        </Button>
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() => setOpen(false)}
-          type="button"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       <p aria-live="polite">{message}</p>
     </div>

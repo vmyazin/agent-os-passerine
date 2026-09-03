@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CommitPage, CommitSummary } from '@agentos/core';
 
 import { formatDisplayDate } from './format-timestamp';
+import { Button } from './button';
 
 export function CommitFeed({
   projectId,
@@ -110,24 +111,22 @@ export function CommitFeed({
               ? 'Commit history is unavailable.'
               : 'Could not load more commits.'}
           </span>
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={pending}
             onClick={() => void load()}
-            type="button"
           >
             {pending ? 'Retrying…' : 'Retry'}
-          </button>
+          </Button>
         </div>
       ) : nextCursor === undefined ? null : (
-        <button
-          className="secondary"
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() => void load()}
-          type="button"
         >
           {pending ? 'Loading…' : 'Load 25 more'}
-        </button>
+        </Button>
       )}
     </div>
   );

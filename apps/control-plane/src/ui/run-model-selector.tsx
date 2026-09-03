@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { Button } from './button';
 
 /** The value that means "no global choice"; each project decides for itself. */
 const PROJECT_DEFAULT = '';
@@ -115,13 +116,12 @@ export function RunModelSelector({
             : `Requests go to ${chosen.providerLabel} as ${chosen.model}.`}
         </p>
         <div className="button-row">
-          <button
+          <Button
             disabled={pending || choice === current}
             onClick={() => void save()}
-            type="button"
           >
             {pending ? 'Saving…' : 'Save model'}
-          </button>
+          </Button>
         </div>
         <p aria-live="polite" id="run-model-message">
           {message}

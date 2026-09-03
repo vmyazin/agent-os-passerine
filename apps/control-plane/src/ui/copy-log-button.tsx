@@ -3,6 +3,7 @@
 
 import { useState } from 'react';
 
+import { Button } from './button';
 import { CopyIcon } from './icons';
 
 /**
@@ -40,21 +41,21 @@ export function CopyLogButton({
   };
 
   return (
-    <button
+    <Button
       aria-label={label}
-      className="step-copy"
+      icon={CopyIcon}
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
         void copy();
       }}
+      size="sm"
       title={label}
-      type="button"
+      variant="quiet"
     >
-      <CopyIcon className="button-icon" />
       <span aria-live="polite" className="step-copy-state">
         {state === 'copied' ? 'Copied' : state === 'failed' ? 'Failed' : ''}
       </span>
-    </button>
+    </Button>
   );
 }

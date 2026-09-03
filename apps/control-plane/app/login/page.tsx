@@ -7,6 +7,7 @@ import {
   sanitizeReturnTo,
 } from '../../src/auth/auth';
 import { readPageSession } from '../../src/auth/page-session';
+import { ButtonLink } from '../../src/ui/button';
 
 export default async function LoginPage({
   searchParams,
@@ -54,16 +55,16 @@ export default async function LoginPage({
       },
       isLocal
         ? createElement(
-            'a',
-            { className: 'button', href: localAuthUrl, id: 'local-login-cta' },
+            ButtonLink,
+            { href: localAuthUrl, id: 'local-login-cta' },
             'Get In',
           )
         : null,
       createElement(
-        'a',
+        ButtonLink,
         {
-          className: isLocal ? 'button secondary' : 'button',
           href: githubAuthUrl,
+          ...(isLocal ? { variant: 'secondary' as const } : {}),
         },
         'Continue with GitHub',
       ),

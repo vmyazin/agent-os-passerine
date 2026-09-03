@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { Button } from './button';
 
 export interface ProviderCredentialView {
   readonly provider: string;
@@ -126,50 +127,46 @@ export function ProviderKeySettings({
                   value={apiKey}
                 />
                 <div className="button-row">
-                  <button
+                  <Button
                     disabled={pending || apiKey.trim() === ''}
                     onClick={() => void save(credential.provider)}
-                    type="button"
                   >
                     {pending ? 'Saving…' : 'Save key'}
-                  </button>
-                  <button
-                    className="secondary"
+                  </Button>
+                  <Button
+                    variant="secondary"
                     disabled={pending}
                     onClick={() => {
                       setApiKey('');
                       setEditing(undefined);
                       setMessage('');
                     }}
-                    type="button"
                   >
                     Cancel
-                  </button>
+                  </Button>
                 </div>
               </div>
             ) : (
               <div className="button-row">
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   disabled={pending}
                   onClick={() => {
                     setApiKey('');
                     setMessage('');
                     setEditing(credential.provider);
                   }}
-                  type="button"
                 >
                   {credential.source === 'database' ? 'Replace key' : 'Add key'}
-                </button>
+                </Button>
                 {credential.source === 'database' ? (
-                  <button
-                    className="secondary"
+                  <Button
+                    variant="secondary"
                     disabled={pending}
                     onClick={() => void remove(credential.provider)}
-                    type="button"
                   >
                     Remove
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             )}

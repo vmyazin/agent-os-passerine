@@ -11,6 +11,7 @@ import {
   DialogTrigger,
 } from './dialog';
 import { RadioGroup } from './radio-group';
+import { Button } from './button';
 
 interface Inspection {
   readonly kind: 'github' | 'local';
@@ -89,14 +90,11 @@ export function ImportProjectDialog({
     if (pending !== undefined) return;
     setPending('choose');
     try {
-      const response = await fetch(
-        '/api/projects/import/select-directory',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}',
-        },
-      );
+      const response = await fetch('/api/projects/import/select-directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
       if (!response.ok) {
         setMessage(
           await apiError(response, 'Could not open the macOS folder picker.'),
@@ -167,7 +165,7 @@ export function ImportProjectDialog({
   return (
     <Dialog onOpenChange={setOpen} open={open}>
       <DialogTrigger asChild>
-        <button type="button">{triggerLabel}</button>
+        <Button>{triggerLabel}</Button>
       </DialogTrigger>
       <DialogContent aria-describedby="import-project-description">
         <div className="dialog-heading">
@@ -237,23 +235,22 @@ export function ImportProjectDialog({
                 value={location}
               />
               {kind === 'local' && localPickerAvailable ? (
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   disabled={pending !== undefined}
                   onClick={() => void chooseDirectory()}
-                  type="button"
                 >
                   {pending === 'choose' ? 'Choosing…' : 'Choose folder…'}
-                </button>
+                </Button>
               ) : null}
             </div>
           </div>
-          <button
+          <Button
             disabled={pending !== undefined || location.trim() === ''}
             type="submit"
           >
             {pending === 'inspect' ? 'Inspecting…' : 'Inspect repository'}
-          </button>
+          </Button>
         </form>
         {inspection === undefined ? null : (
           <section aria-label="Inspection result" className="import-inspection">
@@ -278,16 +275,15 @@ export function ImportProjectDialog({
                   : 'publishing access not installed'}
               </span>
             )}
-            <button
+            <Button
               disabled={
                 pending !== undefined ||
                 (kind === 'local' && defaultBranch.trim() === '')
               }
               onClick={() => void importProject()}
-              type="button"
             >
               {pending === 'import' ? 'Importing…' : 'Import and open project'}
-            </button>
+            </Button>
           </section>
         )}
         {message === '' ? null : (

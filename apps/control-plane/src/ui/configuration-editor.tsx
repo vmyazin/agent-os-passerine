@@ -2,6 +2,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Button } from './button';
 
 interface PlanChange {
   readonly kind: 'added' | 'removed' | 'changed';
@@ -89,18 +90,18 @@ export function ConfigurationEditor({
 
   if (!open)
     return (
-      <button className="secondary" onClick={() => setOpen(true)} type="button">
+      <Button variant="secondary" onClick={() => setOpen(true)}>
         Change configuration
-      </button>
+      </Button>
     );
 
   return (
     <div className="configuration-editor">
       <p className="start-run-hint">
-        Paste the configuration you want applied. The editor does not start
-        from the stored copy: it is withheld from the browser because
-        environment variables may carry credentials. Plan first to see exactly
-        what would change.
+        Paste the configuration you want applied. The editor does not start from
+        the stored copy: it is withheld from the browser because environment
+        variables may carry credentials. Plan first to see exactly what would
+        change.
       </p>
       <label>
         Configuration YAML
@@ -156,33 +157,30 @@ export function ConfigurationEditor({
         </div>
       )}
       <div className="button-row">
-        <button
-          className="secondary"
+        <Button
+          variant="secondary"
           disabled={pending || yaml.trim() === ''}
           onClick={() => void runPlan()}
-          type="button"
         >
           {pending ? 'Working…' : 'Plan'}
-        </button>
-        <button
+        </Button>
+        <Button
           disabled={pending || yaml.trim() === ''}
           onClick={() => void apply()}
-          type="button"
         >
           Apply
-        </button>
-        <button
-          className="secondary"
+        </Button>
+        <Button
+          variant="secondary"
           disabled={pending}
           onClick={() => {
             setOpen(false);
             setPlan(undefined);
             setMessage('');
           }}
-          type="button"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       <p aria-live="polite">{message}</p>
       {projectId === undefined ? null : (
