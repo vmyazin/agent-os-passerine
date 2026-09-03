@@ -3186,3 +3186,100 @@ describe('tool error notes', () => {
     expect(note!.length).toBeLessThanOrEqual(260);
   });
 });
+
+describe('tool call subjects', () => {
+  const call = (name: string, input: unknown) => ({
+    id: `call-${name}-${JSON.stringify(input).length}`,
+    type: 'tool_call',
+    occurredAt: new Date(now),
+    payload: { name, detail: JSON.stringify({ name, input }) },
+  });
+
+  const messagesFor = async (
+    events: readonly Record<string, unknown>[],
+  ): Promise<readonly string[]> => {
+    const f = await fixture();
+    f.runtime.events = async function* () {
+      for (const event of events) yield event;
+      yield { id: 'idle', type: 'idle', occurredAt: new Date(now) };
+    } as never;
+    await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: f.waiter,
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+    return (
+      await f.repository.listEvents(persistenceId('run', 'run-1'), {
+        limit: 1_000,
+      })
+    )
+      .map((event) =>
+        isRecord(event.payload) ? event.payload.message : undefined,
+      )
+      .filter((message): message is string => typeof message === 'string');
+  };
+
+  it('names the command, the path, and the artifact', async () => {
+    const messages = await messagesFor([
+      call('bash', { command: 'node --test test/acceptance' }),
+      call('write', { path: 'src/server.mjs', content: 'export {};' }),
+      call('artifact_put', { artifactId: 'changes', version: 1 }),
+    ]);
+    const joined = messages.join('\n');
+    expect(joined).toContain('is using bash: node --test test/acceptance');
+    expect(joined).toContain('is using write: src/server.mjs');
+    expect(joined).toContain('is using artifact_put: changes v1');
+    // The file's whole content is not the subject of a write.
+    expect(joined).not.toContain('export {};');
+  });
+
+  it('shortens an artifact key to the part that distinguishes it', async () => {
+    const messages = await messagesFor([
+      call('artifact_get', {
+        key: 'artifacts/v1/project_x/run_y/specification/dod/1/sha256/abc123',
+      }),
+    ]);
+    const note = messages.find((message) => message.includes('artifact_get'));
+    expect(note).toContain('1/sha256/abc123');
+    expect(note).not.toContain('artifacts/v1/project_x');
+  });
+
+  it('says nothing extra when the argument is not worth reading', async () => {
+    const messages = await messagesFor([
+      call('submit_result', { version: 'plan-output-v1' }),
+    ]);
+    const note = messages.find((message) => message.includes('submit_result'));
+    expect(note).toBe('Model (sonnet) is using submit_result');
+  });
+
+  it('bounds a long command and flattens its newlines', async () => {
+    const messages = await messagesFor([
+      call('bash', { command: `echo start\n${'y'.repeat(400)}` }),
+    ]);
+    const note = messages.find((message) => message.includes('is using bash'));
+    expect(note).toBeDefined();
+    expect(note).not.toContain('\n');
+    expect(note!.length).toBeLessThanOrEqual(190);
+  });
+});

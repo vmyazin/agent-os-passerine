@@ -715,6 +715,75 @@ function runtimeToolName(payload: unknown, key: string): string | undefined {
     : undefined;
 }
 
+/** Ceiling on the tool argument shown beside a call. */
+const MAX_TOOL_SUBJECT_CHARS = 120;
+
+/**
+ * Which argument of a tool call says what the call is for.
+ *
+ * One field per tool, chosen rather than guessed: the command for a shell,
+ * the path for a file, the artifact for a store. A tool this does not know
+ * falls back to its first short string argument, and shows nothing when
+ * nothing there is short enough to read at a glance.
+ *
+ * Model-authored, so sanitized and bounded like every other rendered value,
+ * and read as data: this is what the model asked for, never an instruction.
+ */
+function runtimeToolCallSubject(
+  payload: unknown,
+  tool: string,
+): string | undefined {
+  const detail = payloadField(payload, 'detail');
+  if (typeof detail !== 'string' || detail.length === 0) return undefined;
+  let input: unknown;
+  try {
+    input = payloadField(JSON.parse(detail), 'input');
+  } catch {
+    return undefined;
+  }
+  if (typeof input !== 'object' || input === null) return undefined;
+  const field = (key: string): string | undefined => {
+    const value = payloadField(input, key);
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+  };
+  const chosen = ((): string | undefined => {
+    switch (tool) {
+      case 'bash':
+        return field('command');
+      case 'read':
+      case 'write':
+      case 'edit':
+        return field('path');
+      case 'artifact_put': {
+        const artifactId = field('artifactId');
+        const version = payloadField(input, 'version');
+        if (artifactId === undefined) return undefined;
+        return typeof version === 'number'
+          ? `${artifactId} v${String(version)}`
+          : artifactId;
+      }
+      case 'artifact_get':
+        // Keys are a long content-addressed path; its last segment is the
+        // only part that distinguishes one from another at a glance.
+        return field('key')?.split('/').slice(-3).join('/');
+      case 'submit_result':
+        // The result itself is already reported by the completed note.
+        return undefined;
+      default: {
+        for (const value of Object.values(input as Record<string, unknown>))
+          if (typeof value === 'string' && value.length > 0) return value;
+        return undefined;
+      }
+    }
+  })();
+  if (chosen === undefined) return undefined;
+  const cleaned = sanitizeForNote(chosen);
+  if (cleaned.length === 0) return undefined;
+  return cleaned.length > MAX_TOOL_SUBJECT_CHARS
+    ? `${cleaned.slice(0, MAX_TOOL_SUBJECT_CHARS)}...`
+    : cleaned;
+}
+
 /** Ceiling on tool-error text carried into a progress note. */
 const MAX_TOOL_ERROR_CHARS = 200;
 
@@ -894,13 +963,12 @@ function runtimeProgress(
       const tool = runtimeToolName(event.payload, 'name');
       if (tool === undefined) return note('tool', 'Model is using a tool');
       const server = runtimeToolName(event.payload, 'mcpServerName');
-      return note(
-        'tool',
-        server === undefined
-          ? `Model is using ${tool}`
-          : `Model is using ${tool} via ${server}`,
-        tool,
-      );
+      const via = server === undefined ? '' : ` via ${server}`;
+      // What the call is for. "is using bash" ten times in a row says only
+      // that something is happening; the command says what.
+      const subject = runtimeToolCallSubject(event.payload, tool);
+      const about = subject === undefined ? '' : `: ${subject}`;
+      return note('tool', `Model is using ${tool}${via}${about}`, tool);
     }
     case 'tool_result': {
       const failed = payloadField(event.payload, 'isError') === true;
