@@ -59,6 +59,12 @@ export interface LocalDirectDispatcher extends TriggerWorkflowDispatcher {
   /** The in-memory record for a reference, or `undefined` if this process never had it. */
   inspect(externalRunRef: string): LocalDirectExecutionSnapshot | undefined;
   /**
+   * Whether this process is executing any generation of a run. Recovery asks
+   * before reopening anything: a run being worked on right now is the one
+   * thing it must never touch.
+   */
+  isRunActive(runId: string): boolean;
+  /**
    * The abort signal `cancel` trips. The execution object handed to the
    * handler is byte-for-byte the one the Trigger task passes, so a composition
    * that wants cancellation reads the signal from here instead.
@@ -308,6 +314,17 @@ export function createLocalDirectDispatcher(
     async idle() {
       await queue;
     },
+    isRunActive(runId) {
+      for (const [ref, execution] of executions) {
+        // References are `local-direct:<runId>:<generation>`.
+        if (
+          execution.status === 'executing' &&
+          ref.startsWith(`local-direct:${runId}:`)
+        )
+          return true;
+      }
+      return false;
+    },
     inspect(externalRunRef) {
       const execution = executions.get(externalRunRef);
       return execution === undefined
@@ -365,6 +382,14 @@ export type LocalDirectRecoveryCheckpoints = Pick<
 >;
 
 export interface LocalDirectRecoveryOptions {
+  /**
+   * Whether this process is already executing the run. Recovery exists to
+   * reopen work a restart abandoned; a run that is live here was not
+   * abandoned, and reopening it starts a second paid session for the step
+   * already in flight. Without this, a recovery sweep that runs more than
+   * once resumes its own live work in a loop.
+   */
+  readonly isRunActive?: (runId: string) => boolean;
   readonly repository: DomainRepository;
   readonly checkpoints: LocalDirectRecoveryCheckpoints;
   readonly dispatch: (input: {
@@ -464,6 +489,11 @@ export async function recoverLocalDirectRuns(
 
   for (const run of runs) {
     try {
+      if (options.isRunActive?.(run.id) === true) {
+        // Live here: not abandoned, so not ours to reopen.
+        skipped.push(run.id);
+        continue;
+      }
       const effects = await options.checkpoints.listEffects(run.id);
       if (!ownedLocally(effects)) {
         // Another executor's run, or one that never started. Touching it

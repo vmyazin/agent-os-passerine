@@ -431,7 +431,18 @@ export function localCancellationRuntime(): RuntimeProvider {
  * called more than once in a process (tests, a re-read of the environment),
  * and a second sweep would race the first for the same runs.
  */
-let localDirectRecoveryStarted = false;
+// On globalThis, like the dispatcher: under `next dev` this module is
+// evaluated once per module graph, so a module-scoped flag resets on every
+// re-evaluation and the sweep runs again -- which is how a run under way got
+// resumed five times in four minutes, paying for the same step each time.
+const RECOVERY_SLOT = Symbol.for('agentos.localDirectRecoveryStarted');
+function recoveryStarted(): { current?: boolean } {
+  const holder = globalThis as unknown as Record<
+    symbol,
+    { current?: boolean } | undefined
+  >;
+  return (holder[RECOVERY_SLOT] ??= {});
+}
 
 // The one local dispatcher this process has, so the run page can ask it what
 // became of a run it handed over. Before this, that record lived only in the
@@ -641,11 +652,12 @@ function localDirectDispatchFromEnv() {
   // boot; letting it throw would take the app down over runs that are already
   // stuck. A sweep that fails leaves those runs exactly as it found them, and
   // the next restart tries again.
-  if (!localDirectRecoveryStarted) {
-    localDirectRecoveryStarted = true;
+  if (recoveryStarted().current !== true) {
+    recoveryStarted().current = true;
     void recoverLocalDirectRuns({
       repository,
       checkpoints,
+      isRunActive: (runId) => localDispatcher.isRunActive(runId),
       dispatch: async ({ runId, pipeline, resumeGeneration }) => {
         if (pipeline !== 'feature' && pipeline !== 'goal')
           throw new Error(`run ${runId} has no dispatchable pipeline`);

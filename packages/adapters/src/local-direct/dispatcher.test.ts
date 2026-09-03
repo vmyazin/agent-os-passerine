@@ -762,3 +762,62 @@ describe('local-direct restart recovery', () => {
     ).toBe('running');
   });
 });
+
+describe('recovery and live executions', () => {
+  it('never reopens a run this process is executing', async () => {
+    // The loop this prevents: a sweep that runs more than once sees its own
+    // live run sitting in `running`, reopens it, and pays for the in-flight
+    // step again. It happened five times in four minutes on 2026-09-03.
+    const repository = new InMemoryDomainRepository();
+    const checkpoints = new InMemoryWorkflowCheckpointStore();
+    const dispatch = vi.fn(async () => undefined);
+    const released: string[] = [];
+    const result = await recoverLocalDirectRuns({
+      repository,
+      checkpoints: {
+        listEffects: async () => [
+          {
+            key: 'workflow-start:run-live',
+            runId: 'run-live',
+            kind: 'trigger-workflow-start',
+            status: 'succeeded',
+            ownerId: 'workflow:local-direct:run-live:0:local-direct',
+            updatedAt: '2026-09-03T00:00:00.000Z',
+          } as never,
+        ],
+        releaseRunForResume: async (runId: string) => {
+          released.push(runId);
+          return { released: 1 };
+        },
+      },
+      isRunActive: (runId) => runId === 'run-live',
+      dispatch,
+    });
+    expect(result.recovered).not.toContain('run-live');
+    // Nothing was released and nothing was dispatched for it.
+    expect(released).not.toContain('run-live');
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-live' }),
+    );
+  });
+
+  it('reports a run as active only while it is executing', async () => {
+    let release!: () => void;
+    const dispatcher = createLocalDirectDispatcher({
+      handler: {
+        run: async () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      },
+    });
+    expect(dispatcher.isRunActive('run-1')).toBe(false);
+    await dispatcher.startFeature('run-1', 'project-1');
+    await vi.waitFor(() => expect(dispatcher.isRunActive('run-1')).toBe(true));
+    // A different run is not confused for it, even though the prefix is close.
+    expect(dispatcher.isRunActive('run-1-extra')).toBe(false);
+    release();
+    await dispatcher.settled();
+    expect(dispatcher.isRunActive('run-1')).toBe(false);
+  });
+});
