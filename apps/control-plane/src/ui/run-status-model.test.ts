@@ -41,14 +41,14 @@ describe('explainRunStatus', () => {
     // seconds in as it does when the worker will never arrive.
     expect(pending('2026-08-24T03:24:20.000Z')).toEqual({
       summary: 'Queued 1 minute ago. Nothing has run yet.',
-      next: 'A Trigger.dev worker has to claim it before the first step runs.',
+      next: 'The executor has to start it before the first step runs.',
       live: true,
     });
   });
 
   it('escalates once nothing has claimed it for long enough', () => {
     expect(pending('2026-08-24T03:26:20.000Z').next).toBe(
-      'A worker should have claimed this by now — see below.',
+      'The executor should have started it by now — see below.',
     );
   });
 

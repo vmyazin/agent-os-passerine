@@ -78,8 +78,8 @@ export function explainRunStatus({
       return {
         summary: `Queued ${age} ago. Nothing has run yet.`,
         next: stalled
-          ? 'A worker should have claimed this by now — see below.'
-          : 'A Trigger.dev worker has to claim it before the first step runs.',
+          ? 'The executor should have started it by now — see below.'
+          : 'The executor has to start it before the first step runs.',
         live: true,
       };
     }

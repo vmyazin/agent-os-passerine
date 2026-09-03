@@ -9,7 +9,21 @@
  * whether this run resumes by itself depends on where dispatch stopped, and
  * the page cannot tell.
  */
-export function UndispatchedRunNotice() {
+export function UndispatchedRunNotice({
+  executor = 'trigger',
+}: {
+  readonly executor?: 'trigger' | 'local-direct';
+} = {}) {
+  if (executor === 'local-direct')
+    return (
+      <p className="notice" role="status">
+        <strong>Queued, but nothing has executed it.</strong> On the local
+        executor a run executes inside this control plane. If the control plane
+        was restarted after the handoff, the execution was lost and nothing
+        retries it on its own: use Retry, which hands it over again from where
+        it stopped.
+      </p>
+    );
   return (
     <p className="notice" role="status">
       <strong>Queued, but nothing picked it up.</strong> Runs execute in a

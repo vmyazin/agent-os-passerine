@@ -177,7 +177,14 @@ export function OverrideRunBudgetAction({
  * already paid for. Single-step, unlike starting again: it spends only what
  * the remaining steps cost, and the work it reuses was already bought.
  */
-export function ResumeRunAction({ runId }: { readonly runId: string }) {
+export function ResumeRunAction({
+  runId,
+  label = 'Resume',
+}: {
+  readonly runId: string;
+  /** "Retry" on a queued run the executor lost; "Resume" on a failed one. */
+  readonly label?: string;
+}) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
   const resume = async () => {
@@ -215,7 +222,7 @@ export function ResumeRunAction({ runId }: { readonly runId: string }) {
     <div className="action-stack">
       <div className="button-row">
         <button disabled={pending} onClick={() => void resume()} type="button">
-          {pending ? 'Resuming…' : 'Resume'}
+          {pending ? `${label}…` : label}
         </button>
       </div>
       <p aria-live="polite">{message}</p>

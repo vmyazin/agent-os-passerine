@@ -19,15 +19,28 @@ interface RunReader {
 export function newestTriggerExternalRef(
   records: readonly DispatchRecord[],
 ): string | undefined {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index];
+  return newestStartRecord(records)?.externalRef;
+}
+
+/**
+ * The most recent handoff. A resumed run has one start effect per generation
+ * and the store lists effects by key, so "last in the list" is only the
+ * newest by accident; the update time is what actually orders them.
+ */
+export function newestStartRecord(
+  records: readonly DispatchRecord[],
+): DispatchRecord | undefined {
+  let newest: DispatchRecord | undefined;
+  for (const record of records) {
+    if (record.kind !== 'trigger-workflow-start') continue;
+    if (record.externalRef === undefined) continue;
     if (
-      record?.kind === 'trigger-workflow-start' &&
-      record.externalRef !== undefined
+      newest === undefined ||
+      (record.updatedAt ?? '') > (newest.updatedAt ?? '')
     )
-      return record.externalRef;
+      newest = record;
   }
-  return undefined;
+  return newest;
 }
 
 export async function loadRunPageModel(

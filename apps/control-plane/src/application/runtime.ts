@@ -566,6 +566,50 @@ export function localCancellationRuntime(): RuntimeProvider {
  */
 let localDirectRecoveryStarted = false;
 
+// The one local dispatcher this process has, so the run page can ask it what
+// became of a run it handed over. Before this, that record lived only in the
+// dispatcher's memory and the page told the operator to go look in Trigger.
+// Held on globalThis rather than in module scope: under `next dev` the page
+// and the API routes are separate module graphs, each with its own copy of
+// this module's state, and the page would otherwise ask a dispatcher that
+// never started anything. One process, one dispatcher, one place to keep it.
+const DISPATCHER_SLOT = Symbol.for('agentos.localDirectDispatcher');
+type LocalDispatcher = ReturnType<typeof createLocalDirectDispatcher>;
+function localDispatcherSlot(): { current?: LocalDispatcher } {
+  const holder = globalThis as unknown as Record<
+    symbol,
+    { current?: LocalDispatcher }
+  >;
+  return (holder[DISPATCHER_SLOT] ??= {});
+}
+
+export const LOCAL_DIRECT_REF_PREFIX = 'local-direct:';
+
+/**
+ * What this process knows about a local execution. `LOST` means the reference
+ * is local but this process has no record of it, which is what a restart
+ * after the handoff looks like: the outbox recorded a successful start, the
+ * process that would have run it is gone, and nothing will retry on its own.
+ */
+export function localExecutionState(
+  externalRef: string,
+): { readonly status: string; readonly error?: string } | undefined {
+  if (!externalRef.startsWith(LOCAL_DIRECT_REF_PREFIX)) return undefined;
+  const snapshot = localDispatcherSlot().current?.inspect(externalRef);
+  if (snapshot === undefined) return { status: 'LOST' };
+  switch (snapshot.status) {
+    case 'executing':
+      return { status: 'EXECUTING' };
+    case 'completed':
+      return { status: 'COMPLETED' };
+    case 'failed':
+      return {
+        status: 'FAILED',
+        ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+      };
+  }
+}
+
 function localDirectDispatchFromEnv() {
   const repository = repositoryFromEnv();
   const checkpoints = createNeonWorkflowCheckpointStore(process.env);
@@ -600,7 +644,35 @@ function localDirectDispatchFromEnv() {
       repositorySha !== snapshots[0]!.repositorySha
     )
       throw new Error('source snapshot repository SHA binding is invalid');
-    return { run, config, repositorySha };
+    // A chained run's source is its base run's published commit, not the
+    // configuration revision's. `provenance.repositorySha` stays the config
+    // binding and is checked above; the chain only redirects which commit is
+    // ingested and which branch it is based on -- exactly what the dispatch
+    // side already assumes (`chain.baseCommitSha ?? provenance.repositorySha`
+    // in the task handler). Without this the ingestor writes a bundle pinned
+    // to the config revision, dispatch asks for the chained commit, and the
+    // binding check fails every chained run permanently.
+    const chain = (
+      run.input as {
+        chain?: { baseBranch?: unknown; baseCommitSha?: unknown };
+      }
+    ).chain;
+    const chainedSha =
+      typeof chain?.baseCommitSha === 'string' &&
+      /^[0-9a-f]{40}$/.test(chain.baseCommitSha)
+        ? chain.baseCommitSha
+        : undefined;
+    const chainedBranch =
+      typeof chain?.baseBranch === 'string' && chain.baseBranch.length > 0
+        ? chain.baseBranch
+        : undefined;
+    return {
+      run,
+      config,
+      repositorySha,
+      sourceSha: chainedSha ?? repositorySha,
+      ...(chainedBranch === undefined ? {} : { chainedBranch }),
+    };
   };
 
   let localIngestor: TrustedSourceSnapshotIngestor | undefined;
@@ -625,8 +697,9 @@ function localDirectDispatchFromEnv() {
           projectId: resolved.run.projectId,
           runId: resolved.run.id,
           localPath,
-          baseBranch: resolved.config.project.defaultBranch,
-          repositorySha: resolved.repositorySha,
+          baseBranch:
+            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
+          repositorySha: resolved.sourceSha,
         };
       },
     }));
@@ -658,21 +731,23 @@ function localDirectDispatchFromEnv() {
   const handlerOnce = () =>
     (composed ??= createLocalDirectFeatureWorkflowFromEnv(process.env));
 
+  const localDispatcher = createLocalDirectDispatcher({
+    handler: {
+      // The dispatcher builds the very payload and execution context the
+      // Trigger task builds (`feature-task-payload-v1`); the structural
+      // `unknown` on its side only keeps the Trigger types out of a process
+      // that has left Trigger behind.
+      run: async (payload, execution) =>
+        (await handlerOnce()).run(
+          payload as Parameters<LocalDirectFeatureWorkflow['run']>[0],
+          execution as Parameters<LocalDirectFeatureWorkflow['run']>[1],
+        ),
+    },
+  });
+  localDispatcherSlot().current = localDispatcher;
   const outbox = createDurableTriggerOutbox({
     checkpoints,
-    trigger: createLocalDirectDispatcher({
-      handler: {
-        // The dispatcher builds the very payload and execution context the
-        // Trigger task builds (`feature-task-payload-v1`); the structural
-        // `unknown` on its side only keeps the Trigger types out of a process
-        // that has left Trigger behind.
-        run: async (payload, execution) =>
-          (await handlerOnce()).run(
-            payload as Parameters<LocalDirectFeatureWorkflow['run']>[0],
-            execution as Parameters<LocalDirectFeatureWorkflow['run']>[1],
-          ),
-      },
-    }),
+    trigger: localDispatcher,
     approval: createLocalApprovalWaiter({ repository }),
     clock: () => new Date().toISOString(),
     runtime: localCancellationRuntime(),
@@ -795,7 +870,35 @@ export function workflowDispatchFromEnv() {
       repositorySha !== snapshots[0]!.repositorySha
     )
       throw new Error('source snapshot repository SHA binding is invalid');
-    return { run, config, repositorySha };
+    // A chained run's source is its base run's published commit, not the
+    // configuration revision's. `provenance.repositorySha` stays the config
+    // binding and is checked above; the chain only redirects which commit is
+    // ingested and which branch it is based on -- exactly what the dispatch
+    // side already assumes (`chain.baseCommitSha ?? provenance.repositorySha`
+    // in the task handler). Without this the ingestor writes a bundle pinned
+    // to the config revision, dispatch asks for the chained commit, and the
+    // binding check fails every chained run permanently.
+    const chain = (
+      run.input as {
+        chain?: { baseBranch?: unknown; baseCommitSha?: unknown };
+      }
+    ).chain;
+    const chainedSha =
+      typeof chain?.baseCommitSha === 'string' &&
+      /^[0-9a-f]{40}$/.test(chain.baseCommitSha)
+        ? chain.baseCommitSha
+        : undefined;
+    const chainedBranch =
+      typeof chain?.baseBranch === 'string' && chain.baseBranch.length > 0
+        ? chain.baseBranch
+        : undefined;
+    return {
+      run,
+      config,
+      repositorySha,
+      sourceSha: chainedSha ?? repositorySha,
+      ...(chainedBranch === undefined ? {} : { chainedBranch }),
+    };
   };
 
   // Built lazily, one ingestor per allowlisted repository: the GitHub
@@ -825,8 +928,9 @@ export function workflowDispatchFromEnv() {
         return {
           projectId: resolved.run.projectId,
           runId: resolved.run.id,
-          repositorySha: resolved.repositorySha,
-          baseBranch: resolved.config.project.defaultBranch,
+          repositorySha: resolved.sourceSha,
+          baseBranch:
+            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
           repository: selected,
         };
       },
@@ -857,8 +961,9 @@ export function workflowDispatchFromEnv() {
           projectId: resolved.run.projectId,
           runId: resolved.run.id,
           localPath,
-          baseBranch: resolved.config.project.defaultBranch,
-          repositorySha: resolved.repositorySha,
+          baseBranch:
+            resolved.chainedBranch ?? resolved.config.project.defaultBranch,
+          repositorySha: resolved.sourceSha,
         };
       },
     }));
@@ -974,6 +1079,8 @@ export function workflowCheckpointsFromEnv() {
 export async function externalRunStateFromEnv(
   externalRef: string,
 ): Promise<{ readonly status: string; readonly error?: string } | undefined> {
+  const local = localExecutionState(externalRef);
+  if (local !== undefined) return local;
   if ((process.env.TRIGGER_SECRET_KEY?.trim() ?? '') === '') return undefined;
   try {
     return await createTriggerSdkBoundary().retrieveRun(externalRef);

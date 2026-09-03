@@ -1,5 +1,9 @@
 // app/api/runs/[id]/resume/route.ts
-import { controlPlaneService } from '../../../../../src/application/runtime';
+import {
+  controlPlaneService,
+  localExecutionState,
+} from '../../../../../src/application/runtime';
+import { loadRunDispatch } from '../../../../../src/application/run-page-model';
 import { handleApi } from '../../../../../src/http/api';
 import { requireApiAuthentication } from '../../../../../src/http/authenticated';
 import {
@@ -28,7 +32,25 @@ export function POST(
     },
     async () => {
       const { id } = await context.params;
-      return controlPlaneService().resumeRun(boundedPathId(id));
+      const runId = boundedPathId(id);
+      // A queued run is retryable only when its newest handoff went to the
+      // local executor and that executor has lost it (a restart) or failed
+      // before recording a step. Anything else that is queued may still be
+      // held by an executor this process cannot see.
+      const dispatch = await loadRunDispatch(runId);
+      const state =
+        dispatch?.external ??
+        (dispatch === undefined
+          ? undefined
+          : localExecutionState(
+              [...dispatch.records]
+                .reverse()
+                .find((record) => record.externalRef !== undefined)
+                ?.externalRef ?? '',
+            ));
+      const lostExecution =
+        state?.status === 'LOST' || state?.status === 'FAILED';
+      return controlPlaneService().resumeRun(runId, { lostExecution });
     },
   );
 }

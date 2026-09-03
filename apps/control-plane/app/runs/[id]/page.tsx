@@ -2,7 +2,10 @@ import {
   loadRunDispatch,
   loadRunPageModel,
 } from '../../../src/application/run-page-model';
-import { controlPlaneService } from '../../../src/application/runtime';
+import {
+  controlPlaneService,
+  executorFromEnv,
+} from '../../../src/application/runtime';
 import { requirePageSession } from '../../../src/auth/page-session';
 import {
   EmptyState,
@@ -210,13 +213,16 @@ export default async function RunPage({
           )}
           {diagnosis.externalRef === undefined ? null : (
             <p className="dispatch-ref">
-              Trigger run <code>{diagnosis.externalRef}</code>
+              Execution <code>{diagnosis.externalRef}</code>
             </p>
           )}
         </section>
       )}
       {awaitingDispatch && diagnosis?.fromExecutor !== true ? (
-        <UndispatchedRunNotice />
+        <UndispatchedRunNotice executor={executorFromEnv() ?? 'trigger'} />
+      ) : null}
+      {awaitingDispatch ? (
+        <ResumeRunAction runId={run.id} label="Retry" />
       ) : null}
       <dl className="metadata">
         <div>

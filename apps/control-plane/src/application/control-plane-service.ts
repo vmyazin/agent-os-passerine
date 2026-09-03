@@ -1841,7 +1841,19 @@ export class ControlPlaneService {
    * for a fresh generation of both the dispatch effect key and the Trigger
    * key; reusing either would hand back the execution that already finished.
    */
-  async resumeRun(runId: string): Promise<RunProjection> {
+  async resumeRun(
+    runId: string,
+    options: {
+      /**
+       * Set by the route when the newest handoff is to the local executor and
+       * that executor reports it lost or failed. Only then may a queued run
+       * be handed over again: otherwise a queued run may be held by a worker
+       * this process cannot see, and two paid sessions must never share one
+       * run.
+       */
+      readonly lostExecution?: boolean;
+    } = {},
+  ): Promise<RunProjection> {
     if (this.runResumption === undefined)
       throw new ServiceError(
         'run_not_resumable',
@@ -1860,7 +1872,14 @@ export class ControlPlaneService {
     // Succeeded runs have nothing left to do, and a run that has not finished
     // may still have a worker on it -- resuming that would put two paid
     // sessions on one run.
-    if (run.status !== 'failed' && run.status !== 'cancelled')
+    // A queued run is resumable too: after a handoff the executor can lose
+    // it (a restart), and with the start effect already recorded as
+    // succeeded, nothing else will ever hand it over again.
+    if (
+      run.status !== 'failed' &&
+      run.status !== 'cancelled' &&
+      !(run.status === 'pending' && options.lostExecution === true)
+    )
       throw new ServiceError(
         'run_not_resumable',
         run.status === 'succeeded'
@@ -1882,7 +1901,7 @@ export class ControlPlaneService {
     const at = this.clock();
     const reopened = await this.repository.transitionRun(
       run.id,
-      ['failed', 'cancelled'],
+      ['failed', 'cancelled', 'pending'],
       // The previous failure is cleared with the status it belonged to. A run
       // that is pending again must not still explain why it failed.
       { status: 'pending', error: null, output: null, updatedAt: at },
