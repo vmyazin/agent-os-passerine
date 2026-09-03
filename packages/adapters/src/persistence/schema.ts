@@ -139,6 +139,29 @@ export const appSettings = pgTable(
   ],
 );
 
+/**
+ * Model provider API keys, encrypted with a key this database does not hold.
+ *
+ * The column is named for what it contains. Nothing here is readable without
+ * the environment's secret key, and the hint is deliberately short enough to
+ * identify a credential without reconstructing it.
+ */
+export const providerCredentials = pgTable(
+  'provider_credentials',
+  {
+    providerId: text('provider_id').primaryKey(),
+    sealedApiKey: text('sealed_api_key').notNull(),
+    hint: text('hint').notNull(),
+    updatedAt: instant('updated_at').notNull(),
+  },
+  (table) => [
+    check(
+      'provider_credentials_bounded_text',
+      sql`length(${table.providerId}) between 1 and 64 and length(${table.sealedApiKey}) between 1 and 32768 and length(${table.hint}) between 0 and 8`,
+    ),
+  ],
+);
+
 export const projects = pgTable(
   'projects',
   {

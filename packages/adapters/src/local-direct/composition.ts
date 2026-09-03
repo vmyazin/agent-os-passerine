@@ -57,19 +57,20 @@ function requiredValue(environment: Environment, name: string): string {
  * Reports every missing variable at once. Discovering them one restart at a
  * time is the slowest possible way to configure an executor, and this one is
  * meant to be set up in a single sitting.
+ *
+ * A model provider key is deliberately not among them. Keys may be stored in
+ * the control plane instead of the environment, and refusing to compose over
+ * an absent variable would make the page an operator adds a key on
+ * unreachable. A provider with no key anywhere fails when a request needs it,
+ * naming the provider and where to set it.
  */
 export function missingLocalDirectVariables(
   environment: Environment,
 ): readonly string[] {
-  const missing = LOCAL_DIRECT_VARIABLES.filter((name) => {
+  return LOCAL_DIRECT_VARIABLES.filter((name) => {
     const value = environment[name];
     return value === undefined || value.trim() === '';
   });
-  const anthropic = environment.ANTHROPIC_API_KEY?.trim();
-  const kimi = environment.KIMI_API_KEY?.trim();
-  return anthropic || kimi
-    ? missing
-    : [...missing, 'ANTHROPIC_API_KEY or KIMI_API_KEY'];
 }
 
 function capabilityKeys(environment: Environment): ArtifactCapabilityKey[] {

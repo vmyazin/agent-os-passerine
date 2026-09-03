@@ -52,16 +52,16 @@ describe('missingLocalDirectVariables', () => {
     expect(missing.length).toBeGreaterThan(4);
   });
 
-  it('accepts either model key but requires one of them', () => {
+  it('composes without a model key in the environment', () => {
+    // Keys may be stored in the control plane instead. Refusing to compose
+    // over an absent variable would make the page an operator adds a key on
+    // unreachable; a provider with no key anywhere fails when a request
+    // needs it, naming the provider and where to set it.
     const withoutKeys = completeEnvironment();
     delete (withoutKeys as Record<string, string | undefined>)
       .ANTHROPIC_API_KEY;
-    expect(missingLocalDirectVariables(withoutKeys)).toContain(
-      'ANTHROPIC_API_KEY or KIMI_API_KEY',
-    );
-    expect(
-      missingLocalDirectVariables({ ...withoutKeys, KIMI_API_KEY: 'sk-kimi' }),
-    ).toEqual([]);
+    delete (withoutKeys as Record<string, string | undefined>).KIMI_API_KEY;
+    expect(missingLocalDirectVariables(withoutKeys)).toEqual([]);
   });
 
   it('treats a blank value as absent', () => {

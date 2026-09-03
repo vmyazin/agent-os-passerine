@@ -8,6 +8,7 @@ import { ConfigurationEditor } from '../../src/ui/configuration-editor';
 import { PageToolbar } from '../../src/ui/page-toolbar';
 import { ProjectFilterChips } from '../../src/ui/project-filter-chips';
 import { redactConfigurationForDisplay } from '../../src/ui/redact-configuration';
+import { ProviderKeySettings } from '../../src/ui/provider-key-settings';
 import { RunModelSelector } from '../../src/ui/run-model-selector';
 import { TimeZoneSelector } from '../../src/ui/time-zone-selector';
 
@@ -26,6 +27,7 @@ export default async function ConfigurationPage({
     (await service.getUserPreferences(session.login))?.timeZone ??
     DEFAULT_TIME_ZONE;
   const runModel = await service.getRunModelSettings();
+  const providerCredentials = await service.listProviderCredentials();
   const selectorProjectId =
     requestedProjectId ?? (projects.length === 1 ? projects[0]!.id : undefined);
 
@@ -76,6 +78,7 @@ export default async function ConfigurationPage({
           ? {}
           : { selectedId: runModel.selectedId })}
       />
+      <ProviderKeySettings credentials={providerCredentials} />
       <TimeZoneSelector
         currentTimeZone={currentTimeZone}
         timeZones={supportedTimeZones()}

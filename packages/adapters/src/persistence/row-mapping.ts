@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  ProviderCredential,
   Approval,
   ArtifactRecord,
   Backlog,
@@ -40,6 +41,7 @@ import {
   webhookReceipts,
   workflowRuns,
   appSettings,
+  providerCredentials,
   userPreferences,
   backlogs,
   backlogItems,
@@ -84,6 +86,7 @@ function present(column: PgColumn, alias: string) {
 export const projectSelection = getTableColumns(projects);
 export const userPreferencesSelection = getTableColumns(userPreferences);
 export const appSettingsSelection = getTableColumns(appSettings);
+export const providerCredentialSelection = getTableColumns(providerCredentials);
 export const projectSourceSelection = getTableColumns(projectSources);
 export const configRevisionSelection = getTableColumns(configRevisions);
 export const configSnapshotSelection = getTableColumns(configSnapshots);
@@ -127,6 +130,8 @@ export const mapBacklogRow = (row: SqlRow): Backlog => mapRow(row);
 export const mapBacklogItemRow = (row: SqlRow): BacklogItem => mapRow(row);
 export const mapProjectRow = (row: SqlRow): Project => mapRow(row);
 export const mapUserPreferencesRow = (row: SqlRow): UserPreferences =>
+  mapRow(row);
+export const mapProviderCredentialRow = (row: SqlRow): ProviderCredential =>
   mapRow(row);
 /** The singleton id is a storage detail; callers only ever see the settings. */
 export const mapAppSettingsRow = (row: SqlRow): AppSettings => ({

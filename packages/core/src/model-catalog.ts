@@ -98,20 +98,3 @@ export const SELECTABLE_MODELS: readonly SelectableModel[] = [
 export function findSelectableModel(id: string): SelectableModel | undefined {
   return SELECTABLE_MODELS.find((entry) => entry.id === id);
 }
-
-/**
- * Provider ids whose credential is present in this environment.
- *
- * A model whose provider is missing its key cannot run, so the operator is
- * shown which entries are usable rather than being allowed to pick one that
- * fails at the first request.
- */
-export function configuredModelProviders(
-  environment: Readonly<Record<string, string | undefined>>,
-): ReadonlySet<string> {
-  return new Set(
-    MODEL_PROVIDERS.filter(
-      (provider) => (environment[provider.apiKeyEnv] ?? '').trim() !== '',
-    ).map((provider) => provider.id),
-  );
-}

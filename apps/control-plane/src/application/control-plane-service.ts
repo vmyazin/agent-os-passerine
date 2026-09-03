@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import {
   BUDGET_OVERRIDE_EVENT,
   RUN_RESUMED_EVENT,
+  SECRET_KEY_VARIABLE,
   deterministicGoalCriterionId,
+  providerCredentialPurpose,
+  secretKeyFromEnv,
 } from '@agentos/adapters';
 
 import type {
@@ -40,8 +43,10 @@ import type {
   UserPreferences,
 } from '@agentos/core';
 import {
+  MODEL_PROVIDERS,
+  sealSecret,
+  secretHint,
   SELECTABLE_MODELS,
-  configuredModelProviders,
   findModelProvider,
   findSelectableModel,
   canonicalConfigHash,
@@ -230,6 +235,22 @@ export interface RunModelOption {
   readonly model: string;
   /** False when the provider's API key is absent: selectable, but not runnable. */
   readonly available: boolean;
+}
+
+/**
+ * What is known about one provider's credential, without the credential.
+ *
+ * `hint` is the last few characters of a stored key, which is what lets an
+ * operator tell which credential is in place. Nothing here can be assembled
+ * back into a usable key.
+ */
+export interface ProviderCredentialProjection {
+  readonly provider: string;
+  readonly providerLabel: string;
+  readonly apiKeyVariable: string;
+  readonly source: 'database' | 'environment' | 'none';
+  readonly hint?: string;
+  readonly updatedAt?: IsoTimestamp;
 }
 
 export interface RunModelSettingsProjection {
@@ -1142,7 +1163,7 @@ export class ControlPlaneService {
    */
   async getRunModelSettings(): Promise<RunModelSettingsProjection> {
     const settings = await this.repository.getAppSettings();
-    const configured = configuredModelProviders(this.environment);
+    const configured = await this.configuredProviders();
     const options = SELECTABLE_MODELS.map((entry) => ({
       id: entry.id,
       label: entry.label,
@@ -1181,7 +1202,7 @@ export class ControlPlaneService {
           "that model is not in this build's catalog",
           422,
         );
-      if (!configuredModelProviders(this.environment).has(model.providerId))
+      if (!(await this.configuredProviders()).has(model.providerId))
         throw new ServiceError(
           'run_model_unavailable',
           `${findModelProvider(model.providerId)?.label ?? model.providerId} has no API key configured on this deployment`,
@@ -1193,6 +1214,121 @@ export class ControlPlaneService {
       updatedAt: this.clock(),
     });
     return this.getRunModelSettings();
+  }
+
+  /** Providers this deployment holds a key for, stored or in the environment. */
+  private async configuredProviders(): Promise<ReadonlySet<string>> {
+    return new Set(
+      (await this.listProviderCredentials())
+        .filter((credential) => credential.source !== 'none')
+        .map((credential) => credential.provider),
+    );
+  }
+
+  /**
+   * Every provider, and where its API key comes from -- never the key.
+   *
+   * A stored key takes precedence over the environment, so what is reported
+   * here is what a run will actually use.
+   */
+  async listProviderCredentials(): Promise<
+    readonly ProviderCredentialProjection[]
+  > {
+    const stored = new Map(
+      (await this.repository.listProviderCredentials()).map((credential) => [
+        credential.providerId,
+        credential,
+      ]),
+    );
+    return MODEL_PROVIDERS.map((provider) => {
+      const credential = stored.get(provider.id);
+      if (credential !== undefined)
+        return {
+          provider: provider.id,
+          providerLabel: provider.label,
+          apiKeyVariable: provider.apiKeyEnv,
+          source: 'database' as const,
+          ...(credential.hint === '' ? {} : { hint: credential.hint }),
+          updatedAt: credential.updatedAt,
+        };
+      const fromEnvironment = (
+        this.environment[provider.apiKeyEnv] ?? ''
+      ).trim();
+      return {
+        provider: provider.id,
+        providerLabel: provider.label,
+        apiKeyVariable: provider.apiKeyEnv,
+        source:
+          fromEnvironment === '' ? ('none' as const) : ('environment' as const),
+      };
+    });
+  }
+
+  /**
+   * Stores a provider's API key, encrypted.
+   *
+   * The key is sealed before it reaches the repository, so the plaintext
+   * exists only for the length of this call. Without a configured secret key
+   * the write is refused rather than stored in the clear: a credential this
+   * deployment cannot protect is one it should not hold.
+   */
+  async setProviderApiKey(
+    providerId: string,
+    apiKey: string,
+  ): Promise<readonly ProviderCredentialProjection[]> {
+    const provider = findModelProvider(providerId);
+    if (provider === undefined)
+      throw new ServiceError(
+        'unknown_model_provider',
+        'that model provider is not in this build',
+        422,
+      );
+    const trimmed = apiKey.trim();
+    if (trimmed === '')
+      throw new ServiceError('invalid_api_key', 'the API key is empty', 422);
+    if (trimmed.length > 4_096)
+      throw new ServiceError('invalid_api_key', 'the API key is too long', 422);
+    let key: Uint8Array | undefined;
+    try {
+      key = secretKeyFromEnv(this.environment);
+    } catch {
+      throw new ServiceError(
+        'secret_key_invalid',
+        `${SECRET_KEY_VARIABLE} must be a base64url-encoded 32-byte key`,
+        503,
+      );
+    }
+    if (key === undefined)
+      throw new ServiceError(
+        'secret_key_missing',
+        `set ${SECRET_KEY_VARIABLE} before storing provider keys, so they can be encrypted`,
+        503,
+      );
+    await this.repository.upsertProviderCredential({
+      providerId: provider.id,
+      sealedApiKey: sealSecret(
+        key,
+        trimmed,
+        providerCredentialPurpose(provider.id),
+      ),
+      hint: secretHint(trimmed),
+      updatedAt: this.clock(),
+    });
+    return this.listProviderCredentials();
+  }
+
+  /** Forgets a stored key; the environment variable, if any, applies again. */
+  async clearProviderApiKey(
+    providerId: string,
+  ): Promise<readonly ProviderCredentialProjection[]> {
+    if (findModelProvider(providerId) === undefined)
+      throw new ServiceError(
+        'unknown_model_provider',
+        'that model provider is not in this build',
+        422,
+      );
+    await this.repository.deleteProviderCredential(providerId);
+    return this.listProviderCredentials();
   }
 
   private projectSourceFailure(error: unknown): never {

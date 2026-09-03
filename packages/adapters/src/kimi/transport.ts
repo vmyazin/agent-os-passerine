@@ -65,7 +65,14 @@ const responseSchema = z.object({
 });
 
 export interface CreateKimiHttpTransportOptions {
-  readonly apiKey: string;
+  /**
+   * The credential, or a way to fetch it when a request is about to be sent.
+   *
+   * A function is what lets a key stored in the control plane take effect
+   * without a restart: the composition is built once, and the credential is
+   * read per request from wherever it currently lives.
+   */
+  readonly apiKey: string | (() => Promise<string>);
   readonly baseUrl?: string; // default https://api.moonshot.ai/anthropic
   readonly fetchImpl?: typeof fetch;
   /** Total attempts per request, including the first. Default 5. */
@@ -77,9 +84,8 @@ export interface CreateKimiHttpTransportOptions {
 export function createKimiHttpTransport(
   options: CreateKimiHttpTransportOptions,
 ): KimiTransport {
-  if (options.apiKey.trim().length === 0) {
+  if (typeof options.apiKey === 'string' && options.apiKey.trim().length === 0)
     throw new Error('apiKey is required');
-  }
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleepImpl = options.sleepImpl ?? sleep;
@@ -96,10 +102,17 @@ export function createKimiHttpTransport(
         tools: request.tools,
         max_tokens: request.maxTokens,
       });
+      // A literal key is read without suspending, so a request reaches fetch
+      // in the same turn it always did; only a resolver awaits.
+      const apiKey =
+        typeof options.apiKey === 'string'
+          ? options.apiKey
+          : await options.apiKey();
+      if (apiKey.trim().length === 0) throw new Error('apiKey is required');
       const response = await sendWithRetry(
         fetchImpl,
         `${baseUrl}/v1/messages`,
-        options.apiKey,
+        apiKey,
         body,
         sendOptions?.signal,
         maxAttempts,

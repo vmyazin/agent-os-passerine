@@ -12,6 +12,7 @@ import {
 } from '@agentos/core';
 import type {
   AppSettings,
+  ProviderCredential,
   Approval,
   ApprovalId,
   ApprovalListFilter,
@@ -121,6 +122,7 @@ import {
   mapInboxMessageRow,
   mapProjectRow,
   mapAppSettingsRow,
+  mapProviderCredentialRow,
   mapUserPreferencesRow,
   mapProjectSourceRow,
   mapStepRunRow,
@@ -129,6 +131,7 @@ import {
   mapWorkflowRunRow,
   projectSelection,
   appSettingsSelection,
+  providerCredentialSelection,
   userPreferencesSelection,
   projectSourceSelection,
   stepRunSelection,
@@ -153,6 +156,7 @@ import {
   projects,
   APP_SETTINGS_ID,
   appSettings,
+  providerCredentials,
   userPreferences,
   projectSources,
   stepRuns,
@@ -449,6 +453,52 @@ export class NeonDomainRepository implements DomainRepository {
       'App settings',
       mapAppSettingsRow,
     );
+  }
+
+  async getProviderCredential(
+    providerId: string,
+  ): Promise<ProviderCredential | undefined> {
+    const [row] = await this.database
+      .select(providerCredentialSelection)
+      .from(providerCredentials)
+      .where(eq(providerCredentials.providerId, providerId))
+      .limit(1);
+    return row === undefined ? undefined : mapProviderCredentialRow(row);
+  }
+
+  async listProviderCredentials(): Promise<readonly ProviderCredential[]> {
+    const rows = await this.database
+      .select(providerCredentialSelection)
+      .from(providerCredentials)
+      .orderBy(asc(providerCredentials.providerId));
+    return rows.map(mapProviderCredentialRow);
+  }
+
+  async upsertProviderCredential(
+    credential: ProviderCredential,
+  ): Promise<ProviderCredential> {
+    return mappedOne(
+      await this.database
+        .insert(providerCredentials)
+        .values(credential)
+        .onConflictDoUpdate({
+          target: providerCredentials.providerId,
+          set: {
+            sealedApiKey: credential.sealedApiKey,
+            hint: credential.hint,
+            updatedAt: credential.updatedAt,
+          },
+        })
+        .returning(providerCredentialSelection),
+      'Provider credential',
+      mapProviderCredentialRow,
+    );
+  }
+
+  async deleteProviderCredential(providerId: string): Promise<void> {
+    await this.database
+      .delete(providerCredentials)
+      .where(eq(providerCredentials.providerId, providerId));
   }
 
   async createProject(project: Project): Promise<Project> {

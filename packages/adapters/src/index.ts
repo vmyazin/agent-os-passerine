@@ -4,6 +4,7 @@ export * from './github/index.js';
 export * from './kimi/index.js';
 export * from './local-direct/index.js';
 export * from './local-git/index.js';
+export * from './model-credentials.js';
 export * from './persistence/index.js';
 export * from './runtime/routing.js';
 export * from './trigger/index.js';

@@ -61,6 +61,53 @@ export function repositoryParityContract(
   createRepository: RepositoryFactory,
 ): void {
   describe(`${implementation} PostgreSQL parity contract`, () => {
+    it('stores a provider credential as opaque text, and forgets it on delete', async () => {
+      const repository = await createRepository();
+      const first = isoTimestamp('2026-08-17T07:00:00.000Z');
+      const second = isoTimestamp('2026-08-17T08:00:00.000Z');
+
+      expect(
+        await repository.getProviderCredential('anthropic'),
+      ).toBeUndefined();
+      await repository.upsertProviderCredential({
+        providerId: 'anthropic',
+        sealedApiKey: 'sealed-one',
+        hint: 'wxyz',
+        updatedAt: first,
+      });
+      await repository.upsertProviderCredential({
+        providerId: 'kimi',
+        sealedApiKey: 'sealed-two',
+        hint: 'abcd',
+        updatedAt: first,
+      });
+      // Rotation replaces in place rather than accumulating credentials.
+      await repository.upsertProviderCredential({
+        providerId: 'anthropic',
+        sealedApiKey: 'sealed-three',
+        hint: 'mnop',
+        updatedAt: second,
+      });
+
+      expect(await repository.getProviderCredential('anthropic')).toEqual({
+        providerId: 'anthropic',
+        sealedApiKey: 'sealed-three',
+        hint: 'mnop',
+        updatedAt: second,
+      });
+      expect(
+        (await repository.listProviderCredentials()).map(
+          (credential) => credential.providerId,
+        ),
+      ).toEqual(['anthropic', 'kimi']);
+
+      await repository.deleteProviderCredential('anthropic');
+      expect(
+        await repository.getProviderCredential('anthropic'),
+      ).toBeUndefined();
+      expect(await repository.listProviderCredentials()).toHaveLength(1);
+    });
+
     it('keeps one set of app settings, replaced in place', async () => {
       const repository = await createRepository();
       const first = isoTimestamp('2026-08-17T07:00:00.000Z');

@@ -11,6 +11,7 @@ import {
 } from '@agentos/core';
 import type {
   AppSettings,
+  ProviderCredential,
   Approval,
   ApprovalId,
   Backlog,
@@ -260,6 +261,7 @@ export class InMemoryDomainRepository implements DomainRepository {
   readonly #userPreferences = new Map<string, UserPreferences>();
   // One installation, one row; there is nothing to key it by.
   #appSettings: AppSettings | undefined;
+  readonly #providerCredentials = new Map<string, ProviderCredential>();
   readonly #projects = new Map<string, Project>();
   readonly #projectSources = new Map<string, ProjectSource>();
   readonly #projectSourceKeys = new Map<string, string>();
@@ -345,6 +347,35 @@ export class InMemoryDomainRepository implements DomainRepository {
     assertPersistenceTimestamps(settings);
     this.#appSettings = copy(settings);
     return copy(settings);
+  }
+
+  async getProviderCredential(
+    providerId: string,
+  ): Promise<ProviderCredential | undefined> {
+    const value = this.#providerCredentials.get(providerId);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async listProviderCredentials(): Promise<readonly ProviderCredential[]> {
+    return [...this.#providerCredentials.values()]
+      .sort((left, right) => left.providerId.localeCompare(right.providerId))
+      .map((credential) => copy(credential));
+  }
+
+  async upsertProviderCredential(
+    credential: ProviderCredential,
+  ): Promise<ProviderCredential> {
+    if (credential.providerId.trim() === '')
+      throw new TypeError('provider credential providerId must not be empty');
+    if (credential.sealedApiKey.trim() === '')
+      throw new TypeError('provider credential sealedApiKey must not be empty');
+    assertPersistenceTimestamps(credential);
+    this.#providerCredentials.set(credential.providerId, copy(credential));
+    return copy(credential);
+  }
+
+  async deleteProviderCredential(providerId: string): Promise<void> {
+    this.#providerCredentials.delete(providerId);
   }
 
   async createProject(project: Project): Promise<Project> {

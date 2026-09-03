@@ -185,6 +185,25 @@ export interface AppSettings {
   readonly updatedAt: IsoTimestamp;
 }
 
+/**
+ * A model provider's API key, encrypted.
+ *
+ * The row holds ciphertext only. Reading the key back requires the
+ * environment's secret key as well, so a database dump -- a backup, a
+ * read-replica, a support export -- is not a set of live credentials.
+ *
+ * `hint` is the last few characters of the key in the clear, which is what
+ * lets an operator tell which credential is stored without the control plane
+ * ever showing them one.
+ */
+export interface ProviderCredential {
+  readonly providerId: string;
+  /** The sealed envelope; never the key itself. */
+  readonly sealedApiKey: string;
+  readonly hint: string;
+  readonly updatedAt: IsoTimestamp;
+}
+
 export interface PersistenceDigests {
   readonly configDigest: string;
   readonly modelDigest: string;
@@ -500,6 +519,14 @@ export interface DomainRepository {
   upsertUserPreferences(preferences: UserPreferences): Promise<UserPreferences>;
   getAppSettings(): Promise<AppSettings | undefined>;
   upsertAppSettings(settings: AppSettings): Promise<AppSettings>;
+  getProviderCredential(
+    providerId: string,
+  ): Promise<ProviderCredential | undefined>;
+  listProviderCredentials(): Promise<readonly ProviderCredential[]>;
+  upsertProviderCredential(
+    credential: ProviderCredential,
+  ): Promise<ProviderCredential>;
+  deleteProviderCredential(providerId: string): Promise<void>;
 
   createProject(project: Project): Promise<Project>;
   getProject(id: ProjectId): Promise<Project | undefined>;

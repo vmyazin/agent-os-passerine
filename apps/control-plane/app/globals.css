@@ -1749,6 +1749,43 @@ div.inbox-message-copy {
 .step-copy-state:empty {
   display: none;
 }
+
+/* One row per provider: who it is and where its key comes from on the left,
+   the actions on the right. */
+.provider-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.provider-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.6rem;
+  padding: 0.75rem 0.9rem;
+}
+.provider-key-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.provider-key-source {
+  color: var(--ink-muted);
+  font-size: 0.85rem;
+}
+/* A provider with no key cannot run, so it reads as a gap to fill. */
+.provider-key-source.none {
+  color: var(--warning-ink, var(--ink-secondary));
+}
+.provider-key-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: min(24rem, 100%);
+}
 /* The name and its copy control share a row inside the stacked heading. */
 .run-step-name {
   display: flex;

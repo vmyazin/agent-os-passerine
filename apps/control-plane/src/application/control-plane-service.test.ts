@@ -1050,6 +1050,114 @@ runtime: { provider: local }
     expect(JSON.stringify(projection)).not.toContain('must never escape');
   });
 
+  it('stores a provider key encrypted, and never hands it back', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository, undefined, {
+      AGENTOS_SECRET_KEY: Buffer.alloc(32, 7).toString('base64url'),
+    });
+
+    const credentials = await service.setProviderApiKey(
+      'anthropic',
+      'sk-ant-secret-0123456789wxyz',
+    );
+
+    // Nothing the service returns, and nothing the row holds, contains the
+    // key: a database dump is ciphertext, and the API cannot leak it back.
+    expect(JSON.stringify(credentials)).not.toContain('sk-ant');
+    const stored = await repository.getProviderCredential('anthropic');
+    expect(stored?.sealedApiKey).not.toContain('sk-ant');
+    expect(JSON.stringify(stored)).not.toContain('sk-ant-secret');
+    // Enough to recognise which credential is in place, and no more.
+    expect(stored?.hint).toBe('wxyz');
+    expect(credentials).toContainEqual(
+      expect.objectContaining({ provider: 'anthropic', source: 'database' }),
+    );
+  });
+
+  it('refuses to store a key it cannot encrypt', async () => {
+    const repository = new InMemoryDomainRepository();
+    // A credential this deployment cannot protect is one it should not hold.
+    const service = createService(repository, undefined, {});
+
+    await expect(
+      service.setProviderApiKey('anthropic', 'sk-ant-secret-0123456789wxyz'),
+    ).rejects.toMatchObject({ code: 'secret_key_missing', status: 503 });
+    expect(await repository.getProviderCredential('anthropic')).toBeUndefined();
+  });
+
+  it('reports where each provider key comes from', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository, undefined, {
+      AGENTOS_SECRET_KEY: Buffer.alloc(32, 7).toString('base64url'),
+      KIMI_API_KEY: 'from-the-environment',
+    });
+    await service.setProviderApiKey(
+      'anthropic',
+      'sk-ant-secret-0123456789wxyz',
+    );
+
+    const credentials = await service.listProviderCredentials();
+
+    expect(credentials).toContainEqual(
+      expect.objectContaining({ provider: 'anthropic', source: 'database' }),
+    );
+    expect(credentials).toContainEqual(
+      expect.objectContaining({ provider: 'kimi', source: 'environment' }),
+    );
+    expect(JSON.stringify(credentials)).not.toContain('from-the-environment');
+  });
+
+  it('makes a model selectable once its key is stored', async () => {
+    const repository = new InMemoryDomainRepository();
+    // No provider key in the environment at all: the stored one is what makes
+    // the model runnable, so the two settings agree.
+    const service = createService(repository, undefined, {
+      AGENTOS_SECRET_KEY: Buffer.alloc(32, 7).toString('base64url'),
+    });
+
+    const before = await service.getRunModelSettings();
+    expect(
+      before.options.find((option) => option.provider === 'kimi')?.available,
+    ).toBe(false);
+
+    await service.setProviderApiKey('kimi', 'sk-kimi-0123456789abcd');
+
+    const after = await service.getRunModelSettings();
+    expect(
+      after.options.find((option) => option.provider === 'kimi')?.available,
+    ).toBe(true);
+    await expect(
+      service.updateRunModel('kimi/kimi-k2.7-code'),
+    ).resolves.toMatchObject({ selectedId: 'kimi/kimi-k2.7-code' });
+  });
+
+  it('forgets a stored key so the environment applies again', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository, undefined, {
+      AGENTOS_SECRET_KEY: Buffer.alloc(32, 7).toString('base64url'),
+      KIMI_API_KEY: 'from-the-environment',
+    });
+    await service.setProviderApiKey('kimi', 'sk-kimi-0123456789abcd');
+
+    const credentials = await service.clearProviderApiKey('kimi');
+
+    expect(credentials).toContainEqual(
+      expect.objectContaining({ provider: 'kimi', source: 'environment' }),
+    );
+    expect(await repository.getProviderCredential('kimi')).toBeUndefined();
+  });
+
+  it('refuses a provider it does not have', async () => {
+    const repository = new InMemoryDomainRepository();
+    const service = createService(repository, undefined, {
+      AGENTOS_SECRET_KEY: Buffer.alloc(32, 7).toString('base64url'),
+    });
+
+    await expect(
+      service.setProviderApiKey('openai', 'sk-whatever-0123456789'),
+    ).rejects.toMatchObject({ code: 'unknown_model_provider', status: 422 });
+  });
+
   it('offers the model catalog and remembers the chosen one', async () => {
     const repository = new InMemoryDomainRepository();
     const service = createService(repository);
