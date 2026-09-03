@@ -157,3 +157,56 @@ describe('RunStepTimeline running rail', () => {
     expect(markup).not.toContain('run-step-item-running');
   });
 });
+
+describe('RunStepTimeline code rendering', () => {
+  const withProgress = (message: string, code?: string) => ({
+    id: 'run-1:specification:1',
+    stepKey: 'specification',
+    attempt: 1,
+    status: 'running',
+    progress: [
+      {
+        eventId: 'e1',
+        phase: 'tool',
+        message,
+        occurredAt: '2026-09-03T00:00:00.000Z',
+        ...(code === undefined ? {} : { code }),
+      },
+    ],
+  });
+
+  it('sets the code part of a message in monospace', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [
+          withProgress(
+            'Model (kimi) is using bash: node --test',
+            'node --test',
+          ),
+        ],
+      } as never),
+    );
+    expect(markup).toContain('<code class="run-step-code">node --test</code>');
+    expect(markup).toContain('is using bash: ');
+  });
+
+  it('leaves a message without a code part as plain text', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [withProgress('Model sent a message: I could not find it')],
+      } as never),
+    );
+    expect(markup).not.toContain('run-step-code');
+    expect(markup).toContain('I could not find it');
+  });
+
+  it('renders plainly when the code is not the tail of the message', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [withProgress('bash finished', 'something else entirely')],
+      } as never),
+    );
+    expect(markup).not.toContain('run-step-code');
+    expect(markup).toContain('bash finished');
+  });
+});

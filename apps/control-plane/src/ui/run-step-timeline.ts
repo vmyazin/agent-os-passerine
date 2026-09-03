@@ -1,4 +1,4 @@
-import { createElement } from 'react';
+import { createElement, type ReactNode } from 'react';
 
 import { formatDisplayTime } from './format-timestamp';
 
@@ -6,6 +6,8 @@ export interface RunStepProgressEntry {
   readonly eventId: string;
   readonly phase: string;
   readonly message: string;
+  /** The tail of the message that is code, set in monospace when present. */
+  readonly code?: string;
   readonly occurredAt: string;
 }
 
@@ -16,6 +18,28 @@ export interface RunStepTimelineItem {
   readonly status: string;
   readonly model?: string;
   readonly progress: readonly RunStepProgressEntry[];
+}
+
+/**
+ * A progress line, with its code part in monospace.
+ *
+ * The message already contains the code, so this splits on that exact
+ * substring rather than guessing at a separator: an event without a `code`
+ * field, or one whose message does not end with it, renders as plain text
+ * exactly as before.
+ */
+function renderMessage(event: {
+  readonly message: string;
+  readonly code?: string;
+}): ReactNode[] {
+  const { message, code } = event;
+  if (code === undefined || code.length === 0) return [message];
+  const at = message.lastIndexOf(code);
+  if (at < 0 || at + code.length !== message.length) return [message];
+  return [
+    message.slice(0, at),
+    createElement('code', { className: 'run-step-code', key: 'code' }, code),
+  ];
 }
 
 function fallbackStatus(status: string): string {
@@ -71,7 +95,7 @@ export function RunStepTimeline({
                     { dateTime: event.occurredAt },
                     eventTime(event.occurredAt, timeZone),
                   ),
-                  createElement('span', null, event.message),
+                  createElement('span', null, ...renderMessage(event)),
                 ),
               ),
             );

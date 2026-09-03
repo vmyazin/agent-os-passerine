@@ -792,6 +792,8 @@ export interface RunProjection extends PersistenceDigests {
       readonly eventId: string;
       readonly phase: string;
       readonly message: string;
+      /** The part of the message that is code, for monospace rendering. */
+      readonly code?: string;
       readonly occurredAt: IsoTimestamp;
     }[];
   }[];
@@ -973,6 +975,7 @@ function projectStepProgress(event: DomainEvent):
   const stepKey = safeString(source, 'stepKey');
   const phase = safeString(source, 'phase');
   const message = safeString(source, 'message');
+  const code = safeString(source, 'code');
   const attempt = source.attempt;
   if (
     stepRunId === undefined ||
@@ -993,6 +996,7 @@ function projectStepProgress(event: DomainEvent):
     sequence: event.sequence,
     phase,
     message,
+    ...(code === undefined ? {} : { code }),
     occurredAt: event.occurredAt,
   };
 }

@@ -647,6 +647,7 @@ async function recordStepProgress(
   phase: StepProgressPhase,
   message: string,
   occurredAt = dependencies.clock(),
+  code?: string,
 ): Promise<void> {
   const type = 'step.progress';
   const payload = asJson({
@@ -655,6 +656,7 @@ async function recordStepProgress(
     attempt: step.attempt,
     phase,
     message,
+    ...(code === undefined ? {} : { code }),
   });
   await dependencies.repository.appendEvent({
     runId: persistenceId('run', runId),
@@ -829,6 +831,12 @@ interface RuntimeProgressNote {
    * own instead of the first three events of a type hiding the rest.
    */
   readonly variant: string;
+  /**
+   * The part of the message that is code rather than prose -- a command, a
+   * path, an artifact, a result -- so the page can set it in monospace. The
+   * message still contains it, so a reader of the raw event loses nothing.
+   */
+  readonly code?: string;
 }
 
 /**
@@ -939,7 +947,13 @@ function runtimeProgress(
     phase: StepProgressPhase,
     message: string,
     variant = '',
-  ): RuntimeProgressNote => ({ phase, message, variant });
+    code?: string,
+  ): RuntimeProgressNote => ({
+    phase,
+    message,
+    variant,
+    ...(code === undefined ? {} : { code }),
+  });
   switch (event.type) {
     case 'message': {
       // Provider-authored text, shown deliberately. The failure this diagnoses
@@ -968,7 +982,12 @@ function runtimeProgress(
       // that something is happening; the command says what.
       const subject = runtimeToolCallSubject(event.payload, tool);
       const about = subject === undefined ? '' : `: ${subject}`;
-      return note('tool', `Model is using ${tool}${via}${about}`, tool);
+      return note(
+        'tool',
+        `Model is using ${tool}${via}${about}`,
+        tool,
+        subject,
+      );
     }
     case 'tool_result': {
       const failed = payloadField(event.payload, 'isError') === true;
@@ -991,6 +1010,7 @@ function runtimeProgress(
         'tool',
         failed ? `${tool} reported an error${because}` : `${tool} finished`,
         failed ? `${tool}:failed` : tool,
+        reason,
       );
     }
     case 'input_acknowledged':
@@ -1089,6 +1109,7 @@ async function consumeEvents(
           progress.phase,
           progress.message,
           event.occurredAt.toISOString(),
+          progress.code,
         );
       }
     }
@@ -1924,6 +1945,8 @@ async function runAgentStep<T>(
         rendered === undefined
           ? 'Step completed'
           : `Step completed. ${model === undefined ? 'Model' : `Model (${model})`} returned: ${rendered}`,
+        undefined,
+        rendered,
       );
       completedResult = parsed.data;
     } catch (rawError) {
