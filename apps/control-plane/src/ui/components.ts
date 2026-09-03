@@ -10,7 +10,7 @@ import {
 
 import { isRunActive } from './active-run-status';
 
-export { RunStepTimeline } from './run-step-timeline';
+export { RunStepTimeline, stepLogText } from './run-step-timeline';
 
 const LABELS = {
   pending: 'Pending',

@@ -7,6 +7,7 @@ import {
   MetricCard,
   RunStatusBadge,
   RunStepTimeline,
+  stepLogText,
 } from './components';
 
 describe('control-plane UI components', () => {
@@ -208,5 +209,63 @@ describe('RunStepTimeline code rendering', () => {
     );
     expect(markup).not.toContain('run-step-code');
     expect(markup).toContain('bash finished');
+  });
+});
+
+describe('RunStepTimeline copy action', () => {
+  const step = {
+    id: 'run-1:specification:1',
+    stepKey: 'specification',
+    attempt: 1,
+    status: 'failed',
+    model: 'kimi-k2.7-code',
+    progress: [
+      {
+        eventId: 'e1',
+        phase: 'preparing',
+        message: 'Preparing workspace',
+        occurredAt: '2026-09-03T05:08:17.000Z',
+      },
+      {
+        eventId: 'e2',
+        phase: 'tool',
+        message: 'artifact_put reported an error: quota exhausted',
+        occurredAt: '2026-09-03T05:08:22.000Z',
+      },
+    ],
+  };
+
+  it('offers a named copy control on each step', () => {
+    const markup = renderToStaticMarkup(
+      createElement(RunStepTimeline, {
+        steps: [step],
+        timeZone: 'UTC',
+      } as never),
+    );
+    // Glyph-only, so it needs a name of its own rather than a nearby label.
+    expect(markup).toContain(
+      'aria-label="Copy the specification log, attempt 1"',
+    );
+    expect(markup).toContain('icon icon-copy');
+  });
+
+  it('builds the log as text: a header, then one line per note in order', () => {
+    // Asserted on the builder rather than the markup: the text reaches the
+    // clipboard through a prop the handler reads, so it is never rendered.
+    const text = stepLogText(step, 'UTC');
+    expect(text.split('\n')).toEqual([
+      'specification · attempt 1 · failed · kimi-k2.7-code',
+      '',
+      '05:08:17  Preparing workspace',
+      '05:08:22  artifact_put reported an error: quota exhausted',
+    ]);
+  });
+
+  it('names a step with no model and no notes without inventing either', () => {
+    const text = stepLogText(
+      { stepKey: 'specification', attempt: 1, status: 'pending', progress: [] },
+      'UTC',
+    );
+    expect(text).toBe('specification · attempt 1 · pending\n');
   });
 });

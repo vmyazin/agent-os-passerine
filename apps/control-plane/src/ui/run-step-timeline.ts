@@ -1,5 +1,6 @@
 import { createElement, type ReactNode } from 'react';
 
+import { CopyLogButton } from './copy-log-button';
 import { formatDisplayTime } from './format-timestamp';
 
 export interface RunStepProgressEntry {
@@ -40,6 +41,39 @@ function renderMessage(event: {
     message.slice(0, at),
     createElement('code', { className: 'run-step-code', key: 'code' }, code),
   ];
+}
+
+/**
+ * A step's log as plain text, for the clipboard.
+ *
+ * A header naming what this is, then one line per note in the order shown.
+ * Built here rather than scraped from the DOM so the copy matches the page
+ * exactly, and so it still works for a step whose notes are collapsed.
+ */
+export function stepLogText(
+  step: {
+    readonly stepKey: string;
+    readonly attempt: number;
+    readonly status: string;
+    readonly model?: string;
+    readonly progress: readonly {
+      readonly message: string;
+      readonly occurredAt: string;
+    }[];
+  },
+  timeZone?: string,
+): string {
+  const header = [
+    step.stepKey,
+    `attempt ${String(step.attempt)}`,
+    step.status,
+    ...(step.model === undefined ? [] : [step.model]),
+  ].join(' · ');
+  const lines = step.progress.map(
+    (event) =>
+      `${formatDisplayTime(event.occurredAt, timeZone)}  ${event.message}`,
+  );
+  return [header, '', ...lines].join('\n');
 }
 
 function fallbackStatus(status: string): string {
@@ -118,7 +152,22 @@ export function RunStepTimeline({
             createElement(
               'span',
               { className: 'run-step-heading' },
-              createElement('strong', null, step.stepKey),
+              // The heading stacks the name over the latest note, so the
+              // name and its copy control share a row of their own.
+              createElement(
+                'span',
+                { className: 'run-step-name' },
+                createElement('strong', null, step.stepKey),
+                // Beside the name it belongs to, so it is obvious which log
+                // gets copied even when several steps are on screen.
+                createElement(CopyLogButton, {
+                  key: 'copy',
+                  // Retried steps repeat the name, so the attempt is part of
+                  // the accessible name that tells the two controls apart.
+                  label: `Copy the ${step.stepKey} log, attempt ${String(step.attempt)}`,
+                  text: stepLogText(step, timeZone),
+                }),
+              ),
               createElement('span', { className: 'run-step-current' }, latest),
             ),
             createElement(

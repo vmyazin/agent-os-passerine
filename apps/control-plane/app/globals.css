@@ -1727,6 +1727,34 @@ div.inbox-message-copy {
   display: flex;
   gap: 0.45rem;
 }
+
+/* A quiet control in the step header: no fill, no border, sized to the meta
+   text beside it, so it reads as an affordance rather than a call to action. */
+.step-copy {
+  min-height: 0;
+  border: 0;
+  border-radius: 0.4rem;
+  background: none;
+  color: var(--ink-muted);
+  padding: 0.2rem 0.3rem;
+  gap: 0.3rem;
+  /* Sized against the step name it sits beside, not the smaller meta text. */
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.step-copy:hover {
+  background: var(--surface-inset);
+  color: var(--ink-secondary);
+}
+.step-copy-state:empty {
+  display: none;
+}
+/* The name and its copy control share a row inside the stacked heading. */
+.run-step-name {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
 .run-step-heading {
   min-width: 0;
   flex-direction: column;
