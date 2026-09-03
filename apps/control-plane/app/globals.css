@@ -461,6 +461,13 @@ h1 {
 
 .section-heading,
 .run-list a,
+.button-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 /* A glyph inside a control, beside its word. Sized under the label so the
    word stays the thing being read, and flex: none so a long label never
    squeezes it out of shape. */
@@ -469,6 +476,7 @@ h1 {
   width: 0.9em;
   height: 0.9em;
 }
+
 /* Trailing an external link, offset from the last character. */
 .link-icon {
   flex: none;
@@ -476,13 +484,6 @@ h1 {
   height: 0.85em;
   margin-inline-start: 0.3em;
   vertical-align: -0.08em;
-}
-
-.button-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
 }
 
 .run-list {
