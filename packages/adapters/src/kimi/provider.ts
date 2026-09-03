@@ -756,11 +756,13 @@ class KimiRuntimeProviderImpl implements RuntimeProvider {
         signal: session.controller.signal,
       });
       const completedAt = this.#clock();
+      const output = observedOutputTail(result.stdout, result.stderr);
       return Object.freeze({
         command: expectedCommand,
         exitCode: result.exitCode,
         startedAt,
         completedAt,
+        ...(output === undefined ? {} : { output }),
       });
     });
   }
@@ -1073,6 +1075,28 @@ function toRuntimeOutput(
     return { text: result, artifacts };
   }
   return { data: result, artifacts };
+}
+
+/** Ceiling on the observed-command tail carried back for diagnosis. */
+const MAX_OBSERVED_OUTPUT_CHARS = 4_000;
+
+/**
+ * The last few thousand characters of what a trusted command printed, with
+ * stderr after stdout. The tail rather than the head: a test runner puts its
+ * failures and its summary at the end, which is exactly what the operator
+ * needs and what a head would truncate away.
+ */
+function observedOutputTail(
+  stdout: string,
+  stderr: string,
+): string | undefined {
+  const combined = [stdout, stderr]
+    .filter((part) => part.length > 0)
+    .join('\n');
+  if (combined.length === 0) return undefined;
+  return combined.length > MAX_OBSERVED_OUTPUT_CHARS
+    ? `...${combined.slice(-MAX_OBSERVED_OUTPUT_CHARS)}`
+    : combined;
 }
 
 function errorMessage(error: unknown): string {

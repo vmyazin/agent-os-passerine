@@ -231,6 +231,8 @@ export interface TrustedCommandObservation {
   readonly sourceSnapshotDigest: string;
   readonly changeSetDigest: string;
   readonly configDigest: string;
+  /** Diagnostic tail of what the command printed; never attested. */
+  readonly output?: string | undefined;
 }
 
 export interface WorkflowHandleSealer {

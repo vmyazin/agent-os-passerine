@@ -125,6 +125,14 @@ export interface RuntimeObservedCommand {
   readonly exitCode: number;
   readonly startedAt: string;
   readonly completedAt: string;
+  /**
+   * The tail of what the command printed, bounded by the provider. Present so
+   * a failed gate can say why: an exit code alone leaves the operator to
+   * rebuild the sandbox by hand to read a test's output. It is diagnostic
+   * only -- the signed evidence attests the command, its exit code and its
+   * bindings, never this text.
+   */
+  readonly output?: string;
 }
 
 export interface RuntimeProvider {

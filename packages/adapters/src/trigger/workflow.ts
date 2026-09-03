@@ -164,6 +164,25 @@ function describedError(error: unknown): string {
     : `a database statement failed: ${reason}`;
 }
 
+/**
+ * The run's recorded reason for a failed gate.
+ *
+ * Keeps the END of the findings, not the beginning. A test runner prints its
+ * failures and its summary last, and every bound between here and the run
+ * record truncates from the front, so a head-first message would reliably
+ * discard the only part worth reading.
+ */
+function verificationFailureMessage(
+  findings: readonly string[] | undefined,
+): string {
+  const prefix = 'trusted verification failed';
+  const joined = (findings ?? []).join('; ');
+  if (joined.length === 0) return prefix;
+  const room = 700;
+  const tail = joined.length > room ? `...${joined.slice(-room)}` : joined;
+  return `${prefix}: ${tail}`;
+}
+
 function safeError(error: unknown): string {
   return describedError(error)
     .replace(
@@ -2370,7 +2389,7 @@ export function createDurableFeatureWorkflow(
         });
         if (!verification.passed) {
           throw new WorkflowPermanentError(
-            `trusted verification failed: ${(verification.findings ?? []).join('; ').slice(0, 500)}`,
+            verificationFailureMessage(verification.findings),
           );
         }
         if (!/^[0-9a-f]{64}$/.test(verification.evidenceDigest))

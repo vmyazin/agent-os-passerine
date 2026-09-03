@@ -1513,3 +1513,49 @@ describe('trusted verification requests', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe('observed command output', () => {
+  it('carries the tail of what a failing trusted command printed', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(
+      handle,
+      'echo "not ok 1 - version endpoint"; echo "boom" >&2; exit 1',
+    );
+    expect(observed.exitCode).toBe(1);
+    // Both streams, so a runner that reports on stderr is not silent.
+    expect(observed.output).toContain('not ok 1 - version endpoint');
+    expect(observed.output).toContain('boom');
+  });
+
+  it('keeps the end of a long output, where a test runner puts its summary', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(
+      handle,
+      'for i in $(seq 1 2000); do echo "line $i of noise"; done; echo "FINAL SUMMARY"; exit 1',
+    );
+    expect(observed.output).toContain('FINAL SUMMARY');
+    expect(observed.output!.startsWith('...')).toBe(true);
+    expect(observed.output!.length).toBeLessThanOrEqual(4_100);
+  });
+
+  it('omits the field entirely when a command prints nothing', async () => {
+    const { provider } = await makeProvider({
+      transport: neverRespondingTransport(),
+    });
+    const handle = await provider.start(
+      baseRequest({ input: { version: 'trusted-verification-request-v1' } }),
+    );
+    const observed = await provider.observeCommand!(handle, 'exit 0');
+    expect(observed.output).toBeUndefined();
+  });
+});
