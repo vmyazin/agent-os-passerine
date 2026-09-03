@@ -464,6 +464,14 @@ export interface DurableFeatureWorkflowDependencies {
   ) => Promise<number>;
   readonly verifier: WorkflowVerifier;
   /**
+   * Refuses a Definition of Done whose acceptance tests cannot parse, before
+   * the approval is created. Injectable so a test can stub the subprocess;
+   * production uses `assertAcceptanceTestsParse`.
+   */
+  readonly checkAcceptanceTests?: (
+    tests: readonly { readonly path: string; readonly content: string }[],
+  ) => Promise<void>;
+  /**
    * Paths already present in the run's source bundle. The acceptance-test
    * overlay must be published as `modify`, not `add`, for a path the base
    * repository already carries (the publisher rejects an `add` whose target

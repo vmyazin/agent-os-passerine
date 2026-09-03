@@ -18,17 +18,24 @@ session leases.
 2. The specification role writes a separately hashed specification plus
    `definition-of-done-v2` with one `test/acceptance/<id>.test.mjs` per
    criterion.
-3. The workflow creates a scope hash over the run, configuration, specification,
+3. Trusted code parses every acceptance test the specification wrote, with
+   `node --check`, which never executes them. A file that cannot parse fails
+   every implementation including a correct one, so the run stops here rather
+   than after an implementation has been paid for. This caught nothing that
+   review or verification would have caught earlier: both prior instances --
+   an import attribute Node removed, and a path that escaped the repository --
+   were found only after a full run, from an exit code with no output.
+4. The workflow creates a scope hash over the run, configuration, specification,
    and DoD. It stores a domain approval and a Trigger waitpoint reference. The
    waitpoint is only a wake signal; after waking, the task re-reads the consumed
    approval and its atomic `approval.approved` or `approval.rejected` event.
    The inbox shows the acceptance test file bodies.
-4. Implementation receives the specification and Definition of Done directly.
+5. Implementation receives the specification and Definition of Done directly.
    A project may declare a `planning` step; when it does, planning runs first
    and the plan is handed to implementation as well. Four real runs on
    2026-09-02 showed the implementer re-deriving the plan from the
    specification, so the default configurations no longer declare it.
-5. After implementation, trusted code seals the acceptance test files onto the
+6. After implementation, trusted code seals the acceptance test files onto the
    change set (`sealed-changes`). Verification materializes the sealed set and
    runs the allowlisted project command and `node --test 'test/acceptance/*.test.mjs'`
    in a separate, secretless sandbox with only source/change inputs and Bash.
@@ -36,9 +43,9 @@ session leases.
    provider-observed exact install/test sequence and result are bound into a
    signed, bounded report. On the process runtime this step starts no model
    session: the sandbox is materialized and the command observed directly.
-6. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
+7. Trusted code verifies bounded artifact schemas, tests, DoD evidence, and
    protected-path policy. This is the gate.
-7. A project may declare a `review` step. When it does, review runs here,
+8. A project may declare a `review` step. When it does, review runs here,
    after the gate, and never blocks: its findings are shown on the run page
    for the operator who merges. A review that requests changes, or a review
    session that fails or cannot be admitted under the budget, is recorded on
@@ -46,7 +53,7 @@ session leases.
    verification and a `changes_requested` re-review failed the run; the run
    that motivated the change was blocked by a finding that was true of `||`
    and false of `??`, on code the acceptance tests then passed.
-8. A trusted publication authority -- not an agent -- creates the publisher
+9. A trusted publication authority -- not an agent -- creates the publisher
    input. The GitHub App publisher revalidates the stale base and creates only
    a draft PR.
 

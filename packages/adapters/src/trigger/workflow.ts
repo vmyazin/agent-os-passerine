@@ -24,6 +24,7 @@ import {
 } from '@agentos/core';
 import type { ZodType } from 'zod';
 
+import { assertAcceptanceTestsParse } from './acceptance-test-check.js';
 import {
   artifactSchemaFailureMessage,
   changeSetSchema,
@@ -2063,6 +2064,18 @@ export function createDurableFeatureWorkflow(
           { stepId: 'specification', artifactId: 'dod' },
           definitionOfDoneSchema,
         );
+        // Checked before the operator is asked to approve them: a test that
+        // cannot parse fails every implementation, and finding that out after
+        // a run has been paid for is how the last two failures were found.
+        await (dependencies.checkAcceptanceTests ?? assertAcceptanceTestsParse)(
+          dodBody.acceptanceTests,
+        ).catch((error: unknown) => {
+          throw new WorkflowPermanentError(
+            error instanceof Error
+              ? error.message
+              : 'acceptance tests could not be checked',
+          );
+        });
         const scopeHash = hash({
           runId: workflow.runId,
           scope: 'feature-spec-and-dod',

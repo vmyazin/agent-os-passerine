@@ -3018,3 +3018,60 @@ describe('three-step pipeline', () => {
     expect(review?.status).toBe('failed');
   });
 });
+
+describe('acceptance tests are checked before the approval', () => {
+  it('stops the run before an operator is asked to approve tests that cannot parse', async () => {
+    const f = await fixture();
+    const approvals: unknown[] = [];
+    const result = await createDurableFeatureWorkflow({
+      repository: f.repository,
+      checkpoints: new InMemoryWorkflowCheckpointStore(),
+      artifacts: f.artifacts,
+      runtime: f.runtime,
+      approval: {
+        create: async (request: unknown) => {
+          approvals.push(request);
+          return { id: 'waitpoint-never' };
+        },
+        wait: async () => ({ status: 'completed' as const }),
+      },
+      roles,
+      clock: () => now,
+      priceUsage: () => 100,
+      resolveTestCommand: () => 'pnpm test',
+      checkAcceptanceTests: async () => {
+        throw new Error(
+          'the specification wrote 1 acceptance test that cannot be parsed, so it would fail every implementation: test/acceptance/x.test.mjs: SyntaxError',
+        );
+      },
+      verifier: {
+        verify: async () => ({
+          passed: true,
+          evidenceDigest: f.verificationMeta.digest,
+          evidenceArtifact: f.verificationMeta,
+        }),
+      },
+      publicationAuthority: { authorize: async () => ({}) },
+      publisher: {
+        publish: async () => ({
+          status: 'succeeded' as const,
+          draft: true,
+          pullRequestUrl: 'https://github.test/pr/1',
+        }),
+      },
+    }).run(input);
+
+    expect(result.status).toBe('failed');
+    expect(result.reason).toContain('cannot be parsed');
+    // The point of checking here: no approval was ever created, so the
+    // operator was not asked to bless a Definition of Done that could not
+    // have been met, and no implementation was paid for.
+    expect(approvals).toHaveLength(0);
+    const stepKeys = (
+      await f.repository.listStepRuns(persistenceId('run', 'run-1'), {
+        limit: 50,
+      })
+    ).map((step) => step.stepKey);
+    expect(stepKeys).not.toContain('implementation');
+  });
+});
