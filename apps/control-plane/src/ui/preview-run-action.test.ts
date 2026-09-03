@@ -68,3 +68,44 @@ describe('PreviewRunAction root-path guidance', () => {
     expect(markup).toContain('href="http://localhost:58284/health"');
   });
 });
+
+describe('action glyphs', () => {
+  it('puts a glyph beside each control without replacing its label', () => {
+    const start = renderToStaticMarkup(
+      createElement(PreviewRunAction, {
+        runId: 'run-1',
+        initialPreview: null,
+      }),
+    );
+    expect(start).toContain('icon icon-play');
+    expect(start).toContain('Start preview');
+
+    const running = renderToStaticMarkup(
+      createElement(PreviewRunAction, {
+        runId: 'run-1',
+        initialPreview: {
+          status: 'running',
+          url: 'http://localhost:5000',
+          script: 'start',
+        },
+      }),
+    );
+    expect(running).toContain('icon icon-square');
+    expect(running).toContain('Stop');
+    // The preview URL leaves this page, and says so.
+    expect(running).toContain('icon icon-external-link');
+  });
+
+  it('keeps every glyph out of the accessibility tree', () => {
+    const markup = renderToStaticMarkup(
+      createElement(PreviewRunAction, {
+        runId: 'run-1',
+        initialPreview: null,
+      }),
+    );
+    // Each control is already named by its visible label.
+    const glyphs = markup.match(/class="icon icon-[a-z-]+[^"]*"/g) ?? [];
+    expect(glyphs.length).toBeGreaterThan(0);
+    expect(markup).not.toContain('role="img"');
+  });
+});

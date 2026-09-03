@@ -3,6 +3,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+import {
+  BanIcon,
+  CheckIcon,
+  ExternalLinkIcon,
+  PlayIcon,
+  RotateCcwIcon,
+  SquareIcon,
+  XIcon,
+} from './icons';
 import type { InboxAttentionChangedDetail } from './inbox-count-client';
 import { completeInboxMutation } from './inbox-mutation-success';
 
@@ -83,6 +92,7 @@ export function ApprovalActions({
           disabled={pending}
           type="button"
         >
+          <CheckIcon className="button-icon" />
           Approve request
         </button>
         <button
@@ -93,6 +103,7 @@ export function ApprovalActions({
           }
           type="button"
         >
+          <XIcon className="button-icon" />
           Reject request
         </button>
       </div>
@@ -222,6 +233,7 @@ export function ResumeRunAction({
     <div className="action-stack">
       <div className="button-row">
         <button disabled={pending} onClick={() => void resume()} type="button">
+          <RotateCcwIcon className="button-icon" />
           {pending ? `${label}…` : label}
         </button>
       </div>
@@ -345,6 +357,7 @@ export function PreviewRunAction({
             onClick={() => void start()}
             type="button"
           >
+            <PlayIcon className="button-icon" />
             {pending ? 'Starting…' : 'Start preview'}
           </button>
         </div>
@@ -354,6 +367,7 @@ export function PreviewRunAction({
             <p>
               <a href={preview.url} rel="noreferrer" target="_blank">
                 {preview.url}
+                <ExternalLinkIcon className="link-icon" />
               </a>
               {preview.script === undefined ? null : (
                 <>
@@ -401,6 +415,7 @@ export function PreviewRunAction({
               onClick={() => void stop()}
               type="button"
             >
+              <SquareIcon className="button-icon" />
               {pending ? 'Stopping…' : 'Stop'}
             </button>
           </div>
@@ -452,6 +467,7 @@ export function RestartRunAction({ runId }: { readonly runId: string }) {
               onClick={() => void start()}
               type="button"
             >
+              <PlayIcon className="button-icon" />
               {pending ? 'Starting…' : 'Confirm, start again'}
             </button>
             <button
@@ -505,6 +521,7 @@ export function CancelRunAction({
               onClick={() => void mutate(`/api/runs/${runId}/cancel`, {})}
               type="button"
             >
+              <BanIcon className="button-icon" />
               {pending ? 'Cancelling…' : 'Confirm cancel'}
             </button>
             <button
