@@ -77,7 +77,14 @@ export function RunStepTimeline({
             );
       return createElement(
         'li',
-        { key: step.id },
+        {
+          key: step.id,
+          // The rail animates only for the step actually doing work, so the
+          // one thing moving on the page is the thing that is moving.
+          ...(step.status === 'running'
+            ? { className: 'run-step-item-running' }
+            : {}),
+        },
         createElement(
           'details',
           { className: 'run-step' },
