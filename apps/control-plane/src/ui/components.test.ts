@@ -116,7 +116,9 @@ describe('control-plane UI components', () => {
     expect(markup).toContain('<summary class="run-step-summary">');
     expect(markup).toContain('Waiting on response');
     expect(markup).toContain('Attempt 1');
-    expect(markup).toContain('19:00:00 UTC');
+    // The clock renders in the operator's zone and does not name it.
+    expect(markup).toContain('19:00:00');
+    expect(markup).not.toContain('19:00:00 UTC');
     expect(markup).toContain('aria-label="specification activity"');
   });
 });

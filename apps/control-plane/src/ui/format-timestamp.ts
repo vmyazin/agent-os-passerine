@@ -1,4 +1,9 @@
 // src/ui/format-timestamp.ts
+//
+// Times render in the operator's own zone and do not name it. The zone is a
+// per-operator setting they chose, so repeating "GMT-3" on every row states
+// something already true of every timestamp on the page and crowds out the
+// time itself. The conversion still happens; only the label is gone.
 import { DEFAULT_TIME_ZONE } from '@agentos/core';
 
 function parsedDate(value: string): Date | undefined {
@@ -33,7 +38,6 @@ export function formatDisplayDateTime(
     minute: '2-digit',
     month: 'short',
     timeZone,
-    timeZoneName: 'short',
     year: 'numeric',
   }).format(parsed);
 }
@@ -51,6 +55,5 @@ export function formatDisplayTime(
     minute: '2-digit',
     second: '2-digit',
     timeZone,
-    timeZoneName: 'short',
   }).format(parsed);
 }
