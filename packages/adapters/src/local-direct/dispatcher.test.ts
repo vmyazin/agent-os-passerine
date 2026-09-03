@@ -769,7 +769,6 @@ describe('recovery and live executions', () => {
     // live run sitting in `running`, reopens it, and pays for the in-flight
     // step again. It happened five times in four minutes on 2026-09-03.
     const repository = new InMemoryDomainRepository();
-    const checkpoints = new InMemoryWorkflowCheckpointStore();
     const dispatch = vi.fn(async () => undefined);
     const released: string[] = [];
     const result = await recoverLocalDirectRuns({
