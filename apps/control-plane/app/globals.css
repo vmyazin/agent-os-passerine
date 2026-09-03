@@ -706,6 +706,21 @@ textarea:focus-visible {
   outline-offset: 3px;
 }
 
+/* Matches the collapsed request above it, so the page has one shape for
+   "there is more here if you want it". */
+.run-provenance > summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  font-size: 0.92rem;
+  padding: 0.15rem 0;
+}
+.run-provenance > summary:hover {
+  color: var(--ink-secondary);
+}
+.run-provenance > .metadata {
+  margin-top: 0.6rem;
+}
+
 .metadata {
   display: grid;
   gap: 0.6rem;

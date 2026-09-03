@@ -230,26 +230,32 @@ export default async function RunPage({
       {awaitingDispatch ? (
         <ResumeRunAction runId={run.id} label="Retry" />
       ) : null}
-      <dl className="metadata">
-        <div>
-          <dt>Repository SHA</dt>
-          <dd>
-            <code>{run.repositorySha || 'Not recorded'}</code>
-          </dd>
-        </div>
-        <div>
-          <dt>Config digest</dt>
-          <dd>
-            <code>{run.configDigest || 'Not recorded'}</code>
-          </dd>
-        </div>
-        <div>
-          <dt>Policy digest</dt>
-          <dd>
-            <code>{run.policyDigest || 'Not recorded'}</code>
-          </dd>
-        </div>
-      </dl>
+      {/* Progressive disclosure for machine-oriented evidence: these pin what
+          the run was bound to and are read when something needs proving, not
+          while watching it work. */}
+      <details className="run-provenance">
+        <summary>Provenance</summary>
+        <dl className="metadata">
+          <div>
+            <dt>Repository SHA</dt>
+            <dd>
+              <code>{run.repositorySha || 'Not recorded'}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Config digest</dt>
+            <dd>
+              <code>{run.configDigest || 'Not recorded'}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Policy digest</dt>
+            <dd>
+              <code>{run.policyDigest || 'Not recorded'}</code>
+            </dd>
+          </div>
+        </dl>
+      </details>
       {run.goal === undefined ? null : (
         <section aria-labelledby="goal-title">
           <h2 id="goal-title">Bounded goal progress</h2>
